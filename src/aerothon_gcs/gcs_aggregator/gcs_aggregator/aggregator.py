@@ -17,12 +17,12 @@ import threading
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data, QoSProfile
-from mavros_msgs.msg import State
+from mavros_msgs.msg import State, EstimatorStatus, WaypointList
 from mavros_msgs.srv import CommandBool, SetMode, CommandTOL
 from sensor_msgs.msg import BatteryState, NavSatFix, LaserScan
 from geometry_msgs.msg import PoseStamped, Vector3, TwistStamped
 from nav_msgs.msg import OccupancyGrid
-from std_msgs.msg import String, Bool, Float32, Float64
+from std_msgs.msg import String, Bool, Float32, Float64, UInt32
 
 import websockets
 
@@ -63,13 +63,34 @@ class Aggregator(Node):
         self.create_subscription(String, "/percep/qr/decoded", self._on_qr, q)
         self.create_subscription(Bool, "/percep/qr/matched", self._on_match, q)
         self.create_subscription(Vector3, "/percep/banner", self._on_banner, q)
+        self.create_subscription(String, "/percep/qr/detail",
+                                 self._on_qr_detail, q)
+        self.create_subscription(String, "/percep/banner/detail",
+                                 self._on_banner_detail, q)
         self.create_subscription(Bool, "/percep/redzone", self._on_red, q)
+        self.create_subscription(String, "/percep/redzone/detail",
+                                 self._on_red_detail, q)
         self.create_subscription(Vector3, "/avoidance/status", self._on_avoid, q)
         self.create_subscription(Bool, "/mission_ready", self._on_ready, q)
+        # The Bool alone cannot tell an operator WHY arming is blocked. The
+        # interlock evaluates eleven items with a measured value and a reason
+        # each (gcs_aggregator.readiness); the panel gets all of it.
+        self.create_subscription(String, "/mission_ready/detail",
+                                 self._on_ready_detail, q)
         self.create_subscription(String, "/mission/state", self._on_mission_state, q)
+        # The terminal outcome, including the delivery accuracy as a NUMBER.
+        self.create_subscription(String, "/mission/result", self._on_mission_result, q)
         # Real slam_toolbox occupancy grid (throttled + downsampled to the GCS).
         self._last_map = 0.0
         self.create_subscription(OccupancyGrid, "/map", self._on_map, 1)
+        self.create_subscription(EstimatorStatus, "/mavros/estimator_status",
+                                 self._on_estimator, qos_sensor)
+        self.create_subscription(UInt32, "/mavros/global_position/raw/satellites",
+                                 self._on_sats, qos_sensor)
+        self.create_subscription(WaypointList, "/mavros/geofence/fences",
+                                 self._on_fences, q)
+        self.create_subscription(String, "/winch/status", self._on_winch, q)
+        self._seen = {}
 
         self.pub_abort = self.create_publisher(Bool, "/mission/abort", q)
         self.pub_start = self.create_publisher(Bool, "/mission/start", q)
@@ -88,24 +109,197 @@ class Aggregator(Node):
     @staticmethod
     def _blank_state():
         return {
-            "mission": {"selected": None, "state": "idle", "armed": False, "mode": "", "elapsed": 0.0},
+            "mission": {"selected": None, "state": "idle", "armed": False,
+                        "mode": "", "elapsed": 0.0,
+                        # 15 rulebook marks. Measured at release from the QR
+                        # offset and the altitude; None until it happens.
+                        "delivery_offset_m": None, "landing_precision": None,
+                        "result": None, "result_reason": None},
             "flight": {"x": 0, "y": 0, "alt": 0, "gs": 0,
                        "roll_deg": 0, "pitch_deg": 0, "yaw_deg": 0},
-            "gps": {"lat": 0, "lon": 0, "sats": 0, "fix": "NO"},
+            # sats is None until a real count arrives; the GCS must render
+            # "UNKNOWN", not a confident zero.
+            "gps": {"lat": 0, "lon": 0, "sats": None, "fix": "NO"},
             "power": {"volt": 0, "pct": 0},
             "nav": {"front_m": 0, "centering_err": 0, "cmd_vx": 0},
+            # redzone_status starts UNKNOWN rather than CLEAR: "no detection
+            # yet" and "looked and saw clear ground" are not the same claim.
             "percep": {"start_qr": "", "target_match": False, "banner": False,
-                       "redzone_visible": False},
-            "safety": {"ready": False, "fcu_connected": False, "ekf": True,
-                       "geofence": "INSIDE", "battery_ok": True},
+                       "redzone_visible": False, "redzone_status": "UNKNOWN",
+                       "redzone_reason": "", "redzone_exclusions": [],
+                       "redzone_area_m2": 0.0},
+            # ekf and geofence were hardcoded True / "INSIDE" and never
+            # updated, so the panel asserted the two things an operator most
+            # needs to trust. They now start UNKNOWN and only ever show what
+            # has actually been measured.
+            "safety": {"ready": False, "fcu_connected": False,
+                       "ekf": "UNKNOWN", "ekf_flags": {},
+                       "geofence": "UNKNOWN", "fence_count": None,
+                       "battery_ok": True,
+                       "stale": [],
+                       "ready_items": [], "ready_reasons": [],
+                       "ready_waived": []},
             "checklist": {k: False for k in
                           ("takeoff", "start_qr", "banner", "corridor",
                            "target_id", "drop", "return", "land")},
             "scan": {"yaw_deg": 0, "ranges": []},
+            # Everything scanned, decoded, identified or refused, in the order
+            # it first happened. The operator asked for "a list of everything
+            # that has been detected/decoded", with matches tagged; rejections
+            # are kept too, because a marker the stack REFUSED is the thing an
+            # operator most needs to see and the thing a log hides best.
+            "scans": [],
             "gimbal": {"pitch_deg": 0.0},
         }
 
+    STALE_AFTER_S = 5.0
+
+    # Long enough to hold a whole run's distinct observations, short enough
+    # that the panel stays readable and the websocket payload stays small.
+    MAX_SCANS = 120
+
+    # ------------------------------------------------------------------ #
+    # Scan ledger
+    # ------------------------------------------------------------------ #
+    def _record_scan(self, kind, payload="", matched=False, reason="",
+                     status="", via=""):
+        """Add or update one row. De-duplicated HERE, not in the browser.
+
+        The identity of a row is what it says, not when it was said: the same
+        marker read on two hundred consecutive frames is one observation seen
+        two hundred times, and that count is itself evidence -- it separates a
+        solid read from a single-frame blip.
+        """
+        if not payload and not reason:
+            return                        # a frame with nothing in it
+        key = "|".join((kind, payload, "" if payload else reason))
+        rows = self.state["scans"]
+        for e in rows:
+            if e["key"] == key:
+                e["count"] += 1
+                e["t_last"] = round(self._uptime(), 1)
+                if via:
+                    e["via"] = via
+                # A match is never withdrawn by a later frame: losing the
+                # marker for one frame does not un-match the mission.
+                if matched and not e["matched"]:
+                    e["matched"] = True
+                    e["status"] = "MATCHED"
+                return
+        self._scan_seq = getattr(self, "_scan_seq", 0) + 1
+        rows.append({
+            "key": key,
+            "seq": self._scan_seq,
+            "kind": kind,
+            "payload": payload,
+            "matched": bool(matched),
+            "status": status or ("MATCHED" if matched else
+                                 ("DECODED" if payload else "REJECTED")),
+            "reason": reason,
+            "via": via,
+            "stage": self.state["mission"].get("state", ""),
+            "t": round(self._uptime(), 1),
+            "t_last": round(self._uptime(), 1),
+            "count": 1,
+        })
+        if len(rows) > self.MAX_SCANS:
+            # Drop the oldest UNMATCHED row. The matched one is the single row
+            # of the whole run that the score depends on; a long tail of pad
+            # reads must not push it out of the list.
+            for i, e in enumerate(rows):
+                if not e["matched"]:
+                    rows.pop(i)
+                    break
+            else:
+                rows.pop(0)
+
+    def _uptime(self):
+        return float(self.state["mission"].get("elapsed", 0.0) or 0.0)
+
+    def _on_qr_detail(self, m):
+        try:
+            d = json.loads(m.data)
+        except (ValueError, TypeError):
+            return
+        accepted = str(d.get("accepted") or "")
+        if accepted:
+            self._record_scan("qr", payload=accepted,
+                              matched=bool(d.get("matched")))
+        for r in (d.get("rejected") or []):
+            reason = r.get("reason") if isinstance(r, dict) else str(r)
+            if reason:
+                self._record_scan("qr", reason=str(reason))
+
+    def _on_banner_detail(self, m):
+        try:
+            d = json.loads(m.data)
+        except (ValueError, TypeError):
+            return
+        if d.get("identified"):
+            self._record_scan("banner", payload=str(d.get("text") or "BANNER"),
+                              status="IDENTIFIED",
+                              via=str(d.get("lettering_path") or ""))
+        elif d.get("reason"):
+            self._record_scan("banner", reason=str(d.get("reason")))
+
+    def _staleness(self):
+        """Which measured safety fields have gone quiet, or never arrived."""
+        now = time.time()
+        stale = []
+        for key in ("ekf", "sats", "fence"):
+            t = self._seen.get(key)
+            if t is None:
+                stale.append(f"{key}:never")
+            elif (now - t) > self.STALE_AFTER_S:
+                stale.append(f"{key}:{now - t:.0f}s")
+        return stale
+
     # ---- subscription callbacks ---- #
+    def _mark(self, key):
+        self._seen[key] = time.time()
+
+    def _on_estimator(self, m):
+        """Real EKF health from MAVROS, replacing a hardcoded True.
+
+        ArduPilot reports per-axis estimator flags; treat the estimator as
+        healthy only when the states guidance depends on are all good.
+        """
+        flags = {
+            "attitude": bool(m.attitude_status_flag),
+            "velocity_horiz": bool(m.velocity_horiz_status_flag),
+            "pos_horiz_rel": bool(m.pos_horiz_rel_status_flag),
+            "pos_horiz_abs": bool(m.pos_horiz_abs_status_flag),
+            "pos_vert_abs": bool(m.pos_vert_abs_status_flag),
+            "const_pos_mode": bool(m.const_pos_mode_status_flag),
+        }
+        required = ("attitude", "velocity_horiz", "pos_horiz_abs", "pos_vert_abs")
+        healthy = all(flags[k] for k in required) and not flags["const_pos_mode"]
+        self.state["safety"]["ekf"] = "OK" if healthy else "DEGRADED"
+        self.state["safety"]["ekf_flags"] = flags
+        self._mark("ekf")
+
+    def _on_sats(self, m):
+        self.state["gps"]["sats"] = int(m.data)
+        self._mark("sats")
+
+    def _on_fences(self, m):
+        """What MAVROS can actually tell us about the fence.
+
+        It publishes the loaded fence LIST. It does not publish breach state --
+        ArduPilot's FENCE_STATUS is not exposed -- so claiming "INSIDE" was
+        never measurable. Report what is knowable: whether a fence is loaded.
+        """
+        n = len(m.waypoints)
+        self.state["safety"]["fence_count"] = n
+        self.state["safety"]["geofence"] = "LOADED" if n else "NONE"
+        self._mark("fence")
+
+    def _on_winch(self, m):
+        try:
+            self.state["winch"] = json.loads(m.data)
+        except json.JSONDecodeError:
+            pass
+        self._mark("winch")
     def _on_state(self, m):
         self.state["safety"]["fcu_connected"] = bool(m.connected)
         if m.armed and self._arm_t is None:
@@ -167,12 +361,56 @@ class Aggregator(Node):
     def _on_red(self, m):
         self.state["percep"]["redzone_visible"] = m.data
 
+    def _on_red_detail(self, m):
+        """NOT_VISIBLE / CLEAR / RED, plus the georeferenced exclusions.
+
+        `redzone_visible: false` collapsed two very different situations: the
+        camera is looking at clear ground, and the camera cannot see the
+        ground at all. Only one of those is reassuring.
+        """
+        try:
+            d = json.loads(m.data)
+        except (ValueError, TypeError):
+            return
+        p = self.state["percep"]
+        p["redzone_status"] = d.get("status", "UNKNOWN")
+        p["redzone_reason"] = d.get("reason", "")
+        p["redzone_exclusions"] = d.get("exclusions", [])
+        p["redzone_area_m2"] = round(float(d.get("confirmed_area_m2", 0.0)), 1)
+
     def _on_avoid(self, m):
         self.state["nav"] = {"front_m": round(m.x, 2),
                              "centering_err": round(m.y, 2), "cmd_vx": round(m.z, 2)}
 
     def _on_ready(self, m):
         self.state["safety"]["ready"] = m.data
+
+    def _on_ready_detail(self, m):
+        """The eleven interlock items, each with its measured value + reason.
+
+        An operator looking at a blocked ARM button needs to know which check
+        is holding and what it measured, not just that something is.
+        """
+        try:
+            d = json.loads(m.data)
+        except (ValueError, TypeError):
+            return
+        s = self.state["safety"]
+        s["ready"] = bool(d.get("ready", False))
+        s["ready_items"] = d.get("items", [])
+        s["ready_reasons"] = d.get("reasons", [])
+        s["ready_waived"] = d.get("waived", [])
+
+    def _on_mission_result(self, m):
+        try:
+            d = json.loads(m.data)
+        except (ValueError, TypeError):
+            return
+        mis = self.state["mission"]
+        mis["result"] = d.get("state")
+        mis["result_reason"] = d.get("reason")
+        mis["delivery_offset_m"] = d.get("delivery_offset_m")
+        mis["landing_precision"] = d.get("landing_precision")
 
     def _on_mission_state(self, m):
         self.state["mission"]["state"] = m.data
@@ -224,6 +462,9 @@ class Aggregator(Node):
         return json.dumps({"v": SCHEMA_VERSION, "kind": kind, "t": time.time(), "data": data})
 
     def _publish_snapshot(self):
+        # Refresh staleness on every snapshot so a field that stops updating
+        # is visibly stale rather than frozen at its last confident value.
+        self.state["safety"]["stale"] = self._staleness()
         self._broadcast(self._env("telemetry", self.state))
 
     def _broadcast(self, payload):
@@ -294,6 +535,12 @@ class Aggregator(Node):
             elif cmd == "start_mission":
                 self.state["mission"]["selected"] = "M2"
                 self.state["mission"]["state"] = "STARTING"
+                # A new run gets a clean ledger. Carrying the previous run's
+                # observations forward would put two flights' markers in one
+                # list with nothing to say which was which -- and the operator
+                # reads this panel to find out what THIS flight saw.
+                self.state["scans"] = []
+                self._scan_seq = 0
                 self.pub_start.publish(Bool(data=True))
             elif cmd == "set_target":
                 self.pub_target.publish(String(data=args.get("target", "")))

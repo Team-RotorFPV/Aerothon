@@ -45,6 +45,16 @@ def generate_launch_description():
         DeclareLaunchArgument('target', default_value='', description='Pre-assigned target QR (empty=dynamic)'),
         DeclareLaunchArgument('rviz', default_value='true', description='Launch RViz 2 with SLAM/TF displays'),
         DeclareLaunchArgument('slam', default_value='true', description='Launch async slam_toolbox 2D SLAM node'),
+        DeclareLaunchArgument('stream_rate_keeper', default_value='true',
+                              description='Continuously re-assert MAVLink stream '
+                                          'rates (SITL/MAVProxy workaround; see '
+                                          'VERIFICATION.md 2.2)'),
+        DeclareLaunchArgument('winch_backend', default_value='sim',
+                              description='winch_ctrl backend: sim or mavlink '
+                                          '(MAV_CMD_DO_WINCH)'),
+        DeclareLaunchArgument('camera_backend', default_value='sim',
+                              description='camera_ctrl backend: sim (Gazebo joint) '
+                                          'or mavlink (MAV_CMD_DO_MOUNT_CONTROL)'),
     ]
 
     # 1. Robot State Publisher (publishes TF tree and robot_description)
@@ -74,9 +84,67 @@ def generate_launch_description():
         parameters=[{'image_topic': image_topic, 'use_sim_time': use_sim}],
     )
 
+    # One camera feed with every detector's findings drawn on it. The GCS
+    # showed /percep/qr/annotated and nothing else, so during banner alignment
+    # the operator watched a nadir QR view with no banner box on it.
+    overlay = Node(
+        package='perception_overlay', executable='overlay_node', output='screen',
+        parameters=[{'image_topic': image_topic, 'use_sim_time': use_sim}],
+    )
+
     redzone = Node(
         package='perception_redzone', executable='redzone_node', output='screen',
         parameters=[{'image_topic': image_topic, 'use_sim_time': use_sim}],
+    )
+
+    # 3a. Hold MAVLink stream rates where the guidance loop needs them.
+    #
+    # Without it /mavros/local_position/pose decays to ~2 Hz in SITL because
+    # MAVProxy re-requests its own lower rates on the same channel
+    # (VERIFICATION.md 2.2), which is not a basis for closed-loop control.
+    #
+    # HISTORY, because this was got wrong twice. This node was disabled after
+    # two launches carrying it ended with mavros_node and robot_state_publisher
+    # aborting. That inference was wrong on both counts: the same aborts occur
+    # without this node, and the abort message is
+    #
+    #   signal_handler(SIGINT/SIGTERM)
+    #   what(): failed to initialize rcl node: the given context is not valid
+    #
+    # i.e. the process was SIGTERMed while still initialising and then tried to
+    # finish constructing nodes on a shut-down context. It is a symptom of the
+    # stack being torn down during start-up, not a cause. Two intervening
+    # hypotheses (stale DDS shared memory, open discovery range) were also
+    # wrong. The node itself did have a real bug — it leaked one pending future
+    # per command per cycle — and that is fixed.
+    #
+    # The remaining SITL wart is MAVProxy competing for stream rates at all;
+    # removing it from the simulation is tracked for Phase 11.
+    stream_rates = Node(
+        package='mission_bringup', executable='stream_rate_keeper', output='screen',
+        parameters=[{'use_sim_time': use_sim}],
+        condition=IfCondition(LaunchConfiguration('stream_rate_keeper')),
+    )
+
+    # 3b. Camera pointing as commanded, read-back-confirmed state (Phase 2).
+    # Perception stages gate on /camera/pose_state.settled, so this must be
+    # running for the mission to leave the start-QR scan.
+    # NOTE: the backend cannot be derived from `use_sim` with a Python
+    # conditional — LaunchConfiguration is an object, so `'sim' if use_sim
+    # else 'mavlink'` is always truthy and would silently select the Gazebo
+    # backend on real hardware. It is an explicit argument instead.
+    camera = Node(
+        package='camera_ctrl', executable='camera_ctrl_node', output='screen',
+        parameters=[{'backend': LaunchConfiguration('camera_backend'),
+                     'use_sim_time': use_sim}],
+    )
+
+    # 3c. Winch controller. Until this existed /winch/cmd had two publishers
+    # and zero subscribers, and WinchDrop "delivered" on a fixed timer.
+    winch = Node(
+        package='winch_ctrl', executable='winch_node', output='screen',
+        parameters=[{'backend': LaunchConfiguration('winch_backend'),
+                     'use_sim_time': use_sim}],
     )
 
     # 4. Reactive Obstacle Avoidance Controller
@@ -165,7 +233,7 @@ def generate_launch_description():
     )
 
     return LaunchDescription(args + [
-        rsp_node, mavros, qr, banner, redzone,
+        rsp_node, mavros, qr, banner, redzone, overlay, camera, winch, stream_rates,
         controller, mission, readiness, aggregator, video,
         # The Gazebo odometry bridge needs a few seconds to establish odom TF.
         # Activating slam_toolbox before that point leaves its initial scan

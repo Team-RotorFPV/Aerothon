@@ -18,18 +18,23 @@ These are documented in the source as "declare as params". They are **not** decl
 | # | Constant | Value | What it assumes | Replaced by | Phase |
 |---|---|---|---|---|---|
 | A1 | `takeoff_alt` | 5.0 | Rulebook start altitude | Legitimate (rulebook datum) — keep as a **declared param**, not a dict entry | P0 note / P10 |
-| A2 | `search_alt` | 10.0 | QR readable from 10 m | **Measured** max reliable QR stand-off from the P1 decode-rate table | P1 → P6 |
+| A2 | `search_alt` | 10.0 | QR readable from 10 m | ✅ **CLOSED (P6).** `search_planner.plan_search()` derives sweep and decode altitudes from camera geometry + the measured px/module floor. **MEASURED, and the original assumption was false.** `docs/QR_DECODE_ENVELOPE.md`: reliable decoding needs ≈5.3 px/module, giving 7.0 m for the 2.2 m *simulated* pad and only **1.3 m** for a realistic 0.4 m marker at 640×480 (5.4 m at 4K). A single-altitude sweep cannot both cover the zone and decode. P6 must sweep high for candidate pads and descend to decode | ✅ P1 measured → P6 implements |
 | A3 | `drop_alt` | 5.0 | Winch payout length | Winch payout capability + measured ground-detect margin | P8 |
-| A4 | `scan_pose` | (0,0,5) | Start QR is directly under the spawn point | Nadir camera + QR search behaviour; hold position is *own* takeoff origin, not a constant | P2 → P3 |
-| A5 | `corridor_entry` | (5,0,3) | Corridor mouth is 5 m east of home | **Green banner bearing** from `perception_banner` + banner alignment controller | P4 |
-| A6 | `corridor_exit_x` | 15.5 | Corridor is 15.5 m long, aligned to +X | **Lidar wall-line termination** — corridor complete when the two wall lines end / width opens | P5 |
-| A7 | `zone_entry` | (18,0,3) | Delivery zone starts 18 m east | Observed open area after corridor exit | P5 → P6 |
-| A8 | `zone` | (20,52,−12,12) | Zone is a known 32×24 m rectangle at a known offset | **Observed zone extent** from lidar/camera; lane plan generated at runtime | P6 |
-| A9 | `corridor_return_entry` | (15,0,3,π) | Return mouth is at x=15, heading π | Same wall-line estimator, reversed | P9 |
-| A10 | `corridor_return_exit_x` | 4.5 | Return corridor ends at x=4.5 | Wall-line termination (as A6) | P9 |
+| A4 | `scan_pose` | (0,0,5) | Start QR is directly under the spawn point | ✅ **CLOSED (P3).** FindStartQR descend-and-retry, CenterOnQR visual centring, then ScanStartQR holds where centring left it | ✅ done |
+| A5 | `corridor_entry` | (5,0,3) | Corridor mouth is 5 m east of home | ✅ **CLOSED (P4).** `AlignToBanner` yaws to the identified banner; that heading is the corridor. Fails closed if no banner is identified | ✅ done |
+| A6 | `corridor_exit_x` | 15.5 | Corridor is 15.5 m long, aligned to +X | ✅ **CLOSED (P5).** Navigator reports `corridor_exited` when both side clearances exceed `corridor_open_m` for N ticks. Verified in the first complete end-to-end flight | ✅ done |
+| A7 | ~~`zone_entry`~~ | **GONE** | — | `ObserveZone`: lidar depth/width at the corridor mouth | ✅ P6 |
+| A7b | observed window treated as the whole zone | — | **The lidar's range is not the zone's size.** 12 m observed vs a 40 m zone, so only pad C of five was ever reachable and no red zone was | ✅ **CLOSED (P7).** `LawnmowerSearch` advances the frontier strip by strip on an endurance budget; fence covers the envelope |
+| A8 | ~~`zone`~~ | **GONE** | — | Same observation, rotated by the measured exit heading; implausible extents fail closed | ✅ P6 |
+| A9 | ~~`corridor_return_entry`~~ | **GONE** | — | `ReturnToCorridorMouth`: the recorded exit pose, reversed and wrapped | ✅ P9 |
+| A10 | `corridor_return_exit_x` | 4.5 | Return corridor ends at x=4.5 | ✅ **CLOSED (P5).** Same detector. This constant was not merely inelegant — it was unreachable, and stalled three live runs | ✅ done |
 | A11 | `home` | (0,0,5) | Home is the local-ENU origin | Legitimate — GPS home position is the one valid global reference. Should read **`/mavros/home_position`**, not assume (0,0) | P9 |
 
-**A1 and A11 are the only two that survive** as genuine constants, and both must become declared parameters sourced from the FC rather than literals.
+**A1 is the only one that survives** as a genuine constant. A11 now reads
+`/mavros/home_position/home` from the flight controller. Every value in the
+mission is a declared ROS parameter — `declare_mission_params()` — and the
+ones perception replaced were deleted outright rather than left as dead
+parameters.
 
 ---
 
@@ -39,10 +44,10 @@ File: `mission_tree.py`, `LawnmowerSearch`
 
 | # | Constant | Value | What it assumes | Replaced by | Phase |
 |---|---|---|---|---|---|
-| B1 | `spacing` | 6.0 (signature default; `goal.md` Q9 says 5.0 — **they disagree**) | A lane width that happens to give camera coverage | **Derived**: camera HFOV × altitude × required overlap factor. Must be computed, and the coverage proven | P6 |
+| B1 | `spacing` | 6.0 vs Q9's 5.0 | A lane width that happens to give camera coverage | ✅ **CLOSED (P6).** Derived from swath width and overlap; coverage proven by sampling, and the proof is capable of failing | ✅ done |
 | B2 | lawnmower rectangle | from A8 | Zone is axis-aligned and rectangular | Observed zone polygon | P6 |
 | B3 | waypoint tolerance | 0.8 | — | Keep, but declare as a param | P6 |
-| B4 | red-zone handling | **none** | Search may fly straight through a penalty zone | Exclusion polygons subtracted from the lane plan | P7 |
+| B4 | red-zone handling | **none** | Search may fly straight through a penalty zone | ✅ **CLOSED (P7).** Exclusions subtracted from the lane plan, re-read DURING the sweep (they are invisible from the corridor exit where they used to be sampled), bounded re-plans. First live confirmation run 13 | ✅ done |
 
 Note the spec conflict in B1: the code default (6.0 m) does not match `goal.md` Q9 (5.0 m). Neither is derived from the camera geometry. Both are wrong until computed.
 
@@ -54,8 +59,8 @@ File: `mission_tree.py`, `WinchDrop`
 
 | # | Constant | Value | What it assumes | Replaced by | Phase |
 |---|---|---|---|---|---|
-| C1 | `self._t > 20` | 20 ticks (~4 s at 5 Hz) | The payload reaches the ground in exactly 4 seconds | **Line-slack / current-drop ground detection** + encoder payout cap | P8 |
-| C2 | phase-2 `stow` | fire-and-forget | Stow always succeeds | `/winch/status` completion feedback | P8 |
+| C1 | `self._t > 20` | ✅ **CLOSED** | WinchDrop waits on `/winch/status` reporting AT_GROUND; no fixed timer | ✅ done |
+| C2 | phase-2 `stow` | ✅ **CLOSED** | stow completion observed via `/winch/status` | ✅ done |
 | C3 | drop tolerance | 0.5 / 0.6 | — | Declared param, tied to measured delivery accuracy | P8 |
 
 C1 is the worst of these: a fixed tick delay standing in for the actual physical event the rulebook scores.
@@ -75,9 +80,9 @@ These *are* properly declared as ROS parameters — credit where due. But severa
 | D3 | `side_fov_deg` | 30.0 | Sensor geometry — legitimate | — |
 | D4 | `brake_dist` | 2.5 m | Vehicle stopping distance — legitimate | — |
 | D5 | `stop_dist` | 0.8 m | Matches `goal.md` Q8 safety bubble — legitimate, but currently a *stop* threshold, not a *repulsive* constraint | P5 |
-| D6 | `k_center` | 0.6 | **Assumes a symmetric two-wall corridor exists.** Meaningless in open ground and actively harmful near a single wall | P5 |
+| D6 | `k_center` | ✅ **CLOSED (P5)** | replaced by follow-the-gap; no assumption of two symmetric walls | ✅ done |
 | D7 | `max_lateral` | 0.6 m/s | Vehicle limit — legitimate | — |
-| D8 | Q21 filter chain | **absent** | No angular arm masking, no 0.15–12 m range clamp, no outlier removal | P5 |
+| D8 | Q21 filter chain | ✅ **CLOSED (P5)** | angular masking, range clamp and median outlier filter implemented and tested | ✅ done |
 
 D6 is the structural problem: the controller's whole model is "I am between two walls." That is an arena assumption wearing a parameter's clothing.
 
@@ -89,12 +94,13 @@ Files: `src/aerothon_perception/*`
 
 | # | Param | Value | Assessment | Phase |
 |---|---|---|---|---|
-| E1 | `min_area_frac` | 0.02 | Banner blob gate — needs to be **altitude/distance aware**, not a fixed image fraction | P4 |
+| E1 | `min_area_frac` | **derived** | Now computed from the banner's projected pixel area at `max_detect_range_m` for this camera; an explicit fraction still overrides | ✅ closed |
+| E1b | banner IDENTITY range | **undeclared** | `max_detect_range_m` = 25 m gates AREA only. The lettering check decides identity and its range was never derived or stated | ✅ **MEASURED.** 15 px/letter floor (~30 m here); the area gate binds first everywhere in the usable range. `docs/BANNER_IDENTITY_ENVELOPE.md` |
 | E2 | `s_lo` / `v_lo` | 90 / 60 | HSV thresholds tuned by eye against sim rendering; unvalidated against real sunlight | P1 (corpus) |
 | E3 | `target` | `''` | Injected from the start QR — correct design | — |
 | E4 | `process_every` | 1 | CPU decimation — legitimate | — |
-| E5 | banner identity | **none** | Any green rectangle passes. No `AEROTHON` text validation | P4 |
-| E6 | QR confidence | **none** | Single-frame decode accepted; no consecutive-frame debounce, no size plausibility | P3 |
+| E5 | banner identity | ✅ **CLOSED (P4)** | white-lettering structure check; green decoys added to the world so rejection is testable | ✅ done |
+| E6 | QR confidence | ✅ **CLOSED (P3)** | K-consecutive-frame confirmation + altitude-aware size plausibility | ✅ done |
 
 ---
 

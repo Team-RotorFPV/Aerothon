@@ -26,14 +26,14 @@ set +u
 [[ -f "$ROOT/install/setup.bash" ]] && source "$ROOT/install/setup.bash"
 set -u
 
-export PYTHONPATH="$ROOT/src/aerothon_mission/mission_bt:$ROOT/src/aerothon_gcs/gcs_aggregator:${PYTHONPATH:-}"
+export PYTHONPATH="$ROOT/src/aerothon_mission/mission_bt:$ROOT/src/aerothon_gcs/gcs_aggregator:$ROOT/src/aerothon_perception/camera_ctrl:$ROOT/src/aerothon_avoidance/avoidance:$ROOT/src/aerothon_payload/winch_ctrl:$ROOT/src/aerothon_perception/perception_qr:$ROOT/src/aerothon_perception/perception_banner:${PYTHONPATH:-}"
 
 FAILED=0
 section() { printf '\n=== %s ===\n' "$1"; }
 record()  { if [[ "$1" -ne 0 ]]; then FAILED=1; printf '  -> FAILED\n'; else printf '  -> ok\n'; fi; }
 
 section "Python unit tests"
-python3 -m pytest sim/ -q
+python3 -m pytest sim/ tests/ -q
 record $?
 
 section "Python syntax (all mission/perception/GCS/sim sources)"

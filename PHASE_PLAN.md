@@ -121,6 +121,29 @@ flowchart TD
 
 **Note:** 1b needs you to physically shoot the corpus (printed QR + banner + camera). I'll specify the exact shot list; you capture, I build the harness.
 
+### ✅ STATUS: 1a COMPLETE, 1b BLOCKED ON PHOTOGRAPHS (2026-08-16) — see `VERIFICATION.md` §1
+
+**The camera was pointing at the sky.** The decode sweep returned zero decodes at every altitude, including 12.3 px/module at 3 m. The captured nadir frame was blank blue. The `webcam_pitch_joint` axis was `+Y`, which inverts the pitch sense — the model could look 30° down and 94° **up**, so every NADIR command aimed at the sky. Fixed to `-Y`.
+
+This is a **correction to Phase 2**, which verified that the joint *reached* −90° but never that it was *looking* at the ground. Guarded now by a test that asserts the resulting view direction, and that the SDF and URDF axes agree.
+
+**Texture work cancelled — not required.** Once aimed correctly, the existing box-geometry QR decodes at 100% at 3 m and 5 m. The handoff's "texture rendering was unreliable" was a misattribution of the aiming bug.
+
+**Decode envelope measured** (`docs/QR_DECODE_ENVELOPE.md`, `docs/qr_decode_envelope.csv`):
+
+| altitude | px/module | decode rate |
+|---:|---:|---:|
+| 3 m | 12.32 | 100% |
+| 5 m | 7.39 | 100% |
+| 7 m | 5.28 | 90% |
+| 10 m | 3.70 | 30% |
+
+Reliable floor **≈5.3 px/module**, and only within the inner quarter of the half-FOV.
+
+**This kills `search_alt = 10.0`.** For a realistic 0.4 m marker that floor allows **1.3 m** at the simulated 640×480, or 5.4 m at 4K. A single-altitude lawnmower cannot both cover the zone and decode the payload — **P6 must sweep high for candidate pads and descend to decode.** Also noted: the sim camera is 640×480 while goal.md Q14 specifies 1080p, so every Gazebo perception result is pessimistic by 3–6×.
+
+**1b delivered but blocked:** `tests/perception/test_real_corpus.py` (skips cleanly while empty) and `docs/CORPUS_SHOT_LIST.md` with a ~30-photograph minimum set. **Needs you with a tape measure, a printed QR and the Brio.**
+
 ---
 
 ## Phase 2 — Camera pointing as a commanded, confirmed state
@@ -146,6 +169,30 @@ flowchart TD
 
 **Files:** new `src/aerothon_perception/camera_ctrl/`, `mission_tree.py`, `mav_commander.py`, `aggregator.py`
 
+### ✅ STATUS: COMPLETE (2026-08-16) — see `VERIFICATION.md` §2
+
+**The headline: Phase 0's diagnosis was wrong, and the real cause was worse.**
+
+A controlled hover test (`sim/hover_test.py`, no BT / perception / avoidance) flew takeoff → 20 s hover → land with a **worst attitude of 2.2°** and 5 cm position hold. The airframe was never unstable. The aircraft was being flown into the ground by `velocity_controller.py`, which published body-frame velocity using MAVLink's FRD convention ("y right") when MAVROS's `setpoint_raw` plugin expects **ROS FLU** ("y LEFT") and does the FLU→FRD conversion itself. The corridor-centring law was steering *into* the wall it was avoiding.
+
+After the one-line sign fix the same mission traverses the corridor end to end holding 2.93–2.96 m, climbs to the search altitude and runs the lawnmower — where it previously crashed 3.5 m in at `roll=23.0 pitch=45.7, z=0.028`.
+
+`sim/test_frame_conventions.py` (11 tests, mutation-checked) is the standing guard. This closes `CURRENT_PROGRESS_HANDOFF.md` repair step 2's *"verify ENU/NED and body-frame signs with automated assertions."*
+
+**Delivered:**
+- `camera_ctrl` package — named poses FORWARD/NADIR/ALIGN, commanded and **read back from `/joint_states`**, `settled` published on `/camera/pose_state`; `SetCameraPose` BT leaf gates every perception stage and fails closed. 20 unit tests, mutation-checked twice.
+- Camera pose steps wired into the mission at the five stages goal.md Q18 requires.
+- Joint lower limit widened −1.5708 → −1.65 rad so a −90° NADIR command is not sitting on its own hard stop.
+- Stream rates: `scripts/set_stream_rates.py` raises pose 1.5 → 29 Hz via `MAV_CMD_SET_MESSAGE_INTERVAL`.
+- `AEROTHON_HEADLESS=1` launcher mode for measurement runs.
+
+**Also fixed:** `rviz:=false` never disabled RViz (declared, read, never applied to the node); and a `LaunchConfiguration` used in a Python conditional that would have silently selected the **sim** camera backend on the real aircraft.
+
+**Known-limited, carried forward:**
+- Sensor rates are bounded by a 0.55 real-time factor — `/scan` 5.5 Hz against a configured 10 Hz. The sensors are correct in *simulation* time; Q27's ≥8 Hz is a real-aircraft interlock. → **P11**
+- MAVProxy re-requests low stream rates ~20 s after they are set. `stream_rate_keeper` exists but is **off by default** — two launches carrying it ended with `mavros_node` aborting. The real fix is removing MAVProxy from the sim so nothing competes. → **P11**
+- Search-exhausted causes a silent mission restart loop rather than a latched failure. → **P6/P10**
+
 ---
 
 ## Phase 3 — Start-QR closed loop, fail-closed
@@ -166,6 +213,15 @@ flowchart TD
 
 **Files:** `perception_qr/qr_node.py`, `mission_tree.py`, `mav_commander.py`, `aggregator.py`, GCS `App.tsx`
 
+### ✅ STATUS: COMPLETE (2026-08-17) — see `VERIFICATION.md` §3
+
+Offset published for ANY visible marker (it was previously populated only on a
+target match, so during the start scan — when no target exists — it was
+structurally always zero). Altitude-aware plausibility gating. FindStartQR
+descend-and-retry ladder + CenterOnQR visual centring replacing the hardcoded
+`scan_pose` (**closes audit A4**). Verified in the complete end-to-end flight:
+the randomised start target `TARGET_C` was decoded in flight.
+
 ---
 
 ## Phase 4 — Banner identity validation + real alignment controller
@@ -185,6 +241,15 @@ flowchart TD
 - Corridor entry heading is produced entirely from perception with no waypoint constant.
 
 **Files:** `perception_banner/banner_node.py`, new `banner_align` behaviour, `velocity_controller.py`, `mission_tree.py`
+
+### ✅ STATUS: COMPLETE (2026-08-17) — see `VERIFICATION.md` §4
+
+Green decoys added to the simulated world FIRST, so "reject non-banners" is a
+claim capable of failing. Identity gate checks white-lettering structure inside
+the green region; `/percep/banner.z` now distinguishes identified banner (1.0)
+from green-but-rejected (0.5) from nothing (0.0). `AlignToBanner` yaws to the
+identified banner and fails closed if none is found — **closes audit A5**.
+17 tests, mutation-checked. Live: `BANNER_ALIGN` converged in ~11 s.
 
 ---
 
@@ -207,6 +272,22 @@ flowchart TD
 
 **Files:** `src/aerothon_avoidance/avoidance/avoidance/velocity_controller.py` (substantially rewritten), new corridor estimator node, `mission_tree.py`
 
+### ✅ STATUS: COMPLETE (2026-08-17) — see `VERIFICATION.md` §3.6 and the end-to-end run
+
+`velocity_controller` rewritten as **follow-the-gap**: steers toward the widest
+navigable gap, which gives centring, obstacle avoidance and pass-side selection
+from one mechanism. Escalation ladder CRUISE → BLOCKED → BACKOFF → STUCK, a
+measured forward-progress watchdog, and the full goal.md Q21 lidar conditioning
+(angular masking, range clamp, median outlier filter, stale-scan failsafe).
+
+**Corridor exit is now DETECTED** — both walls falling away — rather than read
+off `corridor_exit_x` / `corridor_return_exit_x`. **Closes audit A6, A10, D6,
+D8.** Those constants were not merely inelegant: the return threshold was
+unreachable and stalled three consecutive live runs.
+
+Verified end to end: `CORRIDOR_NAV` at +26 s, `RETURN_CORRIDOR` cleared, landed
+and `COMPLETED` at +183 s.
+
 ---
 
 ## Phase 6 — Perception-driven zone search + target centring
@@ -227,6 +308,20 @@ flowchart TD
 - Non-matching QRs correctly ignored; wrong-target delivery impossible.
 
 **Files:** `mission_tree.py`, new search-planner node, `perception_qr/qr_node.py`
+
+### ✅ STATUS: COMPLETE (2026-08-17) — see `VERIFICATION.md` §6, §6b, §6c
+
+**Done:** `mission_bt/search_planner.py` derives sweep altitude, decode
+altitude and lane spacing from camera geometry plus Phase 1's measured
+5.3 px/module floor, and proves coverage by sampling (the proof is capable of
+failing). Calibrated against both real Phase 1 data points. Marker size is an
+input, so the organisers' unknown answer no longer blocks. **Closes audit A2
+and B1.** 22 tests.
+
+**Not done:** zone extent is still the hardcoded rectangle (A8) and zone entry
+is still a waypoint (A7) — both need zone-boundary perception. Stop-on-match
+works; the descend-to-decode leg is planned but the mission still decodes at
+sweep altitude, which is valid only because the simulated pads are 3.0 m.
 
 ---
 
@@ -356,3 +451,153 @@ Nothing is reported as working without all five. This is the specific countermea
 ## Working agreement
 
 I execute one full phase autonomously, deliver the evidence pack, and **stop** for your go-ahead before starting the next.
+
+
+---
+
+## Session addendum — 2026-08-17 (afternoon)
+
+### The lesson from Phase 6
+
+Removing the last hardcoded coordinates did not just close audit items; it
+**exposed five defects that the constants had been hiding**. Every one of them
+had been present through the three "successful" end-to-end runs recorded
+earlier in this plan, and none was visible while a `Goto(18, 0, 3)` was
+dragging the aircraft to the right place regardless of what perception said.
+
+They are written up in full in `VERIFICATION.md` §6c. In short:
+
+1. The corridor could be "exited" without ever being entered — the mission
+   searched the takeoff pad and reported COMPLETED.
+2. A completed mission re-armed and took off again 0.4 s after landing.
+3. Aligning to the banner never approached it; the aircraft flew past the
+   gate into a corner.
+4. The gate is not even visible from the takeoff altitude, so the search
+   swept 271 degrees and locked onto a distant green object.
+5. The banner is mounted on a green gate in front of a green corridor, and
+   measuring lettering over the whole connected blob rejected the real banner.
+
+**This is the argument for Phase 11.** Those five were found by accident,
+because one arena's constants happened to stop matching. A randomised arena
+finds that class of defect on purpose, which is why
+`scripts/arena_regression.sh` exists and why the world generator now takes
+`--randomise-arena`.
+
+### Phase 7 — status
+
+**FLOWN AND CONFIRMED (run 13, 2026-08-17).** See `VERIFICATION.md` §7b.
+
+For eleven runs Phase 7 had never actually executed: every sweep logged
+`avoiding 0 red zone(s)`. The reason was not in the red-zone code at all —
+the search never reached any red ground. `ObserveZone` bounds the zone with
+the lidar, whose range (12 m) is not the zone's size (40 m), so the swept
+window covered x 16.5..27.9 of a real 12..52. All three red zones, and four
+of the five target pads, lie outside it. Every live run had been launched
+with `--start-target c`, the one pad inside the window.
+
+With the frontier advancing, the first flight to reach red ground produced:
+
+```
+red zone confirmed mid-sweep (0 -> 5):   re-planned the current strip, coverage 97%
+red zone confirmed mid-sweep (5 -> 26):  re-planned the current strip, coverage 99%
+red zone confirmed mid-sweep (26 -> 32): re-planned the current strip, coverage 99%
+```
+
+That also exposed a second defect: exclusions were sampled **once**, before
+the sweep, from the corridor exit — where no red zone is visible. Anything
+confirmed later was recorded and ignored. They are now re-read during the
+sweep, with the re-plan count bounded so a steadily growing exclusion set
+cannot stall the aircraft on lane 0.
+
+- `perception_redzone/georef.py` — pixel to ground-plane projection through
+  the camera pose, camera axes derived and checked rather than asserted.
+- `redzone_node.py` — publishes NOT_VISIBLE / CLEAR / RED with georeferenced
+  exclusion rectangles, replacing a positionless Bool that made "cannot see"
+  and "can see, clear" the same value.
+- `search_planner.clip_lane` / `plan_lawnmower_excluding` — lanes routed
+  around red ground, clipped against the AIRFRAME's clearance rather than the
+  camera swath (clipping on the swath cost 0.19 of achievable coverage for no
+  safety benefit), with the coverage proof preserved over reachable ground.
+- `mission_bt/geofence.py` + `UploadFence` — fence built from the observed
+  zone and exclusions, pushed, read back, and compared vertex by vertex with a
+  0.5 m tolerance. A swapped axis, a dropped vertex, a moved corner and an
+  exclusion silently becoming an inclusion are each caught by a test.
+
+### Phase 9 — status
+
+**FLOWN (runs 12, 14).** `PrecisionDescent` does closed-loop descent on the
+home fiducial with hold-and-re-acquire, re-acquisitions counted rather than
+hidden, and degrades to an ordinary landing rather than failing a mission
+whose payload is already delivered.
+
+Both runs exposed the same defect, and it was not in the controller:
+`land_commit_alt` was a flat 1.5 m, while a 2.2 m marker leaves the frame
+below **3.90 m** at 1280x720 (the vertical FOV is only 36 deg). The aircraft
+was told to hold a lock the optics forbid, so it oscillated in the
+**3.4-4.1 m** band until the stage timed out — a band the derived floor
+predicts without tuning. `min_track_altitude()` now supplies the commit
+altitude and `land_commit_alt` is a floor, not a target.
+
+Run 14 touched down 0.71 m from home after degrading. The remaining ceiling
+is optical, not algorithmic: see `VERIFICATION.md` §9b for the two ways to go
+lower (track the pad outline below the decode floor, or use the MAVROS
+`landing_target` plugin, which is loaded but unused).
+
+### Phase 10 — status
+
+GCS wiring completed 2026-08-17 (`VERIFICATION.md` §10b): the aggregator was
+still subscribed to the *Bool* topics, so the eleven-item interlock and the
+red-zone tri-state reached the operator as two booleans. It now consumes
+`/mission_ready/detail` and `/percep/redzone/detail`, and the panel renders
+each check with the value it measured and the reason it is holding. The
+panel had also been rendering `!redzone_visible` as "CLEAR", so a detector
+that had never published read as safe — the §I.6 defect again, in new code.
+
+`gcs_aggregator/readiness.py` replaces the four-check `/mission_ready` with the
+full Q27 interlock (11 items), each individually forceable in test, each
+carrying a measured value and a reason. Unknown inputs FAIL — the previous
+version treated a missing input as fine. `RateMeter` distinguishes a healthy
+12 Hz lidar from one stuttering at 1 Hz, which "a message arrived in the last
+2 s" could not.
+
+### Phase 11 — status
+
+Two blockers found and fixed before the harness could produce a meaningful
+number at all (`VERIFICATION.md` §11b):
+
+1. `randomise_arena()` was **unreachable** — `if __name__ == "__main__"` sat
+   above its definition, so every `--randomise-arena` invocation died with
+   `NameError`. The default path never calls it, so nothing noticed.
+2. `arena_regression.sh` classified outcomes by grepping for `'"state":'`,
+   which appears in **no log**: it comes from a `ros2 topic echo --once` that
+   loses the DDS discovery race against this stack. Every run would have been
+   `NO_OUTCOME` and the harness would have reported 0/N regardless of the
+   truth. It now parses the tree's own latched `Mission result:` line, and
+   records each arena's layout so a failure can be re-flown.
+
+`sim/test_arena_randomisation.py` (14 tests) holds the generator to actually
+randomising — pads, red zones and the gate's *heading* all move, two seeds
+differ, a seed is reproducible — and to producing arenas that are FLYABLE:
+the corridor moves as a rigid body, so the centred 10.2 m wall block is no
+longer dragged back over the takeoff point.
+
+**A whole regression run was thrown away as contaminated** before any of this
+meant anything. Two `arena_regression.sh` processes ran concurrently on one
+simulator, each `pkill`-ing the other's aircraft mid-flight, because
+`pkill -f arena_regression` had matched the wrapper shell issuing it and
+killed the killer instead of the target. See `VERIFICATION.md` §11c. The
+harness now takes an exclusive `flock`.
+
+### What the first clean run found
+
+Randomising the arena immediately exposed a flight-control defect that eleven
+end-to-end runs on the shipped arena never could: `ApproachBanner` commanded
+`current_position + 1.5 m` every tick, so the target receded as fast as it was
+chased and the aircraft accelerated continuously — two arenas aborted at ~50
+degrees of pitch, and a third sank 3.2 m to 0.3 m because a multirotor at 50
+degrees of pitch has lost a third of its vertical thrust. `VERIFICATION.md`
+§5c. The shipped arena hides it entirely: its gate is 2.8 m from the takeoff
+point, so the transit ends before any speed builds.
+
+That is the argument for Phase 11 in one paragraph, and it is no longer
+hypothetical.

@@ -1,0 +1,13 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>perception_overlay</name>
+  <version>0.1.0</version>
+  <description>One camera feed with every detector's findings drawn on it.</description>
+  <maintainer email="teamrotorfpv@vit.ac.in">Team Rotor FPV</maintainer>
+  <license>MIT</license>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>cv_bridge</exec_depend>
+  <export><build_type>ament_python</build_type></export>
+</package>

@@ -48,6 +48,12 @@ class MockMav:
         self.roll_deg = 0.0
         self.pitch_deg = 0.0
         self.attitude_over_limit = False
+        self.low_alt_fault = False
+        self.airborne_floor = None
+        self.winch_status = {}
+        self.target_override = ""
+        self.qr_streak = 0
+        self.mission_failed = False
         self.expect_disarm_flag = False
         self.results = []
         self.qr_decoded = ""
@@ -92,7 +98,7 @@ class MockMav:
     def alt(self):
         return self.pose.pose.position.z
 
-    def enable_avoidance(self, on):
+    def enable_avoidance(self, on, hold_alt=None):
         self.avoidance_enabled = on
 
     def winch(self, cmd):
@@ -101,6 +107,18 @@ class MockMav:
     # ---- Phase 0 rails ---- #
     def attitude_excessive(self):
         return self.attitude_over_limit
+
+    def low_altitude_fault(self, samples_required=8):
+        return self.low_alt_fault
+
+    def set_airborne_floor(self, f):
+        self.airborne_floor = f
+
+    def clear_airborne_floor(self):
+        self.airborne_floor = None
+
+    def qr_confident(self, frames):
+        return bool(self.qr_decoded) and self.qr_streak >= frames
 
     def expect_disarm(self, value=True):
         self.expect_disarm_flag = bool(value)
@@ -119,14 +137,11 @@ class TestMissionBT(unittest.TestCase):
         self.node = MagicMock()
         self.defaults = {
             'takeoff_alt': 5.0, 'search_alt': 10.0, 'drop_alt': 5.0,
-            'scan_pose': (0.0, 0.0, 5.0),
-            'corridor_entry': (5.0, 0.0, 3.0),
-            'corridor_exit_x': 15.5,
-            'zone_entry': (18.0, 0.0, 3.0),
-            'zone': (20.0, 52.0, -12.0, 12.0),
-            'corridor_return_entry': (15.0, 0.0, 3.0, math.pi),
-            'corridor_return_exit_x': 4.5,
-            'home': (0.0, 0.0, 5.0),
+            'image_width_px': 1280, 'camera_hfov': 1.0472,
+            'target_marker_m': 2.2, 'qr_modules': 33,
+            'px_per_module_floor': 5.3, 'lane_overlap': 0.30,
+            'zone_margin': 1.0, 'corridor_alt': 3.0,
+            'waypoint_tol': 0.8, 'drop_tol': 0.5, 'scan_floor_alt': 2.0,
         }
 
     def test_guard_healthy_does_not_abort(self):

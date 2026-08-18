@@ -26,6 +26,10 @@ export default function App() {
   const [activeEndpoint, setActiveEndpoint] = useState("ws://127.0.0.1:8765");
   const [connectionNonce, setConnectionNonce] = useState(0);
   const [view, setView] = useState<"map" | "cam" | "slam">("map");
+  // The composite overlay is the default: the live camera with whatever is
+  // currently detected drawn on it. The per-detector streams are kept
+  // selectable because they are what proved the banner lettering bug.
+  const [videoTopic, setVideoTopic] = useState("/percep/overlay");
   const webSocket = useRef<WebSocket | null>(null);
   const inTauri = "__TAURI_INTERNALS__" in window;
   const mapHost = useRef<HTMLDivElement>(null);
@@ -233,15 +237,39 @@ export default function App() {
     try {
       const u = new URL(endpoint);
       u.protocol = u.protocol === "wss:" ? "https:" : "http:";
-      u.port = "8080"; u.pathname = "/stream"; u.search = "?topic=/percep/qr/annotated&type=mjpeg";
+      // The composite feed: the live camera with WHATEVER is currently
+      // detected drawn on it. This was pinned to /percep/qr/annotated -- the
+      // QR detector's private copy of the frame -- so during banner alignment
+      // the pane showed a nadir QR view with no banner box on it.
+      u.port = "8080"; u.pathname = "/stream"; u.search = `?topic=${videoTopic}&type=mjpeg`;
       return u.toString();
     } catch { return ""; }
   })();
 
   const f = S?.flight, m = S?.mission, p = S?.percep, sa = S?.safety;
+  const scans = S?.scans ?? [];
   const cur = STEP[m?.state ?? ""] ?? -1;
   const pill = (g: boolean | undefined, a: string, b: string, inv = false) =>
     <span className={`pill ${g ? "ok" : inv ? "bad" : "warn"}`}>{g ? a : b}</span>;
+
+  // Red zone is a TRI-state, not a boolean. This panel used to render
+  // !redzone_visible as "CLEAR", so a detector that had never published
+  // anything — or one that could not see the ground at all — read as safe.
+  const redPill = (s: string | undefined) => {
+    const cls = s === "CLEAR" ? "ok" : s === "RED" ? "bad" : "warn";
+    const txt = s === "CLEAR" ? "CLEAR" : s === "RED" ? "RESTRICTED"
+      : s === "NOT_VISIBLE" ? "NO GROUND VIEW" : "UNKNOWN";
+    return <span className={`pill ${cls}`}>{txt}</span>;
+  };
+
+  const fmtVal = (v: unknown): string => {
+    if (v === null || v === undefined) return "—";
+    if (typeof v === "boolean") return v ? "yes" : "no";
+    if (typeof v === "number") return String(v);
+    if (typeof v === "object") return Object.entries(v as object)
+      .map(([k, a]) => `${k} ${a ?? "—"}`).join(" ");
+    return String(v);
+  };
 
   return (
     <div className="gcs">
@@ -300,8 +328,41 @@ export default function App() {
             <div className="kv"><span className="dim">Start QR</span><span className="mono" style={{ color: "var(--accent)" }}>{p?.start_qr || "—"}</span></div>
             <div className="kv"><span className="dim">Target Match</span>{pill(p?.target_match, "MATCHED", "SEARCHING")}</div>
             <div className="kv"><span className="dim">Green Banner</span>{pill(p?.banner, "ALIGNED", "SCANNING")}</div>
-            <div className="kv"><span className="dim">Red Zone</span>{pill(!p?.redzone_visible, "CLEAR", "RESTRICTED", true)}</div>
+            <div className="kv"><span className="dim">Red Zone</span>{redPill(p?.redzone_status)}</div>
+            {!!p?.redzone_exclusions?.length &&
+              <div className="kv"><span className="dim">Exclusions</span>
+                <span className="mono">{p.redzone_exclusions.length} mapped · {p.redzone_area_m2 ?? 0} m²</span></div>}
             <div className="kv"><span className="dim">Interlock</span>{pill(sa?.ready, "GO", "STANDBY")}</div>
+            {/* Which of the eleven checks is holding, and what it measured. A
+                greyed-out ARM button with no reason is what this replaces. */}
+            {!!sa?.ready_items?.length &&
+              <div className="interlock">
+                {sa.ready_items.map((it) =>
+                  <div key={it.key} className={`ilk ${it.ok ? "ok" : "bad"}`}
+                       title={it.reason || `${it.label}: ok`}>
+                    <span className="ico">{it.ok ? "✓" : "✕"}</span>
+                    <span className="lbl">{it.label}</span>
+                    <span className="val mono">{fmtVal(it.value)}</span>
+                  </div>)}
+                {!!sa.ready_waived?.length &&
+                  <div className="ilk warn"><span className="ico">!</span>
+                    <span className="lbl">Waived</span>
+                    <span className="val mono">{sa.ready_waived.join(", ")}</span></div>}
+              </div>}
+            {/* WHY arming is blocked, in words, not just which row is red. */}
+            {!!sa?.ready_reasons?.length &&
+              <div className="kv reasons"><span className="dim">Blocking</span>
+                <span className="mono">{sa.ready_reasons.join(" · ")}</span></div>}
+            {/* Payload Delivery Accuracy is 15 rulebook marks; landing is 5.
+                Showing only the landing figure put the smaller number in
+                front of the operator and hid the larger one. */}
+            <div className="kv"><span className="dim">Delivery</span>
+              <span className="mono">
+                {m?.delivery_offset_m == null ? "—"
+                  : `${m.delivery_offset_m.toFixed(2)} m from pad`}</span></div>
+            <div className="kv"><span className="dim">Landing</span>
+              <span className="mono">{m?.landing_precision ?? "—"}</span></div>
+
             <div className="sec">Mission Sequence</div>
             <div className="checklist">
               {CL.map(([k, label], i) => {
@@ -327,7 +388,17 @@ export default function App() {
                 <img src={videoUrl} alt="Live camera feed"
                   onError={(e) => { (e.target as HTMLElement).style.display = "none"; }} />
                 <div className="cam-tag tl">REC · {videoUrl || "set drone endpoint"}</div>
-                <div className="cam-tag br">OpenCV QR + HSV banner</div>
+                <div className="cam-tag br">
+                  <select value={videoTopic}
+                    onChange={(e) => setVideoTopic(e.target.value)}
+                    aria-label="camera feed">
+                    <option value="/percep/overlay">ALL DETECTIONS</option>
+                    <option value="/camera/image">RAW CAMERA</option>
+                    <option value="/percep/qr/annotated">QR ONLY</option>
+                    <option value="/percep/banner/annotated">BANNER ONLY</option>
+                    <option value="/percep/redzone/annotated">RED ZONE ONLY</option>
+                  </select>
+                </div>
                 <div className="gimbal-control">
                   <span>CAMERA SERVO · {S?.gimbal?.pitch_deg?.toFixed(0) ?? 0}°</span>
                   <button onClick={() => send("gimbal_pitch", { degrees: 0 })}>FORWARD</button>
@@ -338,6 +409,43 @@ export default function App() {
             )}
           </div>
         </section>
+
+        {/* RIGHT RAIL — the scan ledger. Everything decoded, identified or
+            refused, in the order it happened, with matches tagged. Before
+            this, a scan existed only as a line in a log nobody reads while
+            flying, and the operator could not tell afterwards what the
+            aircraft had actually read. */}
+        <aside className="rail scanrail">
+          <div className="card scans">
+            <div className="hd">Scanned &amp; Detected
+              <span className="tag">{scans.length} observation{scans.length === 1 ? "" : "s"}</span>
+            </div>
+            <div className="scanlist">
+              {scans.length === 0 && <div className="scanempty">nothing scanned yet</div>}
+              {scans.map((r) => (
+                <div key={r.key} className={"scanrow " + r.status.toLowerCase()}>
+                  <div className="scanhead">
+                    <span className="scankind">{r.kind.toUpperCase()}</span>
+                    <span className="scanpayload mono">
+                      {r.payload || <em>refused</em>}
+                    </span>
+                    {r.matched && <span className="scantag match">MATCH</span>}
+                    {!r.matched && r.status === "IDENTIFIED" &&
+                      <span className="scantag ident">ID</span>}
+                    {r.status === "REJECTED" &&
+                      <span className="scantag rej">REJECTED</span>}
+                  </div>
+                  {r.reason && <div className="scanreason">{r.reason}</div>}
+                  <div className="scanmeta mono">
+                    {r.stage || "—"} · {r.count}x
+                    {r.via ? ` · via ${r.via}` : ""}
+                    {r.t ? ` · t+${r.t.toFixed(0)}s` : ""}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </aside>
       </main>
 
       <footer>

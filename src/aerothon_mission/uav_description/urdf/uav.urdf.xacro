@@ -43,7 +43,13 @@
   </link>
   <joint name="webcam_pitch_joint" type="revolute">
     <parent link="webcam_servo_base"/><child link="webcam_link"/>
-    <origin xyz="0.045 0 0"/><axis xyz="0 1 0"/><limit lower="-1.570796" upper="0.523599" effort="2" velocity="2"/>
+    <!-- Keep in sync with scripts/materialize_vehicle_model.py: lower limit is
+         -1.65 rad so a -90 deg NADIR command is not sitting on the hard stop. -->
+    <!-- Axis is -Y so that a negative angle pitches the camera DOWN, matching
+         goal.md Q18 and MAVLink DO_MOUNT_CONTROL. See the note in
+         scripts/materialize_vehicle_model.py: with +Y, "-90 deg NADIR" aimed
+         the camera at the sky. Keep the two files in sync. -->
+    <origin xyz="0.045 0 0"/><axis xyz="0 -1 0"/><limit lower="-1.65" upper="0.523599" effort="2" velocity="2"/>
   </joint>
   <link name="webcam_link">
     <visual><origin xyz="0.040 0 0"/><geometry><box size="0.080 0.125 0.045"/></geometry><material name="logitech"/></visual>

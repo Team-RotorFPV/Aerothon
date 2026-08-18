@@ -24,6 +24,40 @@ WORKSPACE_ROOT="$(dirname "$SCRIPT_DIR")"
 export GZ_PARTITION="${GZ_PARTITION:-aerothon_m2}"
 export GZ_IP="${GZ_IP:-127.0.0.1}"
 
+# Keep ROS 2 DDS discovery on the loopback interface.
+#
+# This matches the locked architecture: DDS stays onboard the aircraft, and the
+# GCS talks to it over its own WebSocket, never over DDS. On a machine with
+# several network interfaces it also keeps discovery traffic off the wire.
+#
+# It is NOT a fix for the intermittent start-up aborts of mavros_node and
+# robot_state_publisher. That was tried and did not help. The aborts are
+#
+#   signal_handler(SIGINT/SIGTERM)
+#   what(): failed to initialize rcl node: the given context is not valid
+#
+# i.e. the process is SIGTERMed while still initialising and then tries to
+# finish constructing nodes on a dead context — a symptom of the stack being
+# torn down mid-start-up, not a DDS problem. Recorded here because that cause
+# was misattributed three times (to the stream-rate keeper, to stale shared
+# memory, and to discovery range) before being read off the log properly.
+#
+# Set AEROTHON_OPEN_DDS=1 if you ever need multi-machine ROS.
+# OFF BY DEFAULT. This was added on the (wrong) hypothesis that open discovery
+# caused the start-up aborts. It did not — the real cause was a missing
+# setup.cfg in mission_bringup, so console scripts landed in bin/ instead of
+# lib/, ros2 launch threw "libexec directory does not exist", and aborted the
+# whole launch by SIGINTing every process it had started.
+#
+# Worse, enabling it ISOLATES the stack from any shell that does not set the
+# same variables, so `ros2 topic list` from a normal terminal sees nothing.
+# That is a bad default for a simulator people poke at by hand.
+if [[ "${AEROTHON_LOCALHOST_DDS:-0}" == "1" ]]; then
+    export ROS_AUTOMATIC_DISCOVERY_RANGE="${ROS_AUTOMATIC_DISCOVERY_RANGE:-LOCALHOST}"
+    export ROS_LOCALHOST_ONLY="${ROS_LOCALHOST_ONLY:-1}"
+    echo "[DDS] discovery confined to localhost (set AEROTHON_LOCALHOST_DDS=0 to open)"
+fi
+
 echo "======================================================================"
 echo "    AEROTHON 2026 MISSION 2 (SKYSCAN) — LEVEL 6 SIMULATION"
 echo "======================================================================"
@@ -97,8 +131,32 @@ reap_previous_stack() {
     fi
 }
 
+# Stale FastDDS shared-memory segments.
+#
+# Every killed stack leaves segments behind in /dev/shm. They accumulated to 86
+# over one session, and the runs that failed with mavros_node and
+# robot_state_publisher aborting (SIGABRT) were the ones with the largest
+# backlog. Participants can fail to attach to a stale segment left by a process
+# that no longer exists, and the failure surfaces as an abort in an unrelated
+# node, which is a genuinely confusing way to lose an afternoon.
+#
+# Only safe once nothing is running, so it goes after the reap.
+clean_stale_dds_shm() {
+    local n
+    n="$(find /dev/shm -maxdepth 1 -name 'fastrtps_*' -o -maxdepth 1 -name 'sem.fastrtps_*' 2>/dev/null | wc -l)"
+    if [[ "$n" -gt 0 ]]; then
+        if pgrep -f "$REAP_PATTERN" >/dev/null 2>&1; then
+            echo "[SHM] $n stale segments present but processes still running; skipping."
+            return
+        fi
+        rm -f /dev/shm/fastrtps_* /dev/shm/sem.fastrtps_* 2>/dev/null || true
+        echo "[SHM] Cleared $n stale FastDDS segment(s)."
+    fi
+}
+
 if [[ "${AEROTHON_NO_REAP:-0}" != "1" ]]; then
     reap_previous_stack
+    clean_stale_dds_shm
 fi
 
 # Record our real process group. $$ is only the PGID when this script happens
@@ -261,6 +319,33 @@ fi
 # stack when gz-server is a launch-owned child process.
 WORLD_RUNTIME="/tmp/aerothon_mission2_runtime.sdf"
 VEHICLE_MODELS_DIR="/tmp/aerothon_vehicle_models"
+# ------------------------------------------------------------------------------
+# Simulation fidelity knobs.
+#
+#   AEROTHON_CAMERA_W / _H   camera render size. High = representative
+#                            perception (goal.md Q14 wants 1080p), low = usable
+#                            frame rate. Measured on this machine:
+#                              640x480   -> RTF 0.55, camera 7.5 Hz
+#                              1280x720  -> default compromise
+#                              1920x1080 -> RTF 0.32, camera 1.45 Hz
+#                            Use high resolution for MEASUREMENT runs and low
+#                            for CLOSED-LOOP runs.
+#
+#   AEROTHON_START_QR_M      marker edge lengths. The competition size is still
+#   AEROTHON_TARGET_QR_M     unconfirmed and is the dominant term in the search
+#                            altitude (docs/QR_DECODE_ENVELOPE.md). The defaults
+#                            (2.2 / 3.0 m) are much larger than any plausible
+#                            real marker and make the simulation easy; sweep
+#                            them to test the strategy across the real range.
+#
+# Example measurement run with a realistic marker:
+#   AEROTHON_CAMERA_W=1920 AEROTHON_CAMERA_H=1080 \
+#   AEROTHON_START_QR_M=0.5 AEROTHON_HEADLESS=1 ./scripts/launch_level6_sim.sh
+# ------------------------------------------------------------------------------
+echo "[SIM] camera ${AEROTHON_CAMERA_W:-1280}x${AEROTHON_CAMERA_H:-720}" \
+     "| start QR ${AEROTHON_START_QR_M:-2.2} m" \
+     "| target QR ${AEROTHON_TARGET_QR_M:-3.0} m"
+
 python3 "$SCRIPT_DIR/materialize_vehicle_model.py" \
     --source "$ARDUPILOT_GAZEBO_PREFIX/share/ardupilot_gazebo/models/iris_with_gimbal/model.sdf" \
     --output-root "$VEHICLE_MODELS_DIR"
@@ -286,15 +371,31 @@ if [ "$WORLD_READY" != true ]; then
     echo "[BLOCKED] Gazebo did not advertise /gazebo/worlds within 15 seconds."
     exit 3
 fi
-echo "[OK] Gazebo Mission 2 world is ready. Opening GUI..."
-gz sim -g &
-PIDS+=($!)
+# Headless mode for automated testing.
+#
+# The Gazebo GUI and RViz cost roughly 200% and 30% CPU respectively on top of
+# a gz-server already running with --headless-rendering, so rendering is paid
+# for twice. Under that load the simulator cannot keep up with its own sensor
+# update rates: /scan was measured at 2.9 Hz against a configured 10 Hz and
+# /camera/image at 5.0 Hz against 20 Hz, which breaks goal.md Q27 (LiDAR >=
+# 8 Hz) and Q14 (10 FPS QR) for reasons that have nothing to do with the code.
+# Set AEROTHON_HEADLESS=1 for measurement runs; leave it unset for flying by eye.
+if [[ "${AEROTHON_HEADLESS:-0}" == "1" ]]; then
+    echo "[OK] Gazebo Mission 2 world is ready. HEADLESS mode: no GUI, no RViz."
+    RVIZ_ARG="false"
+else
+    echo "[OK] Gazebo Mission 2 world is ready. Opening GUI..."
+    gz sim -g &
+    PIDS+=($!)
+    RVIZ_ARG="true"
+fi
 
 # 6. Launch Full Simulation Stack (SITL + ROS 2 + SLAM + RViz)
 echo "[3/4] Launching Gazebo Harmonic + ROS 2 Stack + slam_toolbox + RViz 2..."
 if command -v ros2 >/dev/null 2>&1; then
     ros2 launch sim_gazebo sim_full.launch.py \
-        fcu_url:=udp://127.0.0.1:14555@127.0.0.1:14556 rviz:=true slam:=true \
+        fcu_url:=udp://127.0.0.1:14555@127.0.0.1:14556 rviz:="$RVIZ_ARG" slam:=true \
+        stream_rate_keeper:="${AEROTHON_STREAM_KEEPER:-true}" \
         start_gz_server:=false gui:=false
 else
     echo "[INFO] Running in headless mode (ros2 command not in current shell)."

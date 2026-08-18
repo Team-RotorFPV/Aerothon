@@ -1,0 +1,10 @@
+alt_m,decoded,fov_frac,frames,kind,marker_px,offset_m,payload,px_per_module,rate
+1.5,3,,8,altitude,365.8,,AEROTHON2026:M2:TARGET_A,16.796,0.375
+2.5,8,,8,altitude,229.4,,AEROTHON2026:M2:TARGET_A,10.077,1.0
+3.5,8,,8,altitude,170.6,,AEROTHON2026:M2:TARGET_A,7.198,1.0
+5.0,7,,8,altitude,126.5,,AEROTHON2026:M2:TARGET_A,5.039,0.875
+7.0,0,,8,altitude,0.0,,,3.599,0.0
+2.5,7,0.0,8,offaxis,184.8,0.0,AEROTHON2026:M2:TARGET_A,,0.875
+2.5,1,0.25,8,offaxis,243.8,0.36,AEROTHON2026:M2:TARGET_A,,0.125
+2.5,0,0.5,8,offaxis,0.0,0.72,,,0.0
+2.5,0,0.7,8,offaxis,0.0,1.01,,,0.0

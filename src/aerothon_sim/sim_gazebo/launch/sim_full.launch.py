@@ -82,6 +82,8 @@ def generate_launch_description():
         # evaluates it from a deferred OnProcessStart callback after spawning.
         DeclareLaunchArgument('use_gz_tf', default_value='false', description='Use upstream Gazebo TF relay'),
         DeclareLaunchArgument('fcu_url', default_value='udp://127.0.0.1:14555@127.0.0.1:14556', description='MAVROS FCU URL (via router)'),
+        DeclareLaunchArgument('stream_rate_keeper', default_value='true',
+                              description='Re-assert MAVLink stream rates (SITL/MAVProxy workaround)'),
     ]
 
     # 1. Gazebo Harmonic Simulation
@@ -159,9 +161,14 @@ def generate_launch_description():
             'image_topic': '/camera/image',
             'scan_topic': '/scan',
             'fcu_url': LaunchConfiguration('fcu_url'),
+            'stream_rate_keeper': LaunchConfiguration('stream_rate_keeper'),
         }.items(),
     )
 
+    # The `rviz` argument was declared and read but never applied to this node,
+    # so `rviz:=false` launched RViz anyway — ~20-30% CPU on a simulator already
+    # running at 0.55 real-time factor, which drags every sensor rate down with
+    # it. Honour the argument.
     rviz_node = Node(
         package='rviz2',
         executable='rviz2',
@@ -170,6 +177,7 @@ def generate_launch_description():
             pkg_mission, 'config', 'aerothon_slam.rviz')],
         parameters=[{'use_sim_time': True}],
         output='screen',
+        condition=IfCondition(rviz),
     )
 
     # Gazebo publishes nav_msgs/Odometry but, on minimal ROS installations,

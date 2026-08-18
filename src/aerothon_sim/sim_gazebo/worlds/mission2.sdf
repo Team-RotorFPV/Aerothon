@@ -160,6 +160,25 @@
       <pose>7 0 0 0 0 0</pose>
     </model>
 
+    <!-- Green DECOYS: things that are green and banner-shaped but are not the
+         banner. perception_banner currently accepts any green rectangle, so
+         without these a "reject non-banners" test cannot fail. -->
+    <model name="green_decoy_field">
+      <static>true</static>
+      <link name="decoys">
+        @GREEN_DECOY_VISUALS@
+      </link>
+      <pose>8.0 -14.0 0 0 0 0</pose>
+    </model>
+
+    <model name="green_decoy_zone">
+      <static>true</static>
+      <link name="decoys">
+        @GREEN_DECOY_VISUALS@
+      </link>
+      <pose>34.0 9.0 0 0 0 1.2</pose>
+    </model>
+
     <!-- Green AeroTHON banner gates: outbound entrance and return entrance. -->
     <model name="forward_aerothon_banner">
       <static>true</static>

@@ -35,16 +35,16 @@ from mission_bt.mission_tree import (
 )
 
 
+# Mirrors declare_mission_params(); the asserted arena coordinates it used
+# to carry (scan_pose, corridor_entry/exit_x, zone_entry, zone, home) are
+# gone -- perception supplies them now.
 DEFAULT_PARAMS = {
     'takeoff_alt': 5.0, 'search_alt': 10.0, 'drop_alt': 5.0,
-    'scan_pose': (0.0, 0.0, 5.0),
-    'corridor_entry': (5.0, 0.0, 3.0),
-    'corridor_exit_x': 15.5,
-    'zone_entry': (18.0, 0.0, 3.0),
-    'zone': (20.0, 52.0, -12.0, 12.0),
-    'corridor_return_entry': (15.0, 0.0, 3.0, math.pi),
-    'corridor_return_exit_x': 4.5,
-    'home': (0.0, 0.0, 5.0),
+    'image_width_px': 1280, 'camera_hfov': 1.0472,
+    'target_marker_m': 2.2, 'qr_modules': 33,
+    'px_per_module_floor': 5.3, 'lane_overlap': 0.30,
+    'zone_margin': 1.0, 'corridor_alt': 3.0,
+    'waypoint_tol': 0.8, 'drop_tol': 0.5, 'scan_floor_alt': 2.0,
 }
 
 

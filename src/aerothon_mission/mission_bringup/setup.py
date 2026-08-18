@@ -20,5 +20,6 @@ setup(
     maintainer_email='sarthakkhubchandanik@gmail.com',
     description='Launch files for Mission 2.',
     license='MIT',
-    entry_points={'console_scripts': []},
+    entry_points={'console_scripts': [
+        'stream_rate_keeper = mission_bringup.stream_rate_keeper:main']},
 )
