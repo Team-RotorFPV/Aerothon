@@ -264,7 +264,9 @@ class AlignToBanner(py_trees.behaviour.Behaviour):
                  stable_frames=5, sweep_limit_rad=2 * math.pi,
                  step_rad=math.radians(30.0), dwell_s=5.0,
                  settle_tol_rad=math.radians(6.0), settle_timeout_s=8.0,
-                 min_hit_ratio=0.6, min_samples=4, clock=None):
+                 min_hit_ratio=0.6, min_samples=4, clock=None,
+                 hfov_rad=1.0472, align_gain=0.8, align_dwell_s=1.0,
+                 max_corrections=8):
         super().__init__("AlignToBanner")
         self.mav = mav
         self.tol = tol
@@ -280,6 +282,16 @@ class AlignToBanner(py_trees.behaviour.Behaviour):
         # makes a full turn safe to sweep; see the class docstring.
         self.min_hit_ratio = float(min_hit_ratio)
         self.min_samples = int(min_samples)
+        # A bearing is a FRACTION OF THE HALF-FOV, so turning it into an angle
+        # needs the lens, not a gain pulled out of the air. The old
+        # `psi - 0.25 * bearing` was a hidden assumption about the camera that
+        # happened to under-correct by half.
+        self.hfov = float(hfov_rad)
+        # Slightly under 1.0 on purpose: undershooting converges, overshooting
+        # rings.
+        self.align_gain = float(align_gain)
+        self.align_dwell_s = float(align_dwell_s)
+        self.max_corrections = int(max_corrections)
         self.clock = clock or time.monotonic
         self.n_steps = max(1, int(round(2 * math.pi / self.step_rad)))
         self.step_index = 0
@@ -298,6 +310,10 @@ class AlignToBanner(py_trees.behaviour.Behaviour):
         self._best_bearing = None
         self._stable = 0
         self._last_seen = 0.0
+        self._align_target = None
+        self._align_settled = False
+        self._align_t0 = 0.0
+        self._corrections = 0
         self._t = 0
 
     def initialise(self):
@@ -404,6 +420,10 @@ class AlignToBanner(py_trees.behaviour.Behaviour):
             self._enter(self.CENTRE)
             self._stable = 0
             self._last_seen = self.clock()
+            self._align_target = self._target_yaw
+            self._align_settled = False
+            self._align_t0 = self.clock()
+            self._corrections = 0
             return py_trees.common.Status.RUNNING
 
         if len(self.step_reports) >= self.n_steps:
@@ -438,19 +458,46 @@ class AlignToBanner(py_trees.behaviour.Behaviour):
         return py_trees.common.Status.FAILURE
 
     def _centre(self):
-        """Fine-align on the bearing now that the banner is confirmed here."""
-        x, y, z = self.mav.pos()
+        """Fine-align in DISCRETE corrections, for the same reason the sweep
+        stops and stares.
+
+        THE LIVE REGRESSION (seed 1001, watched, arena regression with GUI)
+
+            The sweep worked -- "banner identified at -0 deg after staring at
+            1 heading(s) (11/11 frames)" -- and then the aircraft swung
+            between -1 and -31 degrees on a five-second cycle and never
+            converged:
+
+                t      yaw     bearing  identified
+                6.5    -1.1     0.82    yes
+                10.7  -26.7     0.72    yes
+                11.2  -31.4     0.00    NO     <- detector drops it
+                13.7   -1.3     0.00    NO     <- snapped back to 0
+                14.2   -0.5     0.81    yes    <- re-acquired, starts over
+
+        TWO CAUSES
+
+            The correction was `psi - gain * bearing`, recomputed from the
+            CURRENT heading on every tick. A real airframe is still turning
+            when the next setpoint is computed, so the target moved away at
+            the same rate the aircraft closed on it. This stack has met that
+            before, in ApproachBanner, under the name "receding carrot".
+
+            And when the banner dropped, the hold used the DWELL heading --
+            throwing away every degree of alignment achieved since, which is
+            what turned a wobble into a repeating cycle.
+
+        SO: latch a target, wait for the airframe to actually reach it, hold
+        it long enough for a still measurement, and only then decide whether
+        another correction is needed. The bearing is converted to an angle
+        with the CAMERA's field of view rather than a gain: a bearing is a
+        fraction of the half-FOV, and the lens is already known.
+        """
         psi = self.mav.yaw()
+
         if not self.mav.banner_identified():
-            # A gap after a confident dwell is a dropped frame, not a lost
-            # banner. Hold the heading the dwell chose rather than resuming a
-            # sweep -- resuming is the reversal this whole redesign removes.
-            self._hold(self._target_yaw)
-            # Time since the banner was LAST SEEN, not since centring began.
-            # Measuring from the start of the phase meant that after eight
-            # seconds of ordinary centring a single dropped frame aborted the
-            # mission -- and said the banner "was not seen again within 8 s"
-            # about one that had been in frame a tenth of a second earlier.
+            # Hold the ALIGNMENT target, not the dwell heading.
+            self._hold(self._align_target)
             gone = self.clock() - self._last_seen
             if gone > self.settle_timeout_s:
                 reason = (f"AlignToBanner: the banner confirmed at "
@@ -460,14 +507,34 @@ class AlignToBanner(py_trees.behaviour.Behaviour):
                 self.mav.abort_reason = reason
                 return py_trees.common.Status.FAILURE
             self.feedback_message = (f"centring: banner lost for {gone:.1f} s, "
-                                     f"holding its heading")
+                                     f"holding {math.degrees(self._align_target):.0f} deg")
             return py_trees.common.Status.RUNNING
 
         self._last_seen = self.clock()
         bearing = self.mav.banner_bearing()
+        self._hold(self._align_target)
+
+        if not self._align_settled:
+            err = abs(self._wrap(psi - self._align_target))
+            if err <= self.settle_tol:
+                self._align_settled = True
+                self._align_t0 = self.clock()
+            elif self.clock() - self._align_t0 > self.settle_timeout_s:
+                # Measure from wherever it got to rather than hanging: a
+                # heading that will not settle is a control problem, and
+                # refusing to look at the banner does not fix it.
+                self._align_settled = True
+                self._align_t0 = self.clock()
+            else:
+                self.feedback_message = (
+                    f"turning to {math.degrees(self._align_target):+.0f} deg "
+                    f"({math.degrees(err):.0f} deg to go)")
+            return py_trees.common.Status.RUNNING
+
+        # Settled. Anything measured from here is measured from a still
+        # aircraft, which is the only kind of bearing worth acting on.
         if abs(bearing) <= self.tol:
             self._stable += 1
-            self.mav.goto(x, y, z, psi)
             if self._stable >= self.stable_frames:
                 self.feedback_message = f"aligned, bearing={bearing:+.3f}"
                 return py_trees.common.Status.SUCCESS
@@ -476,10 +543,40 @@ class AlignToBanner(py_trees.behaviour.Behaviour):
             return py_trees.common.Status.RUNNING
 
         self._stable = 0
-        # Positive bearing means the banner is to the RIGHT of frame centre, so
-        # the aircraft must yaw right, which is NEGATIVE yaw in ENU.
-        self.mav.goto(x, y, z, psi - self.yaw_step * bearing)
-        self.feedback_message = f"aligning, bearing={bearing:+.3f}"
+        if self.clock() - self._align_t0 < self.align_dwell_s:
+            self.feedback_message = (f"measuring at "
+                                     f"{math.degrees(self._align_target):+.0f} "
+                                     f"deg, bearing={bearing:+.3f}")
+            return py_trees.common.Status.RUNNING
+
+        if self._corrections >= self.max_corrections:
+            reason = (f"AlignToBanner: {self._corrections} corrections did not "
+                      f"centre the banner (bearing still {bearing:+.2f}); "
+                      f"refusing to hunt indefinitely")
+            self.feedback_message = reason
+            self.mav.abort_reason = reason
+            self.mav.log(reason, warn=True)
+            return py_trees.common.Status.FAILURE
+
+        # Positive bearing means the banner is to the RIGHT of frame centre,
+        # so the aircraft must yaw right, which is NEGATIVE yaw in ENU.
+        theta = self.align_gain * bearing * (self.hfov / 2.0)
+        self._align_target = self._wrap(self._align_target - theta)
+        self._corrections += 1
+        self._align_settled = False
+        self._align_t0 = self.clock()
+        self.feedback_message = (
+            f"correction {self._corrections}: bearing {bearing:+.2f} -> "
+            f"{math.degrees(self._align_target):+.0f} deg")
+        # LOGGED, not just set as feedback. A stage that hunted for a hundred
+        # seconds in flight left no record of a single setpoint it commanded,
+        # because feedback_message never reaches the run log. The next time
+        # this misbehaves the log has to be able to answer "what did it ask
+        # for, and what did the bearing do in response".
+        self.mav.log(f"AlignToBanner correction {self._corrections}: "
+                     f"bearing {bearing:+.2f} at "
+                     f"{math.degrees(psi):+.0f} deg -> commanding "
+                     f"{math.degrees(self._align_target):+.0f} deg")
         return py_trees.common.Status.RUNNING
 
 
@@ -2101,7 +2198,8 @@ def build_root(mav, node, p):
                       sweep_limit_rad=p.get('banner_sweep_limit', 2 * math.pi),
                       step_rad=p.get('banner_sweep_step', math.radians(30.0)),
                       dwell_s=p.get('banner_dwell_s', 5.0),
-                      min_hit_ratio=p.get('banner_min_hit_ratio', 0.6)),
+                      min_hit_ratio=p.get('banner_min_hit_ratio', 0.6),
+                      hfov_rad=p.get('camera_hfov', 1.0472)),
         ClimbInPlace("DescendToCorridorAlt", mav, p['corridor_alt']),
         SetCameraPose("CameraForwardForCorridor2", mav, "FORWARD"),
         # Aligning to the banner is not the same as arriving at it: the gate
@@ -2167,7 +2265,8 @@ def build_root(mav, node, p):
                       sweep_limit_rad=p.get('banner_sweep_limit', 2 * math.pi),
                       step_rad=p.get('banner_sweep_step', math.radians(30.0)),
                       dwell_s=p.get('banner_dwell_s', 5.0),
-                      min_hit_ratio=p.get('banner_min_hit_ratio', 0.6)),
+                      min_hit_ratio=p.get('banner_min_hit_ratio', 0.6),
+                      hfov_rad=p.get('camera_hfov', 1.0472)),
         ClimbInPlace("DescendToReturnCorridor", mav, p['corridor_alt']),
         SetCameraPose("CameraForwardForReturn", mav, "FORWARD"),
         ApproachBanner(mav, alt=p['corridor_alt'],

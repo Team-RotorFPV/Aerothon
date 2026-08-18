@@ -2838,3 +2838,187 @@ starts, so two runs' markers cannot end up in one list with nothing to say
 which was which.
 
 Offline suite after the review: **735 passed, 3 skipped**.
+
+---
+
+## §14 — First watched flight of the §13 stack: seed 1001 (2026-08-19)
+
+The first time any of §13 flew. Three defects in under two minutes of flight,
+none of which the 735-test offline suite could see.
+
+### 14.1 The sweep worked; the alignment after it did not
+
+    AlignToBanner: banner identified at -0 deg after staring at 1 heading(s)
+    (11/11 frames)
+
+The stop-and-stare sweep did exactly what it was built to do -- found the
+banner on the first dwell, on 11 frames out of 11. Then the aircraft hunted
+for 100+ seconds and the mission never left `BANNER_ALIGN`.
+
+The operator called it immediately, and in the same words as the original
+defect: *"it is stuck in the same loop it detects the banner on the left and
+then it yaws right and again in the same loop"*.
+
+Recorded live off `/mavros/local_position/pose` and `/percep/banner`:
+
+| t (s) | yaw (deg) | bearing | identified |
+|---|---|---|---|
+| 6.5 | −1.1 | 0.82 | yes |
+| 9.6 | −15.7 | 0.79 | yes |
+| 10.7 | −26.7 | 0.72 | yes |
+| 11.2 | −31.4 | — | **no** |
+| 13.7 | −1.3 | — | no |
+| 14.2 | −0.5 | 0.81 | yes |
+| 16.3 | −24.6 | — | no |
+| 17.9 | −4.4 | 0.81 | yes |
+
+A limit cycle: −1° to −31° and back, period ~5 s, indefinitely.
+
+**Cause 1 — a receding carrot, again.** `_centre` commanded
+`psi - gain * bearing`, recomputed from the *current* heading every tick. A
+real airframe is still turning when the next setpoint is computed, so the
+target moved away at the same rate the aircraft closed on it. This stack has
+already met this exact failure once, in `ApproachBanner` (§5c), and I
+reproduced it in the stage next door.
+
+**Cause 2 — the dropped-frame hold snapped back.** §13.2 added "hold the
+chosen heading when the banner blinks out", and the heading it held was the
+*dwell* heading. Every time the detector lost the board at the edge of its
+arc, the aircraft was yanked back to where the sweep started, discarding all
+alignment achieved. That is what turned a wobble into a repeating cycle: the
+fix I added to stop oscillation was supplying the reset that made it a loop.
+
+**Why the offline suite could not see it.** Every fake vehicle in the suite
+reaches the commanded yaw *instantly*. With no lag between command and
+achieved heading, a per-tick proportional correction converges beautifully.
+The suite was not wrong about what it tested; it was testing a vehicle that
+cannot exhibit the defect. `SlewMav` now models a rate-limited heading, and
+all six new convergence tests fail against the old code.
+
+**The fix** applies the sweep's own discipline to alignment: latch a target,
+wait for the airframe to actually reach it, hold it long enough for a still
+measurement, then decide whether another correction is needed. Bounded at
+`max_corrections`, then fail closed. The bearing is converted to an angle with
+the camera's field of view rather than a gain -- a bearing *is* a fraction of
+the half-FOV, and the lens was already known.
+
+### 14.2 The scan ledger presented noise as data
+
+The new panel filled with rows like
+
+    BANNER  ???AER????????????   ID   via stroke
+    BANNER  ??N?E??????N?        ID   via brightness
+
+The operator's verdict: *"Its showing a lot of absurd data"*. Correct.
+
+`?` is what the glyph classifier writes for a shape it cannot name. Those rows
+are legitimately identified -- the identity gate passes on **structure**, and
+the reading is only ever a confirming check -- but printing a failed read as
+the payload presents noise as data, and every distinct garbage string became
+its own row, burying everything else in a 120-row list.
+
+Now: unreadable text reports as `BANNER`, a separate `read` flag records
+whether the lettering genuinely resolved, and unreadable rows collapse into
+one.
+
+### 14.3 The path-selection rule rewarded over-segmentation
+
+Underneath 14.2 is a real perception defect. §13.3 ranked the two lettering
+paths by, in order: identified, text confirmed, letters read, **component
+count**. That last term is backwards. When neither path reads the lettering,
+both are structural identifications, and ranking them by component count hands
+the decision to whichever one shattered the board into the most pieces --
+which is exactly what the stroke path does when it is struggling. Eighteen
+glyphs were reported for a word with eight letters.
+
+The tie-break is now plausibility: `-abs(components - expected_letters)`. Eight
+beats eighteen, and eight beats two.
+
+**A test that passed either way.** The first tests written for this ranking
+exercised the rendered fixture and passed *without the fix*, because that
+fixture is a clean frontal banner and the live over-segmentation happened on a
+foreshortened one (aspect 0.63–0.78). A test that cannot fail is worse than no
+test, because it reads as evidence. They were replaced with direct tests of the
+ranking rule, which do fail against the old ordering.
+
+### What this says about §13
+
+§13 closed with "no live flight has been run against any of this", and that
+caveat earned its place within two minutes of the first one. Every §13 fix was
+mutation-checked and the suite was green at 735 tests; the sweep, the routing,
+the ledger and the hover were all genuinely correct in the sense their tests
+described. Two of the three defects here are in the *seam* between a fix and
+the code next to it, and the third is in a ranking rule no test had an opinion
+about.
+
+The suite's blind spot is now named and closed for one case: **no fake vehicle
+had lag.** That is worth looking for elsewhere -- anything asserting on a
+commanded setpoint against a vehicle that reaches it instantly is proving less
+than it appears to.
+
+### 14.4 What the instrumented run finally showed
+
+Third launch, with the alignment logging every correction and the detector
+reporting the box it tracked. Gated on `BANNER_ALIGN`:
+
+```
+    t     yaw   bear  aspect   area_px  box_cx      via         text  reason
+157.4   -0.1   0.87    2.91      1408    1195  brightness   ???????
+158.1   -0.1   0.88    2.02      4656    1206      stroke ????????????
+161.0   -0.1   0.89    4.41      2134    1210  brightness   ???????
+166.3  -18.4   0.74    1.93     56430    1115      stroke ?N?E????????
+167.1  -20.6    nan    0.75         0       0  brightness ??HER???????  aspect 0.75 outside 1.2-8.0
+172.3  -21.7    nan    0.75         0       0      stroke ??AER???????  aspect 0.75 outside 1.2-8.0
+
+AlignToBanner correction 1: bearing +0.89 at -0 deg -> commanding -21 deg
+```
+
+**The sweep aligned to a speck.** `box_cx` 1195 in a 1280-wide frame -- hard
+against the right edge -- with a board of **1408 px in 921600, 0.15% of the
+image**. Twelve frames out of twelve. The bearing of +0.89 was an accurate
+report of where that speck was, so the correction to -21 deg was *right*: at
+-18.4 deg the tracked area jumps to **56430 px**, which is the real banner
+arriving in frame.
+
+**And then the real banner is thrown away**: `board aspect 0.75 outside
+1.2-8.0`. Foreshortened -- the documented seed 1001 failure. The text rescue
+that exists for exactly this cannot fire, because the reading is `??AER???????`
+-- three letters where five are needed.
+
+So the mission dies between two gates. It aligns to a speck, corrects onto the
+true banner, and the aspect gate discards it.
+
+**Why the speck passed.** `min_area_px` was applied to the green CONTOUR, never
+to the derived board. The contour was the green corridor, which is enormous.
+Nothing judged the thing actually being tracked. A board-area gate using the
+same derivation is now in place.
+
+**That gate is not yet proven by a test, and this is recorded rather than
+glossed.** Two fixtures were built and both failed to reach it: hand-drawn
+marks were refused for "0 white components", and the real banner scaled down is
+refused earlier at every small scale and accepted three orders of magnitude
+above the floor. The live speck was not a distant banner but some other
+structure whose light features formed a band, and neither fixture reproduces
+it. A captured frame from a flight will close this.
+
+**The common root.** At -21.7 deg the reading is 12 glyphs for an 8-letter word
+and the derived board is TALLER than wide (aspect 0.75). The board is grown
+from the lettering band, so when the letters fragment, the band is wrong and
+the board is both too small and the wrong shape. Over-segmentation is upstream
+of *both* symptoms -- the speck and the aspect rejection -- and it is worst in
+the stroke path added in 13.3.
+
+### Status of seed 1001
+
+Still failing, and now failing for a understood reason rather than an unknown
+one. Across three watched launches:
+
+| | run 1 | run 2 | run 3 |
+|---|---|---|---|
+| sweep finds banner | yes, 11/11 | yes, 12/12 | yes, 12/12 |
+| alignment | hunted -1..-31 deg for 100 s | clean fail in 12 s | clean fail in 12 s |
+| what it aligned to | unknown | unknown | **a 1408 px speck, measured** |
+| ledger | 18-glyph garbage | fixed | fixed |
+
+The oscillation the operator reported is gone. What replaced it is a
+diagnosable failure with the data to act on.

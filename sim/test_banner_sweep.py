@@ -441,3 +441,161 @@ class FailClosedTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SlewMav(SweepMav):
+    """A heading that SLEWS toward the command instead of teleporting to it.
+
+    This is the whole point of the class. With a fake that reaches the
+    commanded yaw instantly, a per-tick proportional correction converges
+    beautifully and the tests pass -- which is exactly why the live aircraft
+    oscillated for a hundred seconds while the suite was green.
+
+    A real airframe is still turning when the next setpoint is computed. If
+    that setpoint is recomputed from the CURRENT heading every tick, the
+    target runs away from the aircraft at the same speed the aircraft chases
+    it. The stack has met this before, under the name "receding carrot", in
+    ApproachBanner.
+    """
+
+    def __init__(self, banner_at, banner_arc=math.radians(30.0),
+                 slew_rad_per_tick=math.radians(3.0)):
+        super().__init__(banner_at=banner_at, banner_arc=banner_arc)
+        self.slew = float(slew_rad_per_tick)
+
+    def goto(self, x, y, z, yaw=0.0):
+        self.gotos.append((x, y, z, yaw))
+        self.commanded_yaws.append(yaw)
+        err = math.atan2(math.sin(yaw - self._yaw), math.cos(yaw - self._yaw))
+        step = max(-self.slew, min(self.slew, err))
+        self._yaw = math.atan2(math.sin(self._yaw + step),
+                               math.cos(self._yaw + step))
+
+
+class AlignmentConvergesTests(unittest.TestCase):
+    """The live regression: the sweep found the banner and then hunted.
+
+    MEASURED IN FLIGHT, seed 1001, arena regression with the GUI up. The
+    stop-and-stare sweep worked -- "banner identified at -0 deg after staring
+    at 1 heading(s) (11/11 frames)" -- and the aircraft then swung between
+    -1 and -31 degrees on a five-second cycle and never converged:
+
+        t      yaw     bearing  identified
+        6.5    -1.1     0.82    yes
+        9.6   -15.7     0.79    yes
+        10.7  -26.7     0.72    yes
+        11.2  -31.4     0.00    NO      <- detector drops it
+        13.7   -1.3     0.00    NO      <- snapped back to the dwell heading
+        14.2   -0.5     0.81    yes     <- re-acquired, starts over
+
+    Two defects. The correction was recomputed from the current heading on
+    every tick, so it receded; and when the banner dropped, the hold used the
+    DWELL heading rather than the alignment target, throwing away every degree
+    of progress made since.
+    """
+
+    def setUp(self):
+        self.clock = Clock()
+
+    def _stage(self, mav, **kw):
+        kw.setdefault("clock", self.clock)
+        kw.setdefault("dwell_s", 0.5)
+        kw.setdefault("hfov_rad", math.radians(60.0))
+        stage = AlignToBanner(mav, **kw)
+        stage.initialise()
+        return stage
+
+    def test_a_banner_off_to_one_side_is_actually_centred(self):
+        """The headline regression. The banner sits 24 degrees off; the stage
+        has to end up pointing at it, not hunting around it."""
+        mav = SlewMav(banner_at=math.radians(24.0))
+        stage = self._stage(mav)
+        status = run(stage, mav, self.clock, ticks=3000)
+        self.assertIs(status, py_trees.common.Status.SUCCESS,
+                      "alignment never converged")
+        err = abs(math.degrees(math.atan2(
+            math.sin(mav._yaw - math.radians(24.0)),
+            math.cos(mav._yaw - math.radians(24.0)))))
+        self.assertLess(err, 8.0, f"finished {err:.0f} deg off the banner")
+
+    def test_the_commanded_heading_does_not_recede_while_the_aircraft_turns(self):
+        """A setpoint recomputed from the current heading every tick moves
+        away as fast as the aircraft closes on it."""
+        mav = SlewMav(banner_at=math.radians(24.0))
+        stage = self._stage(mav)
+        for _ in range(3000):
+            if stage.update() is not py_trees.common.Status.RUNNING:
+                break
+            self.clock.advance(0.1)
+            if stage.phase is stage.CENTRE and len(mav.commanded_yaws) > 4:
+                break
+        held = mav.commanded_yaws[-3:]
+        self.assertEqual(len(set(round(y, 6) for y in held)), 1,
+                         f"the alignment target moved every tick: {held}")
+
+    def test_it_does_not_oscillate(self):
+        """Stated as the operator sees it: the heading must settle, not swing.
+
+        The live cycle spanned 30 degrees and repeated every five seconds.
+        """
+        mav = SlewMav(banner_at=math.radians(24.0))
+        stage = self._stage(mav)
+        run(stage, mav, self.clock, ticks=3000)
+        tail = [math.degrees(y) for y in mav.commanded_yaws[-12:]]
+        self.assertLess(max(tail) - min(tail), 10.0,
+                        f"still hunting: commanded yaw spanned "
+                        f"{max(tail) - min(tail):.0f} deg at the end")
+
+    def test_a_dropped_frame_holds_the_ALIGNMENT_target_not_the_dwell_heading(self):
+        """The snap-back. Holding the heading the dwell chose discards every
+        degree of alignment achieved since, which is what made the cycle
+        repeat rather than merely wobble."""
+        mav = SlewMav(banner_at=math.radians(24.0))
+        stage = self._stage(mav)
+        dwell_heading = None
+        for _ in range(3000):
+            if stage.update() is not py_trees.common.Status.RUNNING:
+                self.fail("aligned before the test could drop a frame")
+            self.clock.advance(0.1)
+            if stage.phase is stage.CENTRE:
+                if dwell_heading is None:
+                    dwell_heading = stage._target_yaw
+                if abs(mav._yaw - dwell_heading) > math.radians(8.0):
+                    break
+        mav.banner_at = None                        # detector drops it
+        stage.update()
+        commanded = mav.commanded_yaws[-1]
+        self.assertGreater(
+            abs(math.degrees(commanded - dwell_heading)), 4.0,
+            "snapped back to the heading the dwell chose, discarding the "
+            "alignment achieved since")
+
+    def test_the_correction_is_derived_from_the_CAMERA_not_a_constant(self):
+        """A bearing is a fraction of the half-FOV. Turning it into an angle
+        with a magic gain is a hidden assumption about the lens; the stack has
+        one field of view and it is already known."""
+        narrow = SlewMav(banner_at=math.radians(10.0))
+        wide = SlewMav(banner_at=math.radians(10.0))
+        s_narrow = self._stage(narrow, hfov_rad=math.radians(40.0))
+        s_wide = self._stage(wide, hfov_rad=math.radians(90.0))
+        targets = []
+        for st, mv in ((s_narrow, narrow), (s_wide, wide)):
+            for _ in range(3000):
+                if st.update() is not py_trees.common.Status.RUNNING:
+                    break
+                self.clock.advance(0.1)
+                # Wait for a correction to actually be COMMANDED -- until then
+                # both stages are still holding the heading the dwell chose.
+                if st._corrections >= 1:
+                    break
+            targets.append(st._align_target)
+        self.assertNotAlmostEqual(targets[0], targets[1], places=3,
+                                  msg="the same bearing produced the same "
+                                      "correction at two different fields of "
+                                      "view, so the lens is not being used")
+
+    def test_a_banner_already_centred_succeeds_without_hunting(self):
+        mav = SlewMav(banner_at=0.0)
+        stage = self._stage(mav)
+        status = run(stage, mav, self.clock, ticks=3000)
+        self.assertIs(status, py_trees.common.Status.SUCCESS)

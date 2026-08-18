@@ -2246,3 +2246,16 @@ class BuiltTreeCarriesTheNewBehaviourTests(unittest.TestCase):
         for s in self._of_type("WinchDrop"):
             self.assertAlmostEqual(s.marker_m, 2.2)
             self.assertGreaterEqual(s.drop_alt, 0.0)
+
+    def test_the_flown_alignment_uses_the_real_camera_fov(self):
+        """The correction converts a bearing (a fraction of the half-FOV) into
+        an angle. Built with the default lens instead of the configured one,
+        it would under- or over-correct on every run."""
+        for a in self._of_type("AlignToBanner"):
+            self.assertAlmostEqual(a.hfov, 1.0472, places=4)
+
+    def test_the_flown_alignment_is_bounded(self):
+        """It hunted for a hundred seconds in flight before this existed."""
+        for a in self._of_type("AlignToBanner"):
+            self.assertGreater(a.max_corrections, 0)
+            self.assertLessEqual(a.max_corrections, 20)

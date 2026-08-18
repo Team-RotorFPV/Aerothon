@@ -112,6 +112,9 @@ class BannerNode(Node):
         # brighter than its immediate neighbourhood -- which a shadow moves
         # uniformly and so cannot break. It runs BESIDE the brightness path,
         # not instead of it; either may confirm.
+        # How many letters the banner carries. Used to judge which
+        # lettering path segmented it most plausibly.
+        p('expected_letters', 8)
         p('stroke_path', True)
         p('stroke_block_frac', 0.25)   # window size as a fraction of ROI height
         p('stroke_offset', 6)          # how far above the local mean to count
@@ -213,18 +216,43 @@ class BannerNode(Node):
         for path, white in attempts:
             ok, reason, info, board = self._identify_with(frame, bbox, white)
             info["lettering_path"] = path
-            cand = (ok, bool(info.get("text_confirmed")),
-                    int(info.get("text_letters") or 0),
-                    int(info.get("components") or 0))
+            cand = self._rank(ok, info, int(self._g('expected_letters')))
             if best is None or cand > best[0]:
                 best = (cand, (ok, reason, info, board))
         return best[1]
+
+    @staticmethod
+    def _rank(ok, info, expected_letters=8):
+        """How good a candidate reading is. Higher wins.
+
+        WHY THE LAST TERM IS NOT "MORE COMPONENTS"
+
+            It was, and it rewarded the failure mode. When neither path reads
+            the lettering, both are structural identifications, and ranking
+            them by component count hands the decision to whichever one
+            shattered the board into the most pieces. Over-segmentation is
+            exactly what the stroke path does when it is struggling.
+
+            Watched live on a foreshortened board, that produced rows of
+            eighteen glyphs for a word with eight letters:
+
+                BANNER  ???AER????????????   ID   via stroke
+
+            So the tie-break is PLAUSIBILITY: how close the component count is
+            to the number of letters the banner actually has. Eight beats
+            eighteen and beats two.
+        """
+        return (bool(ok),
+                bool(info.get("text_confirmed")),
+                int(info.get("text_letters") or 0),
+                -abs(int(info.get("components") or 0) - int(expected_letters)))
 
     def _identify_with(self, frame, bbox, white):
         """One lettering mask, judged. Shared by both paths on purpose: a
         second copy of this reasoning would be a second definition of what
         counts as the banner."""
         x, y, bw, bh = bbox
+        bh_frame, bw_frame = frame.shape[:2]
 
         n_lab, _, stats, _ = cv2.connectedComponentsWithStats(white, connectivity=8)
         min_area = float(self._g('min_component_frac')) * bw * bh
@@ -266,6 +294,24 @@ class BannerNode(Node):
         oy0 = max(0, by0 - pad_y)
         oy1 = min(bh, by1 + pad_y)
         board = (x + ox0, y + oy0, max(1, ox1 - ox0), max(1, oy1 - oy0))
+
+        # The BOARD has to be big enough to be worth flying at, not just the
+        # green region it was found inside. Those are different things and
+        # only the green region was ever checked.
+        #
+        # MEASURED, seed 1001, watched flight: the sweep confirmed a banner on
+        # 12 frames out of 12 and aligned to a board of 1408 px in a 921600 px
+        # frame -- 0.15% of the image, hard against the right edge. The real
+        # banner, once the aircraft turned toward it, measured 56430 px. The
+        # green corridor it sat in comfortably passed the contour-area gate
+        # the whole time.
+        board_area = float(board[2]) * float(board[3])
+        info["board_area_px"] = int(board_area)
+        if board_area < self.min_area_px(bw_frame, bh_frame):
+            return (False,
+                    f"board {int(board_area)} px below the "
+                    f"{self.min_area_px(bw_frame, bh_frame):.0f} px minimum "
+                    f"for a banner worth aligning to", info, board)
 
         sub = white[oy0:oy1, ox0:ox1]
         frac = (float(np.count_nonzero(sub)) / float(sub.size)) if sub.size else 0.0
@@ -514,6 +560,14 @@ class BannerNode(Node):
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, colour, 2)
 
             if ok and best is None:
+                # NOTE: first-accepted wins, in whatever order contours come
+                # out. That is suspected of being wrong -- watched live, the
+                # tracked box stayed at a roughly fixed place in frame while
+                # the aircraft yawed 25 degrees, which the banner would not do
+                # -- but "largest wins" was tried and regressed nine tests on
+                # the rendered frontal frame. `board_px` / `board_area_px` are
+                # published below so the next flight can say what was actually
+                # being tracked instead of leaving it to inference.
                 best = (board[0], board[1], board[2], board[3], info)
             elif not ok and not detail["reason"]:
                 detail["reason"] = reason
@@ -526,7 +580,12 @@ class BannerNode(Node):
             out.y = float((cy - h / 2) / (h / 2))
             out.z = 1.0
             detail.update({"identified": True, "reason": "", **info,
-                           "bearing": round(out.x, 3)})
+                           "bearing": round(out.x, 3),
+                           # What was actually tracked, so a bearing that does
+                           # not respond to yaw can be told apart from one that
+                           # is tracking the wrong object.
+                           "board_px": [int(x), int(y), int(bw), int(bh)],
+                           "board_area_px": int(bw) * int(bh)})
         elif detail["candidates"]:
             # Green things present, none of them the banner. Distinguish this
             # from "nothing green in frame": they are very different for an

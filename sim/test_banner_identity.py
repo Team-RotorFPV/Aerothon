@@ -357,14 +357,25 @@ class AlignToBannerTests(unittest.TestCase):
                          "aligned to a green object that is not the banner")
 
     def _centre(self, bearing):
-        """Get past the dwell so the fine-alignment yaw can be observed."""
+        """Get to the first CORRECTION so its direction can be observed.
+
+        Alignment is no longer a per-tick proportional yaw -- it latches a
+        target, waits for the airframe to reach it, and measures from a still
+        aircraft. So the direction shows up in the first correction, not in
+        the first tick after the dwell.
+        """
         self.mav.banner = self.Vector3(x=bearing, y=0.0, z=1.0)
-        self.tick(n=12)
+        for _ in range(400):
+            self.tick(n=1)
+            if self.leaf.status is not self.py_trees.common.Status.RUNNING:
+                break
+            if self.leaf.phase is self.leaf.CENTRE and self.leaf._corrections:
+                break
         self.assertEqual(self.leaf.phase, self.leaf.CENTRE,
                          "the dwell never confirmed the banner")
-        before = self.mav.yaw()
-        self.leaf.tick_once()
-        return before, self.mav.gotos[-1][3]
+        self.assertGreaterEqual(self.leaf._corrections, 1,
+                                "no correction was ever commanded")
+        return self.leaf._target_yaw, self.leaf._align_target
 
     def test_banner_right_of_centre_yaws_right(self):
         before, yaw = self._centre(0.5)
@@ -1008,3 +1019,227 @@ class ShadowRobustLetteringTests(unittest.TestCase):
         per_frame = (_t.perf_counter() - t0) / 5.0
         self.assertLess(per_frame, 0.20,
                         f"{per_frame * 1000:.0f} ms per frame")
+
+
+class PathSelectionTests(unittest.TestCase):
+    """Which lettering path wins, and why it must not be "whichever found more".
+
+    WATCHED LIVE (seed 1001). The panel filled with rows like
+
+        BANNER  ???AER????????????   ID   via stroke
+        BANNER  ??N?E??????N?        ID   via brightness
+
+    Eighteen glyphs where AEROTHON has eight. The selection rule ranked
+    candidates by component count once neither path had confirmed a read, so
+    the path that fragmented the lettering into the most pieces won -- and
+    over-segmentation is precisely what the stroke path does when it is
+    struggling. The tie-break was rewarding the failure mode.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        if not rclpy.ok():
+            rclpy.init()
+
+    @classmethod
+    def tearDownClass(cls):
+        if rclpy.ok():
+            rclpy.shutdown()
+
+    def setUp(self):
+        self.node = BannerNode()
+        self.sent, self.detail = [], []
+        self.node.pub.publish = self.sent.append
+        self.node.pub_detail.publish = self.detail.append
+        self.node.pub_annot.publish = lambda m: None
+        path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "tests", "fixtures", "banner_sim_ambient_3m.png")
+        self.src = cv2.imread(path)
+        self.assertIsNotNone(self.src)
+
+    def tearDown(self):
+        self.node.destroy_node()
+
+    def _feed(self, img):
+        import json
+        from cv_bridge import CvBridge
+        self.node.on_image(CvBridge().cv2_to_imgmsg(img, encoding="bgr8"))
+        return self.sent[-1], json.loads(self.detail[-1].data)
+
+    def _shaded(self, far_edge):
+        w = self.src.shape[1]
+        ramp = np.linspace(1.0, far_edge, w, dtype=np.float32)[None, :, None]
+        return np.clip(self.src.astype(np.float32) * ramp,
+                       0, 255).astype(np.uint8)
+
+    def test_a_confirmed_read_beats_an_unconfirmed_one(self):
+        """The one ordering that is never in doubt."""
+        _, d = self._feed(self.src)
+        self.assertTrue(d.get("text_confirmed"))
+        self.assertEqual(d.get("text"), "AEROTHON")
+
+    def test_the_reported_text_never_has_more_glyphs_than_the_banner_has(self):
+        """AEROTHON is eight letters. Eighteen is not a better reading of it."""
+        for shade in (1.0, 0.6, 0.4, 0.3, 0.25):
+            _, d = self._feed(self._shaded(shade))
+            text = d.get("text", "")
+            self.assertLessEqual(
+                len(text), 8,
+                f"shade {shade}: reported {len(text)} glyphs {text!r}")
+
+    def test_an_unreadable_candidate_does_not_win_on_component_count(self):
+        """When neither path reads, the conservative path is the honest
+        answer -- not the one that shattered the board into the most pieces."""
+        _, d = self._feed(self._shaded(0.15))
+        if not d.get("text_confirmed"):
+            self.assertLessEqual(len(d.get("text", "")), 8)
+
+    def test_the_detail_still_says_which_path_was_used(self):
+        _, d = self._feed(self._shaded(0.30))
+        self.assertIn(d.get("lettering_path"), ("brightness", "stroke"))
+
+    def test_the_shaded_rescue_still_works(self):
+        """The tie-break fix must not undo 13.3."""
+        _, d = self._feed(self._shaded(0.30))
+        self.assertGreaterEqual(d.get("text_letters", 0), 5, d)
+
+    # ---- the ranking rule itself ---- #
+    #
+    # Tested directly, on synthetic candidates. The rendered fixture in this
+    # file is a clean frontal banner and does NOT reproduce the live
+    # over-segmentation, which happened on a foreshortened board (aspect
+    # 0.63-0.78). A test that only exercises the fixture would pass either
+    # way, which is worse than no test: it would read as evidence.
+
+    def test_a_confirmed_read_outranks_everything(self):
+        confirmed = BannerNode._rank(True, {"text_confirmed": True,
+                                            "text_letters": 6,
+                                            "components": 6})
+        fragmented = BannerNode._rank(True, {"text_confirmed": False,
+                                             "text_letters": 0,
+                                             "components": 18})
+        self.assertGreater(confirmed, fragmented)
+
+    def test_a_PLAUSIBLE_segmentation_beats_a_fragmented_one(self):
+        """The live defect, stated as the rule that now prevents it: eight
+        components is a better account of an eight-letter banner than
+        eighteen, even though eighteen is 'more'."""
+        plausible = BannerNode._rank(True, {"components": 8})
+        fragmented = BannerNode._rank(True, {"components": 18})
+        self.assertGreater(plausible, fragmented,
+                           "ranking still rewards over-segmentation")
+
+    def test_it_does_not_simply_prefer_FEWER_either(self):
+        """Two blobs is not a reading of AEROTHON."""
+        plausible = BannerNode._rank(True, {"components": 8})
+        sparse = BannerNode._rank(True, {"components": 2})
+        self.assertGreater(plausible, sparse)
+
+    def test_more_letters_actually_read_still_wins(self):
+        many = BannerNode._rank(True, {"text_confirmed": True,
+                                       "text_letters": 8, "components": 8})
+        few = BannerNode._rank(True, {"text_confirmed": True,
+                                      "text_letters": 5, "components": 8})
+        self.assertGreater(many, few)
+
+    def test_an_identified_candidate_always_beats_a_rejected_one(self):
+        ident = BannerNode._rank(True, {"components": 2})
+        rejected = BannerNode._rank(False, {"text_confirmed": True,
+                                            "text_letters": 8,
+                                            "components": 8})
+        self.assertGreater(ident, rejected)
+
+
+class BoardAreaGateTests(unittest.TestCase):
+    """The aircraft must not align to a speck.
+
+    MEASURED IN FLIGHT (seed 1001, watched). The stop-and-stare sweep
+    confirmed a banner on 12 frames out of 12 and aligned to a board of
+    1408 px in a 921600 px frame -- 0.15% of the image, sitting hard against
+    the right edge at box_cx 1195 of 1280. When the aircraft then turned
+    toward it, the REAL banner came into view at 56430 px.
+
+    The contour-area gate had been passing the whole time, because it judges
+    the green REGION the lettering was found inside -- and the region was the
+    green corridor, which is enormous. Nothing judged the board itself.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        if not rclpy.ok():
+            rclpy.init()
+
+    @classmethod
+    def tearDownClass(cls):
+        if rclpy.ok():
+            rclpy.shutdown()
+
+    def setUp(self):
+        self.node = BannerNode()
+        self.sent, self.detail = [], []
+        self.node.pub.publish = self.sent.append
+        self.node.pub_detail.publish = self.detail.append
+        self.node.pub_annot.publish = lambda m: None
+
+    def tearDown(self):
+        self.node.destroy_node()
+
+    def _feed(self, img):
+        import json
+        from cv_bridge import CvBridge
+        self.node.on_image(CvBridge().cv2_to_imgmsg(img, encoding="bgr8"))
+        return self.sent[-1], json.loads(self.detail[-1].data)
+
+    def test_the_floor_is_derived_not_a_fraction_of_the_frame(self):
+        """Same derivation the contour gate uses: a banner of the configured
+        size at the configured maximum range."""
+        self.assertGreater(self.node.min_area_px(1280, 720), 0)
+        self.assertAlmostEqual(
+            self.node.min_area_px(1280, 720) / self.node.min_area_px(640, 360),
+            4.0, places=1,
+            msg="the floor must scale with the sensor, not sit at a constant")
+
+    # NOTE — THE GATE ITSELF IS NOT YET PROVEN BY A TEST.
+    #
+    # Two attempts failed honestly and are recorded rather than deleted:
+    #
+    #   1. Hand-drawn light marks in a green field. Refused for "only 0 white
+    #      component(s)" -- it never reached the area gate, so it passed with
+    #      the gate removed exactly as happily as with it.
+    #   2. The real rendered banner scaled down. Measured across scales, it is
+    #      refused EARLIER at every size small enough to matter (lettering
+    #      unreadable below ~0.25 scale) and accepted at 352k-522k px, three
+    #      orders of magnitude above the 1966 px floor. It never reaches the
+    #      gate either.
+    #
+    # The live speck was not a distant banner. It was some other structure
+    # whose light features happened to form a horizontal band, and neither
+    # fixture reproduces that. A captured frame from a flight is what will
+    # close this; sim/record_stage.py is where that belongs.
+    #
+    # The gate stays in regardless: the board being tracked was not judged AT
+    # ALL, and a mission that turns and flies at 0.15% of the frame is
+    # indefensible whether or not this file can currently reproduce it.
+
+    def test_a_REAL_banner_is_far_above_the_floor(self):
+        """The gate must not be anywhere near the thing it has to accept."""
+        path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "tests", "fixtures", "banner_sim_ambient_3m.png")
+        img = cv2.imread(path)
+        out, d = self._feed(img)
+        self.assertEqual(out.z, 1.0, f"rejected the real banner: {d}")
+        h, w = img.shape[:2]
+        self.assertGreater(d.get("board_area_px", 0),
+                           10 * self.node.min_area_px(w, h),
+                           "the real banner is uncomfortably close to the floor")
+
+    def test_the_tracked_board_is_reported_so_this_is_diagnosable(self):
+        """Two flights failed without recording what was being tracked."""
+        path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "tests", "fixtures", "banner_sim_ambient_3m.png")
+        _, d = self._feed(cv2.imread(path))
+        self.assertIn("board_px", d)
+        self.assertIn("board_area_px", d)

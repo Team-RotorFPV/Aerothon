@@ -70,8 +70,12 @@ done
 sleep 3
 
 export AEROTHON_OFFICIAL_WS="${AEROTHON_OFFICIAL_WS:-$HOME/aerothon_stack}"
-export AEROTHON_OPEN_GCS=0
-export AEROTHON_HEADLESS=1
+# Both default to a measurement run -- no GUI, no browser -- but stay
+# overridable, so the same harness can be used to WATCH a run. Hardcoding them
+# meant the only way to fly a regression seed by eye was to edit this file,
+# and an edited harness is not the harness the results came from.
+export AEROTHON_OPEN_GCS="${AEROTHON_OPEN_GCS:-0}"
+export AEROTHON_HEADLESS="${AEROTHON_HEADLESS:-1}"
 export AEROTHON_START_TARGET="$START_TARGET"
 
 setsid bash scripts/launch_level6_sim.sh > "$LOG" 2>&1 &

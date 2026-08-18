@@ -162,7 +162,7 @@ class Aggregator(Node):
     # Scan ledger
     # ------------------------------------------------------------------ #
     def _record_scan(self, kind, payload="", matched=False, reason="",
-                     status="", via=""):
+                     status="", via="", read=False):
         """Add or update one row. De-duplicated HERE, not in the browser.
 
         The identity of a row is what it says, not when it was said: the same
@@ -180,6 +180,8 @@ class Aggregator(Node):
                 e["t_last"] = round(self._uptime(), 1)
                 if via:
                     e["via"] = via
+                if read and not e["read"]:
+                    e["read"] = True
                 # A match is never withdrawn by a later frame: losing the
                 # marker for one frame does not un-match the mission.
                 if matched and not e["matched"]:
@@ -197,6 +199,9 @@ class Aggregator(Node):
                                  ("DECODED" if payload else "REJECTED")),
             "reason": reason,
             "via": via,
+            # Did the lettering actually READ, or did this pass on structure
+            # alone? Different claims, and the panel must not blur them.
+            "read": bool(read),
             "stage": self.state["mission"].get("state", ""),
             "t": round(self._uptime(), 1),
             "t_last": round(self._uptime(), 1),
@@ -236,8 +241,17 @@ class Aggregator(Node):
         except (ValueError, TypeError):
             return
         if d.get("identified"):
-            self._record_scan("banner", payload=str(d.get("text") or "BANNER"),
-                              status="IDENTIFIED",
+            # The glyph classifier writes '?' for anything it cannot name, and
+            # the identity gate passes on STRUCTURE -- so a legitimately
+            # identified banner routinely carries a text field like
+            # "??N?E??????N?". Printing that as the payload presents a failed
+            # read as data, and every distinct garbage string became its own
+            # row, burying everything else in the list.
+            confirmed = bool(d.get("text_confirmed"))
+            text = str(d.get("text") or "")
+            payload = text if (confirmed and "?" not in text) else "BANNER"
+            self._record_scan("banner", payload=payload, status="IDENTIFIED",
+                              read=confirmed and "?" not in text,
                               via=str(d.get("lettering_path") or ""))
         elif d.get("reason"):
             self._record_scan("banner", reason=str(d.get("reason")))

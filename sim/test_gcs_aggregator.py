@@ -251,7 +251,9 @@ class ScanLedgerTests(unittest.TestCase):
         self.assertIn("aspect 0.73", self.ledger()[0]["reason"])
 
     def test_an_identified_banner_records_the_text_it_read(self):
-        self._banner(identified=True, text="AEROTHON")
+        """"the text it READ" -- so the reader has to have confirmed it. An
+        unconfirmed field is a failed read, not a quieter one."""
+        self._banner(identified=True, text="AEROTHON", text_confirmed=True)
         e = self.ledger()[0]
         self.assertEqual(e["status"], "IDENTIFIED")
         self.assertEqual(e["payload"], "AEROTHON")
@@ -259,6 +261,47 @@ class ScanLedgerTests(unittest.TestCase):
     def test_the_reading_path_is_recorded_so_a_rescue_is_visible(self):
         self._banner(identified=True, text="AEROTHON", lettering_path="stroke")
         self.assertEqual(self.ledger()[0]["via"], "stroke")
+
+    def test_an_UNREADABLE_reading_is_not_shown_as_a_reading(self):
+        """Watched live, the panel filled with rows like
+
+            BANNER  ??N?E??????N?   ID   via brightness
+            BANNER  ???AER????????????  ID  via stroke
+
+        The glyph classifier marks anything it cannot name '?'. Those rows are
+        legitimately identified -- identity passes on STRUCTURE, and the text
+        is only ever a confirming check -- but printing the failed read as the
+        payload presents noise as data. The operator called it what it is:
+        absurd.
+        """
+        self._banner(identified=True, text="??N?E??????N?")
+        self.assertEqual(self.ledger()[0]["payload"], "BANNER")
+
+    def test_a_partial_reading_is_not_shown_either(self):
+        self._banner(identified=True, text="?N?ER????N?")
+        self.assertNotIn("?", self.ledger()[0]["payload"])
+
+    def test_a_REAL_reading_is_still_shown(self):
+        self._banner(identified=True, text="AEROTHON", text_confirmed=True)
+        self.assertEqual(self.ledger()[0]["payload"], "AEROTHON")
+
+    def test_a_confirmed_reading_is_marked_as_actually_READ(self):
+        """A structural identification and one that read the lettering are
+        different claims, and the panel has to keep them apart."""
+        self._banner(identified=True, text="AEROTHON", text_confirmed=True)
+        self.assertTrue(self.ledger()[0]["read"])
+        self._banner(identified=True, text="??N?E??")
+        rows = [r for r in self.ledger() if r["payload"] == "BANNER"]
+        self.assertTrue(rows)
+        self.assertFalse(rows[0]["read"])
+
+    def test_unreadable_rows_collapse_into_ONE_row(self):
+        """Every distinct garbage string was its own row, so a single banner
+        produced dozens of them and pushed everything else out of the list."""
+        for t in ("?????", "??N?E??", "???AER??????", "?N?E????N?"):
+            self._banner(identified=True, text=t)
+        self.assertEqual(len(self.ledger()), 1)
+        self.assertEqual(self.ledger()[0]["count"], 4)
 
     def test_repeated_rejections_for_the_same_reason_collapse(self):
         for _ in range(50):
