@@ -1865,7 +1865,8 @@ class GateAdvance(py_trees.behaviour.Behaviour):
     """
 
     def __init__(self, mav, advance_m=10.0, alt=3.0, tol=1.0,
-                 timeout_ticks=600, clearance_m=DEFAULT_CLEARANCE_M):
+                 timeout_ticks=600, clearance_m=DEFAULT_CLEARANCE_M,
+                 exclusions=()):
         super().__init__("GateAdvance")
         self.mav = mav
         self.advance_m = float(advance_m)
@@ -1873,8 +1874,15 @@ class GateAdvance(py_trees.behaviour.Behaviour):
         self.tol = float(tol)
         self.timeout_ticks = int(timeout_ticks)
         self.router = LegRouter(clearance_m=clearance_m, tol=tol)
+        self.exclusions = exclusions
         self._target = None
         self._t = 0
+
+    def _current_exclusions(self):
+        ex = self.exclusions
+        if callable(ex):
+            ex = ex()
+        return list(ex or [])
 
     def initialise(self):
         self._target = None
@@ -1892,26 +1900,39 @@ class GateAdvance(py_trees.behaviour.Behaviour):
             psi = self.mav.yaw()
             self._target = (x + self.advance_m * math.cos(psi),
                             y + self.advance_m * math.sin(psi))
-            self.mav.enable_avoidance(True, hold_alt=self.alt)
+            # ONE CONTROLLER AT A TIME.
+            #
+            # This used to hand control to the follow-the-gap navigator AND
+            # keep streaming position setpoints at the target, because
+            # `enable_avoidance(True)` clears the streamed setpoint and the
+            # router's next tick sets it again. Both then publish, ten times a
+            # second, and they do not want the same thing.
+            #
+            # MEASURED, run 18: the stage squared up, latched a target 10 m
+            # ahead at (11.6, -4.8), and the aircraft finished at (16.0,
+            # -68.0) -- sixty-three metres south, at a steady 3.0 m, into open
+            # field. Follow-the-gap steers toward the widest opening and has
+            # no notion of a destination, so given a wall on one side and an
+            # empty arena on the other it flies at the arena. That is right
+            # for traversing a corridor and wrong for covering a measured
+            # distance to a point.
+            #
+            # The avoidance that belongs on this leg is the exclusion routing
+            # the LegRouter already does: it detours the airframe around
+            # confirmed red ground, and it refuses rather than flying a leg it
+            # cannot make legal. The corridor stage that follows is where the
+            # gap navigator earns its keep.
+            self.mav.enable_avoidance(False)
             self.mav.log(
                 f"gate identified and aligned; advancing {self.advance_m:.0f} m "
                 f"through it to ({self._target[0]:.1f}, {self._target[1]:.1f}) "
-                f"at {math.degrees(psi):+.0f} deg, avoidance on")
+                f"at {math.degrees(psi):+.0f} deg, routed around "
+                f"{len(self._current_exclusions())} confirmed exclusion(s)")
 
         if math.hypot(self._target[0] - x, self._target[1] - y) <= self.tol:
-            self.mav.enable_avoidance(False)
             self.mav.record_corridor_exit()
             self.feedback_message = f"advanced {self.advance_m:.0f} m past the gate"
             return py_trees.common.Status.SUCCESS
-
-        if self.mav.avoidance_stuck():
-            reason = (f"GateAdvance: the navigator could not find a way "
-                      f"through the gate after "
-                      f"{math.hypot(x - self._target[0], y - self._target[1]):.1f} m "
-                      f"remaining")
-            self.feedback_message = reason
-            self.mav.abort_reason = reason
-            return py_trees.common.Status.FAILURE
 
         if self._t > self.timeout_ticks:
             reason = (f"GateAdvance: {self.advance_m:.0f} m not covered in "
@@ -3080,7 +3101,8 @@ def build_root(mav, node, p):
         # while still at the mouth.
         GateAdvance(mav, advance_m=p.get('gate_advance_m', 10.0),
                     alt=p['corridor_alt'],
-                    clearance_m=p.get('redzone_clearance', 1.5)),
+                    clearance_m=p.get('redzone_clearance', 1.5),
+                    exclusions=lambda: mav.exclusions),
         Corridor("Corridor", mav, forward=True, alt=p['corridor_alt']),
         # Phase 6: the delivery zone is MEASURED at the corridor mouth, not
         # asserted. Replaces zone_entry + zone_bounds (audit A7, A8).
@@ -3154,7 +3176,8 @@ def build_root(mav, node, p):
         SetCameraPose("CameraForwardForReturn", mav, "FORWARD"),
         GateAdvance(mav, advance_m=p.get('gate_advance_m', 10.0),
                     alt=p['corridor_alt'],
-                    clearance_m=p.get('redzone_clearance', 1.5)),
+                    clearance_m=p.get('redzone_clearance', 1.5),
+                    exclusions=lambda: mav.exclusions),
         Corridor("ReturnCorridor", mav, forward=False, alt=p['corridor_alt']),
         GotoHome(mav, p['takeoff_alt'],
                  clearance_m=p.get('redzone_clearance', 1.5)),

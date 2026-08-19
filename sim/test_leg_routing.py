@@ -486,12 +486,47 @@ class GateAdvanceTests(unittest.TestCase):
         self.assertAlmostEqual(stage._target[0], 0.0, places=3)
         self.assertAlmostEqual(stage._target[1], 10.0, places=3)
 
-    def test_obstacle_avoidance_is_ON_for_the_leg(self):
-        """The corridor walls are close and red ground is confirmed by now."""
+    def test_only_ONE_controller_drives_the_leg(self):
+        """MEASURED, run 18. This stage used to hand control to the
+        follow-the-gap navigator AND keep streaming position setpoints at its
+        latched target, because enabling avoidance clears the streamed
+        setpoint and the router's next tick sets it again. Both then publish,
+        ten times a second, and they do not want the same thing.
+
+        The aircraft squared up, latched a target 10 m ahead at (11.6, -4.8),
+        and finished at (16.0, -68.0) -- sixty-three metres south, at a steady
+        3.0 m, into open field. Follow-the-gap steers at the widest opening
+        and has no notion of a destination, so with a wall one side and an
+        empty arena the other it flies at the arena.
+
+        The avoidance this leg needs is the exclusion routing the LegRouter
+        already does. The corridor stage after it is where the gap navigator
+        belongs.
+        """
         mav = RoutedMav(at=(0.0, 0.0, 3.0))
         stage = self._stage(mav)
         stage.update()
-        self.assertTrue(mav.avoidance)
+        self.assertFalse(mav.avoidance,
+                         "handed the leg to a navigator with no destination "
+                         "while still streaming setpoints at one")
+        self.assertTrue(mav.gotos, "nothing flew the leg at all")
+
+    def test_the_leg_is_still_ROUTED_around_confirmed_red_ground(self):
+        """Dropping the gap navigator must not drop the exclusion routing;
+        they are different things and only one of them knows the target."""
+        blocked = [(3.0, 7.0, -2.0, 2.0)]
+        mav = RoutedMav(at=(0.0, 0.0, 3.0))
+        stage = self._stage(mav, exclusions=lambda: blocked, clearance_m=1.0)
+        stage.update()
+        for _ in range(40):
+            if stage.update() is not py_trees.common.Status.RUNNING:
+                break
+            mav._pos = (mav.gotos[-1][0], mav.gotos[-1][1], 3.0)
+        flown = [(g[0], g[1]) for g in mav.gotos]
+        inside = [(x, y) for x, y in flown
+                  if 3.0 <= x <= 7.0 and -2.0 <= y <= 2.0]
+        self.assertEqual(inside, [],
+                         f"flew the airframe through red ground: {inside}")
 
     def test_avoidance_is_released_when_the_leg_ends(self):
         mav = RoutedMav(at=(0.0, 0.0, 3.0))
@@ -501,14 +536,6 @@ class GateAdvanceTests(unittest.TestCase):
         stage.update()
         stage.terminate(py_trees.common.Status.SUCCESS)
         self.assertFalse(mav.avoidance)
-
-    def test_a_navigator_that_gets_stuck_FAILS_CLOSED(self):
-        mav = RoutedMav(at=(0.0, 0.0, 3.0))
-        stage = self._stage(mav)
-        stage.update()
-        mav.stuck = True
-        self.assertIs(stage.update(), py_trees.common.Status.FAILURE)
-        self.assertIn("gate", mav.abort_reason.lower())
 
     def test_the_corridor_exit_pose_is_recorded_on_arrival(self):
         """The return leg navigates back to it."""
