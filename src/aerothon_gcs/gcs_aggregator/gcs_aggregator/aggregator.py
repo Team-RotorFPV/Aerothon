@@ -78,6 +78,8 @@ class Aggregator(Node):
         self.create_subscription(String, "/mission_ready/detail",
                                  self._on_ready_detail, q)
         self.create_subscription(String, "/mission/state", self._on_mission_state, q)
+        self.create_subscription(String, "/mission/square_on",
+                                 self._on_square_on, q)
         # The terminal outcome, including the delivery accuracy as a NUMBER.
         self.create_subscription(String, "/mission/result", self._on_mission_result, q)
         # Real slam_toolbox occupancy grid (throttled + downsampled to the GCS).
@@ -127,7 +129,15 @@ class Aggregator(Node):
             "percep": {"start_qr": "", "target_match": False, "banner": False,
                        "redzone_visible": False, "redzone_status": "UNKNOWN",
                        "redzone_reason": "", "redzone_exclusions": [],
-                       "redzone_area_m2": 0.0},
+                       "redzone_area_m2": 0.0,
+                       # SQUARE ON, measured with the lidar. "Aligned" says
+                       # only where the nose points; this says how far off
+                       # perpendicular to the banner's face the aircraft is
+                       # and how far off it is standing. None until the stage
+                       # has actually measured -- a zero here would read as
+                       # perfectly square.
+                       "square_angle_deg": None, "square_standoff_m": None,
+                       "square_ok": None, "square_reason": ""},
             # ekf and geofence were hardcoded True / "INSIDE" and never
             # updated, so the panel asserted the two things an operator most
             # needs to trust. They now start UNKNOWN and only ever show what
@@ -234,6 +244,23 @@ class Aggregator(Node):
             reason = r.get("reason") if isinstance(r, dict) else str(r)
             if reason:
                 self._record_scan("qr", reason=str(reason))
+
+    def _on_square_on(self, m):
+        """How square the aircraft is to the banner, while it converges.
+
+        The operator watching a live flight could see the aircraft moving and
+        not what it believed about its angle to the gate, which is the one
+        number the stage decides on.
+        """
+        try:
+            d = json.loads(m.data)
+        except (ValueError, TypeError):
+            return
+        pc = self.state["percep"]
+        pc["square_ok"] = d.get("ok")
+        pc["square_angle_deg"] = d.get("angle_deg")
+        pc["square_standoff_m"] = d.get("standoff_m")
+        pc["square_reason"] = str(d.get("reason") or "")
 
     def _on_banner_detail(self, m):
         try:

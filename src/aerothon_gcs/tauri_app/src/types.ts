@@ -39,6 +39,13 @@ export interface Telemetry {
     redzone_reason?: string;
     redzone_exclusions?: number[][];
     redzone_area_m2?: number;
+    // Square on: perpendicular to the banner's FACE, measured by the lidar.
+    // Distinct from `banner`, which only says the nose points at it. null
+    // means not measured -- never render it as zero.
+    square_ok?: boolean | null;
+    square_angle_deg?: number | null;
+    square_standoff_m?: number | null;
+    square_reason?: string;
   };
   safety: {
     ready: boolean; fcu_connected?: boolean; ekf?: boolean; geofence?: string;

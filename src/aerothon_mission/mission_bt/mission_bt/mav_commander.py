@@ -301,14 +301,13 @@ class Mav:
             d = json.loads(m.data)
         except (ValueError, TypeError):
             return
-        # How SQUARE the aircraft is to the board.
-        #
-        # A banner is widest seen face-on and compresses as you move off its
-        # perpendicular. So the apparent aspect is a direct, measured answer
-        # to "am I in front of it yet" -- which is the question that has to be
-        # answered before committing to a waypoint through the gate. Watched
-        # live, the aircraft set a 10 m waypoint while still off to one side
-        # and flew away from the arena.
+        # DETECTOR TELEMETRY ONLY. The board aspect was once read as "how
+        # square am I to the board", on the theory that a banner is widest
+        # seen face-on. The derived box includes the gate posts, so it
+        # plateaus at 1.88-1.91 whatever the aircraft does, and no threshold
+        # above that was reachable. Squareness is measured with the lidar now
+        # (surface_ahead); these two numbers are recorded because they are
+        # useful in a run artifact, and nothing steers on them.
         if d.get('identified'):
             self.banner_board_aspect = float(d.get('board_aspect') or 0.0)
             self.banner_board_area = float(d.get('board_area_px') or 0.0)
@@ -318,10 +317,6 @@ class Mav:
             self.banner_reject_reason = reason
             self.banner_reject_counts[reason] = \
                 self.banner_reject_counts.get(reason, 0) + 1
-
-    def banner_aspect(self):
-        """Apparent width/height of the board. Peaks when square to it."""
-        return float(getattr(self, "banner_board_aspect", 0.0))
 
     def banner_rejection_summary(self, top=3):
         """The commonest reasons candidates were rejected, most frequent first.

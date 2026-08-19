@@ -18,7 +18,7 @@ recognisable forms:
    world.
 
 Every one of these traces back to the same root cause: **squareness is being
-inferred from how the banner looks to the camera** — the aspect ratio of a
+inferred from how the banner looks to the camera**, from the aspect ratio of a
 bounding box derived from green pixels. That box includes the gate posts, so
 it never gets slender no matter how square the aircraft is. Its measured
 plateau is 1.88 to 1.91. A threshold of 2.00 was unreachable. Lowering the
@@ -124,8 +124,8 @@ that fires on bad data is precisely how the aircraft flew out of the world.
     banner being at one particular height.
 25. As a mission operator, I want the run to reach the payload zone on seed
     1001 with the GUI up, so that I can watch the whole sequence end to end.
-26. As a developer, I want each fix verified on a live flight and not only in
-    the suite, so that a green suite is treated as permission to fly rather
+26. As a developer, I want each fix verified on a live flight before it is
+    called done, so that a green suite is treated as permission to fly rather
     than as evidence the fix works.
 
 ## Implementation decisions
@@ -136,7 +136,7 @@ One new seam, consumed through one existing seam. This is deliberate; the
 codebase has been bitten repeatedly by tests that graded a copy of the logic
 rather than the logic.
 
-**New seam — a pure scan-geometry function.** Takes the raw scan (angle
+**New seam, a pure scan-geometry function.** Takes the raw scan (angle
 minimum, angle increment, range array), plus a bearing and half-width naming
 the sector to search. Returns the fitted surface: the signed angle between the
 surface normal and the aircraft nose, the perpendicular distance to it, the
@@ -145,7 +145,7 @@ reason string, when no surface is found. Pure arithmetic, no ROS types, no
 clock. Modelled on `route_leg` in the search planner, which is the prior art
 in this repo for a pure geometry function with a structured result.
 
-**Existing seam — the mission commander.** The commander gains a subscription
+**Existing seam, the mission commander.** The commander gains a subscription
 to the scan topic and exposes the fitted surface to the behaviour tree, the
 same way it already exposes the banner bearing and detail. The behaviour tree
 never touches a ROS message. Tests drive the tree through the fake commander,

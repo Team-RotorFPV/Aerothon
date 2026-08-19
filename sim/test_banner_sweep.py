@@ -774,7 +774,9 @@ class GateMav(LagMav):
 
     def __init__(self, gate=(6.0, 0.0), face_rad=math.pi, start=(0.0, 0.0, 3.0),
                  gate_top_m=4.0, hfov=math.radians(60.0),
-                 visible=True, lidar_blind=False, **kw):
+                 visible=True, lidar_blind=False,
+                 max_ident_range_m=None, min_ident_alt_m=None,
+                 only_within_m=None, **kw):
         super().__init__(banner_at=None, **kw)
         self.gate = (float(gate[0]), float(gate[1]))
         # Which way the face POINTS. The aircraft squares up when its nose is
@@ -784,6 +786,17 @@ class GateMav(LagMav):
         self.hfov = float(hfov)
         self.visible = visible          # the camera can see it
         self.lidar_blind = lidar_blind  # the lidar never finds a face
+        # HOW THE CAMERA ACTUALLY LOSES IT, both watched live.
+        #
+        # `max_ident_range_m` is "green region too small (3416 px, need
+        # 8533)": too far away and the board subtends too few pixels to
+        # identify, whatever the heading. `min_ident_alt_m` is the sighting
+        # lost on the descent. Neither is a bearing error, so neither can be
+        # recovered by yawing -- which is the whole point of the tests below.
+        self.max_ident_range_m = max_ident_range_m
+        self.min_ident_alt_m = min_ident_alt_m
+        self.only_within_m = only_within_m       # visible only near one spot
+        self.good_spot = None
         self._pos = (float(start[0]), float(start[1]), float(start[2]))
         self._alt = self._pos[2]
         self._yaw = 0.0
@@ -815,6 +828,16 @@ class GateMav(LagMav):
     # ---- what the camera reports ---- #
     def banner_identified(self):
         if not self.visible:
+            return False
+        vx, vy = self._to_gate()
+        if self.max_ident_range_m is not None \
+                and math.hypot(vx, vy) > self.max_ident_range_m:
+            return False
+        if self.min_ident_alt_m is not None \
+                and self._pos[2] < self.min_ident_alt_m:
+            return False
+        if self.only_within_m is not None and self.good_spot is not None \
+                and math.dist(self._pos[:2], self.good_spot) > self.only_within_m:
             return False
         return abs(self._bearing_angle()) < self.hfov / 2.0
 
@@ -978,11 +1001,16 @@ class SquareOnWithTheLidarTests(unittest.TestCase):
         self.assertTrue(mav.banner_identified(),
                         "the camera was meant to be confident throughout")
 
-    def test_the_refusal_names_the_measurement_it_could_not_take(self):
+    def test_the_refusal_names_where_it_stood_and_what_it_saw(self):
+        """"No banner found" is not a diagnosis, and neither is a list of
+        headings when the problem was the position. The give-up message names
+        every vantage point tried and the best frame at each."""
         mav = GateMav(gate=(5.0, 0.0), face_rad=math.pi, lidar_blind=True)
-        self._fly(mav, ticks=6000)
+        self._fly(mav, ticks=9000)
+        self.assertIn("vantage point", mav.abort_reason)
         self.assertIn("no flat face", mav.abort_reason)
-        self.assertIn("refusing to advance", mav.abort_reason)
+        self.assertRegex(mav.abort_reason, r"\(-?\d+\.\d+, -?\d+\.\d+",
+                         "the message does not say where the aircraft stood")
 
     def test_a_momentarily_lost_camera_does_not_stop_the_lidar(self):
         """The camera says WHERE to look and the lidar says what is there. A
@@ -1135,6 +1163,215 @@ class SquareOnWithTheLidarTests(unittest.TestCase):
         self.assertIn("standoff", lines[-1])
 
 
+class CentringIsACameraJobTests(unittest.TestCase):
+    """Turning to face the banner must never wait on the lidar.
+
+    WATCHED LIVE, run 16 onward: the aircraft held station, CONTINUING TO
+    DETECT the banner the whole time, and never turned toward it. Squareness
+    had been made a precondition of everything behind it, so a lidar that
+    could not confirm perpendicularity also stopped the aircraft doing the one
+    thing it plainly could do -- point its nose at a board it could see.
+
+    Fail-closed is right for committing a waypoint through the gate. It is
+    wrong for turning to look at something.
+
+        Which way do I turn?   CAMERA. Box midpoint against frame midpoint.
+        Am I perpendicular?    LIDAR.
+        May I advance?         Perpendicular within tolerance AND in range.
+    """
+
+    def setUp(self):
+        self.clock = Clock()
+
+    def _stage(self, mav, **kw):
+        kw.setdefault("clock", self.clock)
+        kw.setdefault("dwell_s", 0.4)
+        kw.setdefault("align_dwell_s", 0.2)
+        kw.setdefault("hfov_rad", mav.hfov)
+        kw.setdefault("alt_floor_m", 2.0)
+        stage = AlignToBanner(mav, **kw)
+        stage.initialise()
+        return stage
+
+    def test_a_DEAD_LIDAR_does_not_stop_the_aircraft_facing_the_banner(self):
+        """The defect, stated as the operator saw it. The camera is confident
+        and the banner is well off to one side; the aircraft must turn."""
+        mav = GateMav(gate=(6.0, 3.5), face_rad=math.pi, lidar_blind=True)
+        opening = abs(mav._bearing_angle())
+        stage = self._stage(mav)
+        for _ in range(1500):
+            if stage.update() is not py_trees.common.Status.RUNNING:
+                break
+            self.clock.advance(0.1)
+            if abs(mav._bearing_angle()) < math.radians(6.0):
+                break
+        self.assertLess(abs(mav._bearing_angle()), opening / 2.0,
+                        f"held still while looking at a banner "
+                        f"{math.degrees(opening):.0f} deg off the nose")
+
+    def test_a_dead_lidar_still_REFUSES_to_advance(self):
+        """Both halves matter. Centring without the lidar is required;
+        advancing without it is forbidden."""
+        mav = GateMav(gate=(6.0, 3.5), face_rad=math.pi, lidar_blind=True)
+        stage = self._stage(mav)
+        self.assertIs(run(stage, mav, self.clock, ticks=9000),
+                      py_trees.common.Status.FAILURE)
+
+    def test_a_banner_ALREADY_in_frame_is_not_swept_for(self):
+        """The unexplained yaw and roll at entry was the zigzag searching for
+        a board that was already there. Look first."""
+        mav = GateMav(gate=(6.0, 0.0), face_rad=math.pi)
+        stage = self._stage(mav)
+        for _ in range(20):
+            if stage.update() is not py_trees.common.Status.RUNNING:
+                break
+            self.clock.advance(0.1)
+        self.assertIsNot(stage.phase, stage.SETTLE,
+                         "swept for a banner that was already identified")
+        self.assertIsNot(stage.phase, stage.DWELL)
+        turns = {round(g[3], 6) for g in mav.gotos}
+        self.assertLessEqual(len(turns), 2,
+                             f"commanded a sweep of headings {turns}")
+
+    def test_the_SAME_state_always_produces_the_SAME_command(self):
+        """"as soon as it detects the banner it should not be confused and it
+        should not try to do different things." One behaviour per state."""
+        commands = []
+        for _ in range(3):
+            clock = Clock()
+            mav = GateMav(gate=(6.0, 2.5), face_rad=math.pi)
+            stage = self._stage(mav, clock=clock)
+            for _ in range(12):
+                stage.update()
+                clock.advance(0.1)
+            commands.append([tuple(round(v, 6) for v in g) for g in mav.gotos])
+        self.assertEqual(commands[0], commands[1])
+        self.assertEqual(commands[1], commands[2])
+
+
+class RecoverTheBannerByMovingTests(unittest.TestCase):
+    """A yaw sweep cannot fix a position error.
+
+    WATCHED LIVE, run 16: the aircraft descended to 3.0 m, lost the board, and
+    sat at [0.3, 0.0, 3.0] sweeping headings. The detector's refusals name the
+    reason it could not be found from there:
+
+        green region too small (5262 px, need 8533)
+        green region too small (3416 px, need 8533)
+        green region too small (1930 px, need 8533)
+
+    From that position no heading revealed the banner, so rotating through all
+    of them could not have worked. The zigzag is the inner loop; the outer
+    loop moves.
+    """
+
+    def setUp(self):
+        self.clock = Clock()
+
+    def _stage(self, mav, **kw):
+        kw.setdefault("clock", self.clock)
+        kw.setdefault("dwell_s", 0.3)
+        kw.setdefault("align_dwell_s", 0.2)
+        kw.setdefault("hfov_rad", mav.hfov)
+        kw.setdefault("alt_floor_m", 2.0)
+        stage = AlignToBanner(mav, **kw)
+        stage.initialise()
+        return stage
+
+    def test_when_no_heading_reveals_the_banner_the_aircraft_TRANSLATES(self):
+        """The case that pins the defect. A yaw-only implementation fails it,
+        which is the point of writing it."""
+        mav = GateMav(gate=(9.0, 0.0), face_rad=math.pi,
+                      max_ident_range_m=6.0)
+        start = mav.pos()[:2]
+        stage = self._stage(mav)
+        moved = 0.0
+        for _ in range(6000):
+            if stage.update() is not py_trees.common.Status.RUNNING:
+                break
+            self.clock.advance(0.1)
+            moved = max(moved, math.dist(mav.pos()[:2], start))
+            if moved > 1.5:
+                break
+        self.assertGreater(moved, 1.5,
+                           "swept every heading from one spot and never moved")
+
+    def test_closing_range_recovers_a_board_that_was_too_small(self):
+        mav = GateMav(gate=(9.0, 0.0), face_rad=math.pi,
+                      max_ident_range_m=6.5)
+        stage = self._stage(mav)
+        status = run(stage, mav, self.clock, ticks=9000)
+        self.assertIs(status, py_trees.common.Status.SUCCESS,
+                      stage.feedback_message)
+
+    def test_climbing_recovers_a_board_lost_on_the_way_down(self):
+        mav = GateMav(gate=(6.0, 0.0), face_rad=math.pi,
+                      start=(0.0, 0.0, 2.2), min_ident_alt_m=3.0,
+                      gate_top_m=4.0)
+        stage = self._stage(mav, alt_floor_m=2.0)
+        status = run(stage, mav, self.clock, ticks=9000)
+        self.assertIs(status, py_trees.common.Status.SUCCESS,
+                      stage.feedback_message)
+        self.assertGreaterEqual(mav.pos()[2], 2.9,
+                                "never climbed back to where it could see")
+
+    def test_it_returns_to_the_pose_the_banner_was_last_seen_from(self):
+        """A position that demonstrably worked beats any search pattern, and
+        it is one setpoint away.
+
+        Driven directly rather than through a scenario: the priority rule is
+        "the remembered pose FIRST", and a scenario test can only show that
+        some recovery happened, not that the right one was tried first.
+        """
+        mav = GateMav(gate=(6.0, 0.0), face_rad=math.pi)
+        stage = self._stage(mav)
+        for _ in range(3000):
+            if stage.update() is not py_trees.common.Status.RUNNING:
+                break
+            self.clock.advance(0.1)
+            if stage._good_vantage is not None:
+                break
+        self.assertIsNotNone(stage._good_vantage,
+                             "never recorded where it saw the banner from")
+        good = stage._good_vantage
+
+        stage._relocate("the banner went out of view")
+        self.assertAlmostEqual(stage._anchor[0], good[0], places=3)
+        self.assertAlmostEqual(stage._anchor[1], good[1], places=3)
+        self.assertAlmostEqual(stage._anchor[2], good[2], places=3)
+        self.assertTrue([m for m, _ in mav.logs
+                         if "where the banner was last identified" in m],
+                        "the return was not reported")
+
+    def test_the_remembered_pose_is_only_tried_ONCE(self):
+        """If going back there did not work, going back there again will not
+        either. The pattern has to take over."""
+        mav = GateMav(gate=(6.0, 0.0), face_rad=math.pi)
+        stage = self._stage(mav)
+        for _ in range(3000):
+            if stage.update() is not py_trees.common.Status.RUNNING:
+                break
+            self.clock.advance(0.1)
+            if stage._good_vantage is not None:
+                break
+        good = stage._good_vantage
+        stage._relocate("first loss")
+        stage._relocate("second loss")
+        self.assertNotEqual(
+            (round(stage._anchor[0], 3), round(stage._anchor[1], 3)),
+            (round(good[0], 3), round(good[1], 3)),
+            "went back to the same pose twice instead of searching")
+
+    def test_it_gives_up_inside_its_bound_and_says_where_it_stood(self):
+        mav = GateMav(gate=(60.0, 0.0), face_rad=math.pi,
+                      max_ident_range_m=1.0, lidar_blind=True)
+        stage = self._stage(mav, max_relocations=3)
+        status = run(stage, mav, self.clock, ticks=20000)
+        self.assertIs(status, py_trees.common.Status.FAILURE)
+        self.assertIn("vantage point", mav.abort_reason)
+        self.assertLessEqual(stage._relocations, 3)
+
+
 class TheAspectGateIsGoneTests(unittest.TestCase):
     """It is DELETED, not demoted.
 
@@ -1167,10 +1404,41 @@ class TheAspectGateIsGoneTests(unittest.TestCase):
                      "max_strafes", "max_strafes_square", "stall_before_strafe"):
             self.assertNotIn(gone, args, f"{gone} survived the rewrite")
 
-    def test_the_stage_never_asks_the_camera_how_wide_the_board_looks(self):
-        src = inspect.getsource(AlignToBanner)
-        self.assertNotIn("banner_aspect", src,
-                         "the aspect ratio is still being read")
+    def test_the_aspect_may_be_REPORTED_but_never_changes_the_outcome(self):
+        """The box aspect is kept as a cross-check on the lidar -- a board is
+        genuinely widest seen face-on -- and is logged beside the measured
+        angle so a persistent disagreement between the two instruments is
+        visible. What it must never do is change what the aircraft does.
+
+        A source grep used to stand in for this. It could not tell reporting
+        from steering, and it forbade the cross-check the operator asked for.
+        """
+        outcomes = []
+        for aspect in (0.4, 3.6):
+            clock = Clock()
+            mav = GateMav(gate=(5.0, 2.0), face_rad=math.pi)
+            mav.banner_aspect = lambda a=aspect: a
+            stage = AlignToBanner(mav, clock=clock, dwell_s=0.4,
+                                  align_dwell_s=0.2, hfov_rad=mav.hfov,
+                                  alt_floor_m=2.0)
+            stage.initialise()
+            outcomes.append((run(stage, mav, clock, ticks=4000),
+                             round(mav.off_centreline(), 1)))
+        self.assertEqual(outcomes[0], outcomes[1],
+                         f"the board aspect changed the outcome: {outcomes}")
+
+    def test_the_aspect_is_carried_in_the_report_for_comparison(self):
+        mav = GateMav(gate=(5.0, 2.0), face_rad=math.pi)
+        mav.banner_aspect = lambda: 1.9
+        stage = AlignToBanner(mav, clock=self.clock, dwell_s=0.4,
+                              align_dwell_s=0.2, hfov_rad=mav.hfov,
+                              alt_floor_m=2.0)
+        stage.initialise()
+        run(stage, mav, self.clock, ticks=4000)
+        self.assertTrue(mav.square_on)
+        self.assertIn("box_aspect", mav.square_on[-1],
+                      "the camera cross-check is not reported beside the "
+                      "lidar angle, so a disagreement would be silent")
 
 
 if __name__ == "__main__":

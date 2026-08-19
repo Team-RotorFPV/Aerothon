@@ -290,6 +290,50 @@ class RefusalTests(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
+class EdgeOnSurfacesTests(unittest.TestCase):
+    """A wall running away ALONGSIDE the aircraft is not a wall it is facing.
+
+    MEASURED on the ground, shipped arena, aircraft parked and the fit asked
+    what it saw in each direction in turn:
+
+        sector -75:  face  -90.0 deg  7.74 m  17 pts  "span" 2.24 m
+        sector +15:  face  -90.9 deg  3.11 m   8 pts  "span" 2.22 m
+
+    Eight returns do not span two metres of anything. The fit had gone RADIAL,
+    running toward the aircraft rather than across it, so the spread along it
+    was depth. In flight the same readings came back as an alternating
+    +90/-90 measurement and the aircraft turned in circles for fourteen steps
+    before its step budget ran out.
+    """
+
+    def test_a_wall_running_away_alongside_is_REFUSED_not_reported_as_90(self):
+        corridor = ((1.5, 1.6), (11.0, 1.6))
+        f = fit(scan_of([corridor]), bearing=math.radians(20.0))
+        self.assertFalse(f["ok"], f)
+
+    def test_the_refusal_says_edge_on_rather_than_something_vaguer(self):
+        corridor = ((1.5, 1.6), (11.0, 1.6))
+        f = fit(scan_of([corridor]), bearing=math.radians(20.0))
+        self.assertTrue("edge-on" in f["reason"] or "span" in f["reason"],
+                        f["reason"])
+
+    def test_the_EXTENT_is_measured_across_the_line_of_sight(self):
+        """Depth must not be able to stand in for width. A post seen from
+        close in smears through several samples; it is still 18 cm wide."""
+        f = fit(scan_of([post(1.5, 0.0, 0.0)]))
+        self.assertFalse(f["ok"], f)
+        self.assertIn("span", f["reason"])
+
+    def test_a_gate_seen_at_FIFTY_degrees_is_still_measured(self):
+        """The guard has to reject edge-on without rejecting oblique: coming
+        round to the face is the whole manoeuvre, and it starts off-axis."""
+        f = fit(scan_of([wall(5.0, math.radians(50.0))]),
+                bearing=math.radians(50.0))
+        self.assertTrue(f["ok"], f["reason"])
+        self.assertAlmostEqual(math.degrees(f["angle_rad"]), 50.0, delta=2.0)
+
+
+# --------------------------------------------------------------------------- #
 class TwoSurfacesTests(unittest.TestCase):
     """The nearest coherent surface wins. The gate stands in front of things."""
 

@@ -92,6 +92,11 @@ class Recorder(Node):
                            ("/percep/redzone/detail", "red"),
                            ("/percep/banner/detail", "banner"),
                            ("/percep/qr/detail", "qr"),
+                           # What the aircraft believes about its angle to the
+                           # banner. The stage decides on this one number, so a
+                           # run artifact that does not carry it cannot say why
+                           # the stage did what it did.
+                           ("/mission/square_on", "square"),
                            ("/mission/state", "state")):
             self.create_subscription(
                 String, topic, lambda m, k=key: self.s.update({k: m.data}), 10)
@@ -122,6 +127,7 @@ class Recorder(Node):
         x, y, z = self.s["xyz"]
         cam, red = self._j("cam"), self._j("red")
         ban, qr = self._j("banner"), self._j("qr")
+        sq = self._j("square")
         ex = [tuple(v) for v in (red.get("exclusions") or []) if len(v) == 4]
         if len(ex) >= len(self.exclusions):
             self.exclusions = ex
@@ -144,6 +150,11 @@ class Recorder(Node):
             "banner_reason": str(ban.get("reason", ""))[:44],
             "qr": qr.get("accepted", ""),
             "qr_matched": bool(qr.get("matched")),
+            "sq_ok": sq.get("ok"),
+            "sq_angle_deg": sq.get("angle_deg"),
+            "sq_standoff_m": sq.get("standoff_m"),
+            "sq_points": sq.get("points"),
+            "sq_reason": str(sq.get("reason", ""))[:52],
         }
         self.rows.append(row)
         print(f"{row['stage']:12s} alt={row['alt']:5.1f} "
@@ -152,6 +163,12 @@ class Recorder(Node):
               f"BANNER {row['banner']!s:5s} {row['banner_text']:10s} "
               f"{row['banner_via']:10s} | QR {row['qr'][:18]:18s} "
               f"{'MATCH' if row['qr_matched'] else ''}", flush=True)
+        if sq:
+            print(f"{'':12s} SQUARE ok={row['sq_ok']!s:5s} "
+                  f"angle={row['sq_angle_deg']!s:>7s} deg  "
+                  f"standoff={row['sq_standoff_m']!s:>6s} m  "
+                  f"pts={row['sq_points']!s:>4s}  {row['sq_reason']}",
+                  flush=True)
 
     def report(self):
         print("\n" + "=" * 74)

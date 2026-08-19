@@ -259,8 +259,8 @@ class AlignToBanner(py_trees.behaviour.Behaviour):
     what each one saw. "No banner found" is not a diagnosis.
     """
 
-    SEARCH, SETTLE, DWELL, CENTRE, SQUARE = \
-        "SEARCH", "SETTLE", "DWELL", "CENTRE", "SQUARE"
+    SEARCH, SETTLE, DWELL, CENTRE, SQUARE, RELOCATE = \
+        "SEARCH", "SETTLE", "DWELL", "CENTRE", "SQUARE", "RELOCATE"
     MEASURE, TURNING, MOVING = "MEASURE", "TURNING", "MOVING"
 
     def __init__(self, mav, tol=0.10, yaw_step=0.25, timeout_ticks=200,
@@ -276,8 +276,11 @@ class AlignToBanner(py_trees.behaviour.Behaviour):
                  sector_half_width_rad=math.radians(35.0),
                  min_standoff_m=2.5, lidar_range_m=12.0,
                  lateral_tol_m=0.4, max_square_steps=14,
-                 orbit_arrive_tol=0.7, max_refusals=25,
-                 descend_step_m=0.5, alt_floor_m=3.0, max_descents=8):
+                 orbit_arrive_tol=0.7, alt_arrive_tol=0.25,
+                 max_refusals=25,
+                 descend_step_m=0.5, alt_floor_m=3.0, max_descents=8,
+                 max_relocations=6, recovery_steps=None, alt_climb_m=2.0,
+                 low_camera_pose="FORWARD"):
         super().__init__("AlignToBanner")
         self.mav = mav
         self.tol = tol
@@ -328,6 +331,7 @@ class AlignToBanner(py_trees.behaviour.Behaviour):
         self.lateral_tol_m = float(lateral_tol_m)
         self.max_square_steps = int(max_square_steps)
         self.orbit_arrive_tol = float(orbit_arrive_tol)
+        self.alt_arrive_tol = float(alt_arrive_tol)
         self.max_refusals = int(max_refusals)
         # THE LIDAR IS A HORIZONTAL SLICE, and at the altitude the sweep
         # happens at that slice can pass clean over the gate. MEASURED on seed
@@ -339,6 +343,33 @@ class AlignToBanner(py_trees.behaviour.Behaviour):
         self.descend_step_m = float(descend_step_m)
         self.alt_floor_m = float(alt_floor_m)
         self.max_descents = int(max_descents)
+        # AND THE CAMERA HAS TO COME DOWN WITH IT. The BANNER pose looks 20
+        # degrees below the horizon because from 5 m a gate a few metres ahead
+        # sits under a level camera. Once the aircraft has descended to gate
+        # height that same pose puts the board out of the TOP of the frame:
+        # watched live, the detector went from 10/10 frames at 5.0 m to
+        # refusing almost every frame at 3.0 m, and the stage then had a
+        # perfectly good lidar and no idea where to point it.
+        self.low_camera_pose = low_camera_pose
+
+        # ---- recovering a banner that has gone out of view ---- #
+        # A YAW SWEEP CANNOT FIX A POSITION ERROR. Watched live: the aircraft
+        # descended, lost the board, and sat at one spot sweeping headings.
+        # From that position no heading revealed the banner, so rotating
+        # through all of them could not have worked -- it was searching a
+        # one-dimensional space for something that had left it.
+        #
+        # So the yaw zigzag becomes the INNER loop and this is the outer one:
+        # relocate, then sweep again. The offsets are (along the bearing the
+        # banner was last seen on, up), and the directions are the ones the
+        # detector's own refusals argue for -- "green region too small" says
+        # CLOSING range helps, and the sighting was lost on a descent, so
+        # CLIMBING helps.
+        self.recovery_steps = tuple(recovery_steps) if recovery_steps else (
+            (2.5, 0.0), (2.5, 1.5), (5.0, 0.0),
+            (0.0, 2.0), (5.0, 1.5), (-2.5, 1.5))
+        self.max_relocations = int(max_relocations)
+        self.alt_climb_m = float(alt_climb_m)
 
         self.clock = clock or time.monotonic
         self.n_steps = max(1, int(round(2 * math.pi / self.step_rad)))
@@ -393,7 +424,22 @@ class AlignToBanner(py_trees.behaviour.Behaviour):
         self._stalled = 0
         self._last_bearing = None
         self._t = 0
+        self._reset_recovery()
         self._enter_square_state()
+
+    def _reset_recovery(self):
+        self._good_vantage = None
+        self._vantages = []
+        self._relocations = 0
+        self._returned_to_good = False
+        self._entry_alt = None
+        self._camera_lowered = False
+        self._pending_sweep_yaw = 0.0
+        self._transit_yaw = 0.0
+        self._commanded_yaw = None
+        self._entry_yaw = None
+        self._seen_yaw = None
+        self._recovery_origin = None
 
     def _enter_square_state(self):
         self._sq_phase = self.MEASURE
@@ -421,8 +467,15 @@ class AlignToBanner(py_trees.behaviour.Behaviour):
         self._phase_t0 = self.clock()
 
     def _hold(self, yaw):
-        """Command the anchor position with a heading. Only yaw ever moves."""
+        """Command the anchor position with a heading.
+
+        The commanded heading is remembered because a relocation has to fly at
+        whatever the aircraft was last TOLD to hold, not at whatever it has
+        drifted to -- otherwise the transit changes position and heading in
+        one command, which is the coupling the whole stage is built to avoid.
+        """
         x, y, z = self._anchor
+        self._commanded_yaw = yaw
         self.mav.goto(x, y, z, yaw)
 
     def _close_dwell(self):
@@ -440,17 +493,193 @@ class AlignToBanner(py_trees.behaviour.Behaviour):
         return (self._samples >= self.min_samples
                 and ratio >= self.min_hit_ratio)
 
+    def _remember_vantage(self):
+        """Latch the pose the banner was actually seen from.
+
+        A POSITION THAT DEMONSTRABLY WORKED beats any search pattern, and it
+        is one setpoint away. The aircraft identified the banner cleanly at
+        t+41 s of the watched run and then spent the rest of the stage unable
+        to find it again from somewhere else, with no record of where it had
+        been standing when it could.
+        """
+        x, y, z = self.mav.pos()
+        self._good_vantage = (x, y, z, self.mav.yaw())
+        self._seen_yaw = self.mav.yaw()
+
+    def _lower_camera(self):
+        """Point the camera where the banner is once the aircraft is low.
+
+        Not a tidy-up: the BANNER pose's 20 degree depression is what put the
+        board out of the top of the frame after the descent, and a stage that
+        cannot see the banner cannot tell the lidar which sector to search.
+        """
+        if self._camera_lowered:
+            return
+        fn = getattr(self.mav, "set_camera_pose", None)
+        if callable(fn):
+            fn(self.low_camera_pose)
+            self.mav.log(f"AlignToBanner: descended to gate height; pointing "
+                         f"the camera {self.low_camera_pose} so the board "
+                         f"stays in frame")
+        self._camera_lowered = True
+
+    def _relocate(self, why):
+        """Move somewhere else and sweep again. The OUTER loop.
+
+        Returns RUNNING once a new vantage point has been commanded, or
+        FAILURE when the budget is spent. Every vantage point is recorded with
+        what the best heading there saw, so a failed stage says where it stood
+        as well as which way it looked.
+        """
+        best = (max(self.step_reports, key=lambda r: r["hits"])
+                if self.step_reports else None)
+        x, y, z = self.mav.pos()
+        self._vantages.append({
+            "at": (round(x, 1), round(y, 1), round(z, 1)),
+            "headings": len(self.step_reports),
+            "best_hits": (best or {}).get("hits", 0),
+            "best_of": (best or {}).get("samples", 0),
+            "why": why})
+
+        if self._relocations >= self.max_relocations:
+            return self._out_of_vantage_points(why)
+
+        # 1. THE POSE THAT WORKED, first.
+        if self._good_vantage is not None and not self._returned_to_good:
+            self._returned_to_good = True
+            gx, gy, gz, gyaw = self._good_vantage
+            self._relocations += 1
+            self.mav.log(
+                f"AlignToBanner: {why}; returning to ({gx:.1f}, {gy:.1f}, "
+                f"{gz:.1f}) where the banner was last identified "
+                f"(relocation {self._relocations}/{self.max_relocations})")
+            return self._restart_sweep_at(gx, gy, gz, gyaw)
+
+        # 2. Then the pattern: along the bearing the banner was last seen on,
+        #    and up. Never down -- the descent is what lost it.
+        #
+        # THE DIRECTION MATTERS MORE THAN THE PATTERN. This first used
+        # `mav.yaw()`, which at the end of a full sweep is whatever heading
+        # the twelfth dwell happened to leave the aircraft on -- so "close
+        # range along the last bearing" walked it 12 m AWAY from a gate 9 m
+        # ahead. The informed headings, in order of how much they are worth:
+        # where the banner was actually seen, then the heading the stage was
+        # entered on, because the mission flew here pointing at the gate.
+        step = self.recovery_steps[(self._relocations
+                                    - (1 if self._good_vantage else 0))
+                                   % len(self.recovery_steps)]
+        along, up = step
+        psi = self._seen_yaw
+        if psi is None:
+            psi = (self._entry_yaw if self._entry_yaw is not None
+                   else self.mav.yaw())
+        ceiling = (self._entry_alt if self._entry_alt is not None
+                   else z) + self.alt_climb_m
+        # The offsets are ABSOLUTE from where recovery began, not cumulative
+        # from wherever the last one left the aircraft: applied cumulatively a
+        # six-step pattern of 2.5 m steps travels 20 m, which is a different
+        # search from the one the numbers describe.
+        if self._recovery_origin is None:
+            self._recovery_origin = (self._good_vantage[:3]
+                                     if self._good_vantage else (x, y, z))
+        base = self._recovery_origin
+        nx = base[0] + along * math.cos(psi)
+        ny = base[1] + along * math.sin(psi)
+        nz = min(base[2] + up, ceiling)
+        self._relocations += 1
+        self.mav.log(
+            f"AlignToBanner: {why}; a yaw sweep cannot fix a position error, "
+            f"so moving {along:+.1f} m along the last bearing and {up:+.1f} m "
+            f"up, to ({nx:.1f}, {ny:.1f}, {nz:.1f}) "
+            f"(relocation {self._relocations}/{self.max_relocations})")
+        return self._restart_sweep_at(nx, ny, nz, psi)
+
+    def _restart_sweep_at(self, x, y, z, yaw):
+        """Fly to a new vantage point, THEN sweep it.
+
+        Translating and rotating in the same command reintroduces the coupling
+        that made yaw useless in the first place, so the transit holds
+        whatever heading the aircraft already has and the sweep starts once it
+        has arrived.
+        """
+        self._anchor = (x, y, z)
+        self._pending_sweep_yaw = self._wrap(yaw)
+        self._transit_yaw = (self._commanded_yaw
+                             if self._commanded_yaw is not None
+                             else self.mav.yaw())
+        self._enter_square_state()
+        self._enter(self.RELOCATE)
+        self._hold(self._transit_yaw)
+        return py_trees.common.Status.RUNNING
+
+    def _transit(self):
+        """Hold heading and altitude discipline while relocating."""
+        self._hold(self._transit_yaw)
+        ax, ay, az = self._anchor
+        arrived = (self.mav.reached(ax, ay, az, self.orbit_arrive_tol)
+                   and abs(self.mav.alt() - az) <= self.alt_arrive_tol)
+        if arrived or self._elapsed() > self.settle_timeout_s * 3.0:
+            self.step_index = 0
+            self.step_reports = []
+            self._target_yaw = self._pending_sweep_yaw
+            self._sweep_origin = self._pending_sweep_yaw
+            self._hits = self._samples = 0
+            self._best_bearing = None
+            self._enter(self.SETTLE)
+            return py_trees.common.Status.RUNNING
+        x, y, z = self.mav.pos()
+        self.feedback_message = (
+            f"relocating: {math.hypot(ax - x, ay - y):.1f} m across and "
+            f"{az - z:+.1f} m up to vantage point {self._relocations}")
+        return py_trees.common.Status.RUNNING
+
+    def _out_of_vantage_points(self, why):
+        seen = "; ".join(
+            f"({v['at'][0]}, {v['at'][1]}, {v['at'][2]}) "
+            f"{v['headings']} headings, best {v['best_hits']}/{v['best_of']}"
+            for v in self._vantages)
+        reason = (f"AlignToBanner: no AEROTHON banner found from "
+                  f"{len(self._vantages)} vantage point(s) -- {seen}. Last "
+                  f"reason: {why}")
+        self.feedback_message = reason
+        self.mav.abort_reason = reason
+        self.mav.log(reason, warn=True)
+        return py_trees.common.Status.FAILURE
+
     # ---- the tick ---- #
     def update(self):
         self._t += 1
         if self._anchor is None:
             self._anchor = self.mav.pos()
+            self._entry_alt = self._anchor[2]
+            # The heading the aircraft ARRIVED on. With no sighting yet this
+            # is the only informed guess about where the gate is: the mission
+            # flew here pointing at it.
+            self._entry_yaw = self.mav.yaw()
         if self._target_yaw is None:
             self._sweep_origin = self.mav.yaw()
             self._target_yaw = self._wrap(self._sweep_origin
                                           + self.sweep_offsets[0])
+            # LOOK FIRST. The zigzag exists to FIND a banner, and running it
+            # when one is already in frame is what the operator watched as an
+            # unexplained yaw and roll away from a board the aircraft could
+            # see perfectly well. If it is already there, go and face it.
+            if self.mav.banner_identified():
+                self._remember_vantage()
+                self.mav.log(
+                    f"AlignToBanner: the banner is already in frame at "
+                    f"bearing {self.mav.banner_bearing():+.2f}; centring on "
+                    f"it rather than sweeping")
+                self._align_target = self._target_yaw
+                self._align_settled = False
+                self._align_t0 = self.clock()
+                self._last_seen = self.clock()
+                self._enter(self.CENTRE)
+                return self._centre()
             self._enter(self.SETTLE)
 
+        if self.phase is self.RELOCATE:
+            return self._transit()
         if self.phase is self.SQUARE:
             return self._square()
         if self.phase is self.CENTRE:
@@ -505,6 +734,7 @@ class AlignToBanner(py_trees.behaviour.Behaviour):
 
         ratio = self._close_dwell()
         if self._confident(ratio):
+            self._remember_vantage()
             self.mav.log(
                 f"AlignToBanner: banner identified at "
                 f"{math.degrees(self._wrap(self._target_yaw)):.0f} deg after "
@@ -531,82 +761,37 @@ class AlignToBanner(py_trees.behaviour.Behaviour):
         self._enter(self.SETTLE)
         return py_trees.common.Status.RUNNING
 
-    def _best_of_turn(self):
-        """After a full turn with nothing CONFIDENT, take the best heading.
-
-        MEASURED, seed 1001, run 5. The whole turn looked like this:
-
-            -0 0/11; 30 0/12; 60 0/11; 90 0/12; 120 0/12; 150 0/12;
-            180 0/12; -150 0/12; -120 0/12; -90 0/12; -60 6/12; -30 0/12
-
-        Exactly one heading saw the banner at all, on half its frames, and the
-        stage failed the mission because half is under the 0.6 confidence
-        floor. That floor exists to stop the aircraft locking onto a decoy --
-        but a decoy needs something to be confused WITH, and eleven headings
-        saw nothing whatsoever.
-
-        So: a confident dwell still wins immediately, wherever it occurs. If
-        the turn finishes without one, the best heading is taken provided it
-        is unambiguous -- enough hits to be more than a flicker, and no other
-        heading close to it. This is the "best candidate across the whole
-        turn" rule the spec asked for originally, kept as a fallback rather
-        than as the primary rule so a good banner is still acted on at once.
-        """
-        ranked = sorted(self.step_reports, key=lambda r: r["hits"],
-                        reverse=True)
-        if not ranked:
-            return None
-        best = ranked[0]
-        runner_up = ranked[1]["hits"] if len(ranked) > 1 else 0
-        if best["hits"] < self.min_fallback_hits:
-            return None
-        if runner_up > best["hits"] * float(self.fallback_margin):
-            return None                      # two candidates: too ambiguous
-        return best
-
     def _give_up(self):
-        fallback = self._best_of_turn()
-        if fallback is not None:
-            self.mav.log(
-                f"AlignToBanner: no dwell reached "
-                f"{self.min_hit_ratio * 100:.0f}%, but "
-                f"{fallback['heading_deg']:.0f} deg saw the banner on "
-                f"{fallback['hits']}/{fallback['samples']} frames and nothing "
-                f"else came close; aligning to it")
-            self._target_yaw = math.radians(fallback["heading_deg"])
-            self._align_target = self._target_yaw
-            self._align_settled = False
-            self._align_t0 = self.clock()
-            self._corrections = 0
-            self._stalled = 0
-            self._last_bearing = None
-            self._stable = 0
-            self._last_seen = self.clock()
-            self._enter_square_state()
-            self._enter(self.CENTRE)
-            return py_trees.common.Status.RUNNING
+        """A full turn from here saw nothing. Go and stand somewhere else.
 
+        ONE BEHAVIOUR PER STATE. This used to have a second path: if no dwell
+        reached the confidence floor but one heading was clearly the best, the
+        stage aligned to that heading anyway. Together with peak detection,
+        reversal-on-narrowing and the aspect threshold -- each added to rescue
+        the one before it -- the aircraft looked like it was guessing, because
+        it was. The operator's words: "as soon as it detects the banner it
+        should not be confused and it should not try to do different things."
+
+        The relocation loop is a better answer to a marginal sweep than
+        committing to a marginal heading: sweeping again from two metres
+        closer costs seconds and produces evidence, where aligning to a 6/12
+        dwell commits the mission to it.
+        """
         why = (self.mav.banner_rejection_summary()
                if hasattr(self.mav, "banner_rejection_summary")
                else "no detail available")
-        best = max(self.step_reports, key=lambda r: r["hit_ratio"])
         covered = round(math.degrees(self.step_rad) * len(self.step_reports))
-        reason = (f"no AEROTHON banner identified after staring at "
-                  f"{len(self.step_reports)} headings covering {covered} deg; "
-                  f"the best was {best['heading_deg']:.0f} deg at "
-                  f"{best['hit_ratio'] * 100:.0f}% of {best['samples']} frames "
-                  f"(needed {self.min_hit_ratio * 100:.0f}%); "
-                  f"detector said: {why}")
-        self.mav.abort_reason = reason
         # The stage name has to be IN the line: run artifacts are grepped, and
         # the seed 1001 failure was undiagnosable after the fact partly
         # because its log line did not say which stage produced it.
-        self.mav.log(f"AlignToBanner: {reason}", warn=True)
         self.mav.log("AlignToBanner stared at: " + "; ".join(
             f"{r['heading_deg']:.0f} deg {r['hits']}/{r['samples']}"
             for r in self.step_reports))
-        self.feedback_message = reason
-        return py_trees.common.Status.FAILURE
+        # A FULL TURN FROM ONE SPOT IS NOT A SEARCH. Every heading has been
+        # tried; what has not been tried is standing somewhere else.
+        return self._relocate(
+            f"{len(self.step_reports)} headings covering {covered} deg from "
+            f"here saw no banner (detector said: {why})")
 
     def _centre(self):
         """Fine-align in DISCRETE corrections, for the same reason the sweep
@@ -651,12 +836,10 @@ class AlignToBanner(py_trees.behaviour.Behaviour):
             self._hold(self._align_target)
             gone = self.clock() - self._last_seen
             if gone > self.settle_timeout_s:
-                reason = (f"AlignToBanner: the banner confirmed at "
-                          f"{math.degrees(self._wrap(self._target_yaw)):.0f} "
-                          f"deg has not been seen for {gone:.0f} s of centring")
-                self.feedback_message = reason
-                self.mav.abort_reason = reason
-                return py_trees.common.Status.FAILURE
+                return self._relocate(
+                    f"the banner confirmed at "
+                    f"{math.degrees(self._wrap(self._target_yaw)):.0f} deg "
+                    f"has not been seen for {gone:.0f} s of centring")
             self.feedback_message = (f"centring: banner lost for {gone:.1f} s, "
                                      f"holding {math.degrees(self._align_target):.0f} deg")
             return py_trees.common.Status.RUNNING
@@ -664,6 +847,7 @@ class AlignToBanner(py_trees.behaviour.Behaviour):
         self._last_seen = self.clock()
         bearing = self.mav.banner_bearing()
         self._last_good_bearing = bearing
+        self._remember_vantage()
         self._hold(self._align_target)
 
         if not self._align_settled:
@@ -785,6 +969,23 @@ class AlignToBanner(py_trees.behaviour.Behaviour):
                                       self.sector_half_width,
                                       expected_range_m=self._standoff)
 
+    def _box_aspect(self):
+        """The camera's own opinion of squareness, for CROSS-CHECK ONLY.
+
+        A board is widest seen face-on, so the aspect of the derived box does
+        carry angle information -- it just cannot be thresholded, because the
+        box includes the gate posts and plateaus at 1.88-1.91. It is reported
+        beside the lidar angle so that a persistent disagreement between the
+        two instruments is visible in the run artifact rather than silent.
+
+        NOTHING STEERS ON THIS. The lidar decides, per the spec.
+        """
+        fn = getattr(self.mav, "banner_aspect", None)
+        try:
+            return float(fn()) if callable(fn) else 0.0
+        except Exception:                    # noqa: BLE001
+            return 0.0
+
     def _report(self, fit):
         payload = {"stage": "SQUARE",
                    "ok": bool(fit.get("ok")),
@@ -797,6 +998,10 @@ class AlignToBanner(py_trees.behaviour.Behaviour):
                                   else round(fit["residual_m"], 3)),
                    "sector_deg": round(math.degrees(self._sector_bearing), 1),
                    "steps": self._sq_steps,
+                   # The camera's cross-check, carried alongside so the two
+                   # instruments can be compared after the fact.
+                   "box_aspect": round(self._box_aspect(), 2),
+                   "bearing": round(self._last_good_bearing, 3),
                    "reason": fit.get("reason", "")}
         fn = getattr(self.mav, "publish_square_on", None)
         if callable(fn):
@@ -850,7 +1055,9 @@ class AlignToBanner(py_trees.behaviour.Behaviour):
 
         if self._sq_phase is self.TURNING:
             err = abs(self._wrap(self.mav.yaw() - self._align_target))
-            if err <= self.settle_tol or                     self.clock() - self._align_t0 > self.settle_timeout_s:
+            timed_out = (self.clock() - self._align_t0
+                         > self.settle_timeout_s)
+            if err <= self.settle_tol or timed_out:
                 self._sq_phase = self.MEASURE
                 self._align_t0 = self.clock()
                 return py_trees.common.Status.RUNNING
@@ -860,14 +1067,25 @@ class AlignToBanner(py_trees.behaviour.Behaviour):
 
         if self._sq_phase is self.MOVING:
             ax, ay, az = self._anchor
-            if self.mav.reached(ax, ay, az, self.orbit_arrive_tol) or                     self.clock() - self._align_t0 > self.settle_timeout_s:
+            # ALTITUDE IS CHECKED SEPARATELY, and tightly. A descent step of
+            # half a metre is already inside the horizontal arrival tolerance,
+            # so a position check alone calls the aircraft "arrived" the
+            # instant the target moves -- and the stage then spends its whole
+            # descent budget in four seconds while the airframe is still at
+            # the height it started from. Same class of defect as reading an
+            # orbit step before the aircraft has taken it.
+            arrived = (self.mav.reached(ax, ay, az, self.orbit_arrive_tol)
+                       and abs(self.mav.alt() - az) <= self.alt_arrive_tol)
+            timed_out = (self.clock() - self._align_t0
+                         > self.settle_timeout_s)
+            if arrived or timed_out:
                 self._sq_phase = self.MEASURE
                 self._align_t0 = self.clock()
                 return py_trees.common.Status.RUNNING
-            x, y, _ = self.mav.pos()
+            x, y, z = self.mav.pos()
             self.feedback_message = (
-                f"squaring up: {math.hypot(ax - x, ay - y):.1f} m to the next "
-                f"vantage point")
+                f"squaring up: {math.hypot(ax - x, ay - y):.1f} m across and "
+                f"{az - z:+.1f} m down to the next vantage point")
             return py_trees.common.Status.RUNNING
 
         # STILL, and settled. Only now is a measurement worth anything.
@@ -877,6 +1095,19 @@ class AlignToBanner(py_trees.behaviour.Behaviour):
 
         fit = self._measure_surface()
         self._report(fit)
+
+        # WHICH WAY TO TURN IS A CAMERA QUESTION, and it is answered on every
+        # tick the banner is identified, with no lidar involved.
+        #
+        # Watched live: the aircraft held station while CONTINUING TO DETECT
+        # the banner, because the lidar could not confirm perpendicularity and
+        # everything had been gated behind that confirmation. Fail-closed is
+        # right for committing a waypoint through the gate. It is wrong for
+        # turning to look at something the aircraft can already see.
+        if self._recentre_needed():
+            centred = self._recentre()
+            if centred is not None:
+                return centred
 
         if not fit["ok"]:
             return self._no_surface(fit)
@@ -965,30 +1196,85 @@ class AlignToBanner(py_trees.behaviour.Behaviour):
                                  f"{self._stable}/{self.stable_frames}")
         return py_trees.common.Status.RUNNING
 
+    def _recentre_needed(self):
+        return (self.mav.banner_identified()
+                and abs(self.mav.banner_bearing()) > self.tol)
+
+    def _recentre(self):
+        """Put the bounding box midpoint back on the frame midpoint. Yaw only.
+
+        The user's definition of centring, and it is a bearing error that the
+        detector already publishes. Discrete and latched, like every other
+        correction in this stage, because a per-tick proportional correction
+        against a lagging airframe is the receding carrot and this project has
+        met it three times.
+
+        This runs whether or not the lidar has anything to say. If the lidar
+        is dead the aircraft still faces the banner; it simply never gets the
+        confirmation that lets it advance through the gate.
+        """
+        bearing = self.mav.banner_bearing()
+        self._last_good_bearing = bearing
+        self._last_seen = self.clock()
+        self._remember_vantage()
+        self._stable = 0
+        if self._corrections >= self.max_corrections:
+            # Yaw has had its budget. The banner is in frame and off-centre,
+            # which from a square heading is a LATERAL error -- and that is
+            # the lidar's business, so fall through to it.
+            return None
+        theta = self.align_gain * bearing * (self.hfov / 2.0)
+        self._align_target = self._wrap(self._align_target - theta)
+        self._corrections += 1
+        self._sq_phase = self.TURNING
+        self._align_t0 = self.clock()
+        self.mav.log(
+            f"AlignToBanner: banner at bearing {bearing:+.2f} off frame "
+            f"centre; yawing to {math.degrees(self._align_target):+.0f} deg "
+            f"to face it (camera only, correction "
+            f"{self._corrections}/{self.max_corrections})")
+        return py_trees.common.Status.RUNNING
+
     def _no_surface(self, fit):
         """The lidar could not measure. The aircraft does not advance.
 
-        THE ALTITUDE PROBLEM, MEASURED. The C1 sweeps one horizontal plane,
-        and at the altitude the QR scan leaves the aircraft at, that plane can
-        pass clean over the gate. On seed 1001, 51 consecutive samples in
-        BANNER_ALIGN at 5.0 m returned 0 finite ranges out of 720; the same
-        sensor at 3.0 m returned 289. Nothing was wrong with the lidar and
-        nothing was wrong with the gate -- they were at different heights.
+        THE ALTITUDE PROBLEM, MEASURED THREE TIMES. The C1 sweeps one
+        horizontal plane, and at the altitude the QR scan leaves the aircraft
+        at, that plane passes clean over the arena. On seed 1001, 51
+        consecutive samples in BANNER_ALIGN at 5.0 m returned 0 finite ranges
+        of 720; the same sensor at 3.0 m returned 289. Parked on the shipped
+        arena the reading is the same: 0 of 720 at 5.0 m, 63 returns of the
+        gate face at 3.0 m. Nothing is wrong with the lidar and nothing is
+        wrong with the gate -- they are at different heights.
 
         So a refusal is first treated as "look from lower down", stepping
-        toward a floor, and only becomes a failure when the aircraft has run
-        out of altitude to give up. That ladder is measurement-driven: it
-        stops at the first height where a surface appears, and it never
-        assumes the gate is tall enough to be seen from wherever the aircraft
-        happened to be.
+        toward a floor. Two things that ladder must NOT do, both learnt from
+        watching it:
+
+          * it must not keep descending once it has seen a surface. The
+            aircraft found a real face at 3.5 m -- 36 returns, 2 cm residual
+            -- turned toward it, measured nothing on the next tick because the
+            TURN had moved the sector, and read that as another reason to
+            descend. Altitude was not the problem by then.
+
+          * it must not descend with the camera still pitched for a search
+            from 5 m, which is what put the board out of the top of the frame
+            and left the stage with a working lidar and nowhere to point it.
+
+        And when the ladder is spent, the answer is to stand somewhere else,
+        not to keep asking the same question from the same spot.
         """
         self._stable = 0
         ax, ay, az = self._anchor
-        if self._descents < self.max_descents and                 az - self.descend_step_m >= self.alt_floor_m - 1e-6:
+        seen_before = self._surface is not None
+        room_below = az - self.descend_step_m >= self.alt_floor_m - 1e-6
+        if not seen_before and self._descents < self.max_descents \
+                and room_below:
             self._descents += 1
             self._anchor = (ax, ay, az - self.descend_step_m)
             self._sq_phase = self.MOVING
             self._align_t0 = self.clock()
+            self._lower_camera()
             self.mav.log(
                 f"AlignToBanner: the lidar sees no surface from {az:.1f} m "
                 f"({fit['reason']}); descending to "
@@ -998,12 +1284,11 @@ class AlignToBanner(py_trees.behaviour.Behaviour):
 
         self._refusals += 1
         if self._refusals >= self.max_refusals:
-            return self._square_failure(
-                f"AlignToBanner: the lidar found no flat face in the "
+            return self._relocate(
+                f"the lidar found no flat face in the "
                 f"{math.degrees(2 * self.sector_half_width):.0f} deg sector "
-                f"{math.degrees(self._sector_bearing):+.0f} deg off the nose, "
-                f"down to {az:.1f} m -- {fit['reason']}; refusing to advance "
-                f"through a gate it cannot measure")
+                f"{math.degrees(self._sector_bearing):+.0f} deg off the nose "
+                f"at {az:.1f} m -- {fit['reason']}")
         self.feedback_message = f"no surface measured: {fit['reason']}"
         return py_trees.common.Status.RUNNING
 

@@ -329,6 +329,16 @@ export default function App() {
             <div className="kv"><span className="dim">Target Match</span>{pill(p?.target_match, "MATCHED", "SEARCHING")}</div>
             <div className="kv"><span className="dim">Green Banner</span>{pill(p?.banner, "ALIGNED", "SCANNING")}</div>
             <div className="kv"><span className="dim">Red Zone</span>{redPill(p?.redzone_status)}</div>
+            {/* ALIGNED is where the nose points; SQUARE ON is where the
+                aircraft stands. The stage will not advance through the gate
+                without the second, so the operator has to be able to watch
+                it converge rather than guess. */}
+            <div className="kv"><span className="dim">Square On</span>
+              <span className="mono">
+                {p?.square_angle_deg == null
+                  ? (p?.square_reason || "—")
+                  : `${p.square_angle_deg > 0 ? "+" : ""}${p.square_angle_deg}° @ ${p.square_standoff_m ?? "—"} m`}
+              </span></div>
             {!!p?.redzone_exclusions?.length &&
               <div className="kv"><span className="dim">Exclusions</span>
                 <span className="mono">{p.redzone_exclusions.length} mapped · {p.redzone_area_m2 ?? 0} m²</span></div>}

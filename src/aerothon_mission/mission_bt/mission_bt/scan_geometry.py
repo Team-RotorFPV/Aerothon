@@ -94,9 +94,33 @@ def _fit_line(points):
     return (cx, cy), (ux, uy), (nx, ny), offset, rms
 
 
-def _extent(points, direction):
-    ux, uy = direction
-    projections = [x * ux + y * uy for x, y in points]
+def _extent(points):
+    """How WIDE the returns are, across the line of sight.
+
+    MEASURED, and the reason this is not the spread along the fitted line.
+    Parked on the shipped arena, the fit was asked what it saw in each
+    direction in turn:
+
+        sector -75:  face  -90.0 deg  7.74 m  17 pts  "span" 2.24 m
+        sector +15:  face  -90.9 deg  3.11 m   8 pts  "span" 2.22 m
+
+    Eight returns do not span two metres of anything. Those fits had gone
+    RADIAL -- the line runs toward the aircraft instead of across it -- so the
+    spread along it is DEPTH wearing width's clothes, and a narrow object
+    sailed through a guard meant to reject exactly that. In flight the same
+    fits came back as an alternating +90/-90 measurement and the aircraft
+    turned in circles for fourteen steps.
+
+    Across the mean line of sight, depth cannot stand in for width: a post is
+    18 cm wide however far through the scan it is smeared.
+    """
+    cx = sum(p[0] for p in points) / len(points)
+    cy = sum(p[1] for p in points) / len(points)
+    bearing = math.hypot(cx, cy)
+    if bearing < 1e-9:
+        return 0.0
+    ax, ay = -cy / bearing, cx / bearing      # across the line of sight
+    projections = [x * ax + y * ay for x, y in points]
     return max(projections) - min(projections)
 
 
@@ -123,6 +147,7 @@ def fit_surface(angle_min, angle_increment, ranges, bearing_rad,
                 half_width_rad, range_min=0.05, range_max=12.0,
                 min_points=6, min_extent_m=0.9, max_residual_m=0.08,
                 gap_m=0.35, inlier_m=0.20, max_depth_m=6.0,
+                max_obliquity_rad=math.radians(70.0),
                 expected_range_m=None, range_tol_m=3.0):
     """The flat surface the camera is looking at, or an explicit refusal.
 
@@ -138,7 +163,7 @@ def fit_surface(angle_min, angle_increment, ranges, bearing_rad,
                     standoff and is preserved by sliding along the face.
         points      how many returns the fit used
         residual_m  RMS perpendicular residual of those returns
-        extent_m    how far along the surface the returns span
+        extent_m    how wide the returns are ACROSS the line of sight
         reason      why it was refused; empty when ok
 
     Fails closed, in the manner of `route_leg`: there is no "best guess"
@@ -206,7 +231,7 @@ def fit_surface(angle_min, angle_increment, ranges, bearing_rad,
         chosen = inliers
     _, direction, normal, offset, rms = _fit_line(chosen)
 
-    span = _extent(chosen, direction)
+    span = _extent(chosen)
     if len(chosen) < min_points:
         return no_surface(
             f"the surface {math.degrees(bearing_rad):+.0f} deg off the nose "
@@ -230,6 +255,20 @@ def fit_surface(angle_min, angle_increment, ranges, bearing_rad,
     mx, my = sign * normal[0], sign * normal[1]
     distance = abs(offset)
 
+    angle = math.atan2(my, mx)
+    # EDGE ON IS NOT A MEASUREMENT. A face at 90 degrees to the nose is a
+    # surface running away alongside the aircraft, not one it is looking at --
+    # and a banner the camera has just identified cannot be edge-on, because
+    # then there would be nothing in frame to identify. Watched live: the
+    # aircraft alternated between +90 and -90 for fourteen steps, turning to
+    # face each reading and making the next one worse.
+    if abs(angle) > float(max_obliquity_rad):
+        return no_surface(
+            f"the face found {math.degrees(bearing_rad):+.0f} deg off the "
+            f"nose lies {math.degrees(angle):+.0f} deg to it, edge-on; that "
+            f"is a surface running away alongside the aircraft, not one it "
+            f"can square up to")
+
     if expected_range_m is not None and \
             abs(distance - float(expected_range_m)) > float(range_tol_m):
         return no_surface(
@@ -239,7 +278,7 @@ def fit_surface(angle_min, angle_increment, ranges, bearing_rad,
             f"something else")
 
     return {"ok": True,
-            "angle_rad": math.atan2(my, mx),
+            "angle_rad": angle,
             "range_m": distance,
             "points": len(chosen),
             "residual_m": rms,
