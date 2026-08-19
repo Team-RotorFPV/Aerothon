@@ -20,11 +20,13 @@ from rclpy.node import Node
 from rclpy.qos import (QoSProfile, QoSDurabilityPolicy, QoSHistoryPolicy,
                        qos_profile_sensor_data)
 from geometry_msgs.msg import PoseStamped, Vector3
-from sensor_msgs.msg import BatteryState
+from sensor_msgs.msg import BatteryState, LaserScan
 from std_msgs.msg import Bool, Float32, String
 from mavros_msgs.msg import HomePosition, State, WaypointList
 from mavros_msgs.srv import WaypointPush as _WaypointPush
 from mavros_msgs.srv import CommandBool, SetMode, CommandTOL
+
+from mission_bt.scan_geometry import fit_surface, no_surface as _no_surface
 
 
 # Modes the aircraft may legitimately enter under our own command. A change
@@ -151,6 +153,21 @@ class Mav:
                                  self._on_banner_detail, qos)
         node.create_subscription(String, '/percep/redzone/detail',
                                  self._on_redzone, qos)
+        # THE LIDAR, finally reaching the mission tree.
+        #
+        # /scan has been live and bridged since Phase 0, and the only things
+        # reading it were the avoidance navigator and the GCS aggregator. The
+        # mission itself had no way to ask "am I perpendicular to that
+        # surface", so it inferred squareness from a camera bounding box that
+        # includes the gate posts -- a proxy whose plateau (1.88 to 1.91) made
+        # every threshold above it unreachable, and which failed fourteen
+        # watched runs.
+        self._scan = None
+        self._scan_t = None
+        node.create_subscription(LaserScan, '/scan', self._on_scan,
+                                 qos_profile_sensor_data)
+        self.pub_square_on = node.create_publisher(String, '/mission/square_on',
+                                                   qos)
         node.create_subscription(Bool, '/mission/abort', self._on_abort, qos)
         node.create_subscription(Bool, '/mission/start', self._on_start, qos)
         node.create_subscription(String, '/mission/target_override',
@@ -318,6 +335,57 @@ class Mav:
         ranked = sorted(self.banner_reject_counts.items(),
                         key=lambda kv: -kv[1])[:top]
         return "; ".join(f"{r} (x{n})" for r, n in ranked)
+
+    # ------------------------------------------------------------------ #
+    # lidar
+    # ------------------------------------------------------------------ #
+    def _on_scan(self, m):
+        self._scan = m
+        self._scan_t = self.node.get_clock().now().nanoseconds / 1e9
+
+    def scan_age_s(self):
+        """Seconds since the last scan, or None if none has ever arrived."""
+        if self._scan_t is None:
+            return None
+        return (self.node.get_clock().now().nanoseconds / 1e9) - self._scan_t
+
+    def surface_ahead(self, bearing_rad, half_width_rad,
+                      expected_range_m=None, stale_s=1.0, **kw):
+        """The flat face in that sector of the scan, or an explicit refusal.
+
+        THE SEAM. The behaviour tree never touches a LaserScan: it asks for a
+        sector and gets back the same dict `fit_surface` returns, so the
+        squareness logic can be tested against a synthetic scan and the tree
+        against a fake commander, and neither test is grading a copy of the
+        other's arithmetic.
+
+        A missing or stale scan is a REFUSAL, not a zero. An aircraft that
+        cannot measure its angle to the banner must not advance through it,
+        and a zero here reads as "perfectly square".
+        """
+        age = self.scan_age_s()
+        if self._scan is None or age is None:
+            return _no_surface("no lidar scan has arrived on /scan; the "
+                               "aircraft cannot measure its angle to anything")
+        if age > float(stale_s):
+            return _no_surface(
+                f"the last lidar scan is {age:.1f} s old; refusing to square "
+                f"up on a stale measurement")
+        scan = self._scan
+        return fit_surface(scan.angle_min, scan.angle_increment, scan.ranges,
+                           bearing_rad, half_width_rad,
+                           range_min=float(scan.range_min),
+                           range_max=float(scan.range_max),
+                           expected_range_m=expected_range_m, **kw)
+
+    def publish_square_on(self, payload):
+        """Report the squareness measurement to the GCS while it converges.
+
+        The operator watching a flight could see that the aircraft was moving
+        and not what it believed about its angle to the banner, which is the
+        one number the stage's decision turns on.
+        """
+        self.pub_square_on.publish(String(data=json.dumps(payload)))
 
     def banner_identified(self):
         """The banner, not merely something green.

@@ -47,6 +47,21 @@ def box_visual(name: str, pose: str, size: str, material: str) -> str:
             f'</size></box></geometry>{material}</visual>')
 
 
+def box_collision(name: str, pose: str, size: str) -> str:
+    """A box the LIDAR can see. Visuals are invisible to a ray sensor.
+
+    The banner board was emitted as a visual and nothing else, so the only
+    solid parts of the gate were its two 18 cm posts and the ray sensor swept
+    straight through the panel between them. A real banner is a surface; a
+    simulator that models it as a hole is not modelling the thing being flown
+    against.
+    """
+    if len(pose.split()) == 3:
+        pose = f"{pose} 0 0 0"
+    return (f'<collision name="{name}"><pose>{pose}</pose><geometry><box>'
+            f'<size>{size}</size></box></geometry></collision>')
+
+
 def qr_visuals(matrix: list[list[bool]], size: float, prefix: str) -> str:
     """White plate plus horizontally merged black QR module runs."""
     n = len(matrix)
@@ -104,13 +119,30 @@ def green_decoy_visuals() -> str:
     ])
 
 
-def banner_visuals() -> str:
+def banner_geometry() -> str:
+    """The lettered panel, as both a visual and a SOLID.
+
+    WHY THE COLLISION IS PART OF THE BANNER AND NOT AN AFTERTHOUGHT
+
+        Squareness to the gate is measured with the lidar: fit a line through
+        the returns in the sector the camera points at, and the angle of that
+        line to the nose is the misalignment. That measurement is only as good
+        as what the ray sensor can hit. With the board emitted as a visual
+        only, the gate presented two 18 cm posts and 3.7 m of nothing between
+        them, which is not what a banner presents to a real C1.
+
+        The line fit is written to work on either -- two isolated posts still
+        define a line -- but the simulator should model the surface, not a
+        hollow frame.
+    """
     text = "AEROTHON"
     rows = bitmap_runs(text)
     cols = len(rows[0])
     cell_y, cell_z = 3.25 / cols, 0.115
     center_z = 3.38
     visuals = [
+        box_collision("banner_board_collision", f"0 0 {center_z}",
+                      "0.12 3.7 1.15"),
         box_visual("banner_board", f"0 0 {center_z}", "0.12 3.7 1.15", GREEN),
     ]
     # Raised white frame on both faces.
@@ -275,7 +307,7 @@ def main() -> None:
                                             args.target_qr_size, "target_d"),
         "@QR_TARGET_E_VISUALS@": qr_visuals(matrices["qr_target_e.png"],
                                             args.target_qr_size, "target_e"),
-        "@AEROTHON_BANNER_VISUALS@": banner_visuals(),
+        "@AEROTHON_BANNER_GEOMETRY@": banner_geometry(),
         "@GREEN_DECOY_VISUALS@": green_decoy_visuals(),
         "@RED_ZONE_MAIN_VISUALS@": red_zone_visuals(10.0, 7.0, "red_main"),
         "@RED_ZONE_NW_VISUALS@": red_zone_visuals(6.0, 4.0, "red_nw"),

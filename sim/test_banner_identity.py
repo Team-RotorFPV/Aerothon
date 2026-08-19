@@ -323,6 +323,25 @@ class AlignToBannerTests(unittest.TestCase):
                 diagnosable. See the arena-regression seed 1001 failure."""
                 return self.reject or "nothing green ever entered the frame"
 
+            def reached(self, x, y, z, tol=0.6):
+                return math.dist(self.pos(), (x, y, z)) < tol
+
+            def surface_ahead(self, bearing_rad, half_width_rad, **kw):
+                """A face the aircraft is already square to.
+
+                These tests are about IDENTIFYING the banner and sweeping to
+                it. Squaring up on the lidar is the next phase and is measured
+                against a modelled gate in test_banner_sweep.py; refusing here
+                would make every case in this file fail for a reason it is not
+                about.
+                """
+                return {"ok": True, "angle_rad": 0.0, "range_m": 5.0,
+                        "points": 44, "residual_m": 0.005, "extent_m": 3.6,
+                        "reason": ""}
+
+            def publish_square_on(self, payload):
+                pass
+
         self.py_trees = py_trees
         self.Vector3 = Vector3
         self.mav = FakeMav()
@@ -387,8 +406,11 @@ class AlignToBannerTests(unittest.TestCase):
         self.assertGreater(yaw, before)
 
     def test_centred_banner_held_for_several_frames_succeeds(self):
+        """Centring is no longer the last word: the stage then holds station
+        and squares up on the lidar, which is a second measurement and takes
+        its own dwell. Hence the tick budget, not a weaker assertion."""
         self.mav.banner = self.Vector3(x=0.02, y=0.0, z=1.0)
-        self.tick(n=20)
+        self.tick(n=60)
         self.assertEqual(self.leaf.status, self.py_trees.common.Status.SUCCESS)
 
     def test_one_centred_frame_is_not_enough(self):
@@ -692,6 +714,20 @@ class BannerFailureIsDiagnosableTests(unittest.TestCase):
 
             def banner_rejection_summary(self, top=3):
                 return self.reject or "nothing green ever entered the frame"
+
+            def reached(self, x, y, z, tol=0.6):
+                return math.dist(self.pos(), (x, y, z)) < tol
+
+            def surface_ahead(self, bearing_rad, half_width_rad, **kw):
+                """See the note on the other fake in this file: squaring up
+                is measured against a modelled gate in test_banner_sweep.py,
+                not here."""
+                return {"ok": True, "angle_rad": 0.0, "range_m": 5.0,
+                        "points": 44, "residual_m": 0.005, "extent_m": 3.6,
+                        "reason": ""}
+
+            def publish_square_on(self, payload):
+                pass
 
         self.py_trees = py_trees
         self.mav = FakeMav()

@@ -23,6 +23,7 @@ WHAT THESE TESTS ARE CAREFUL ABOUT
     python3 -m pytest sim/test_banner_sweep.py -v
 """
 
+import inspect
 import math
 import os
 import sys
@@ -35,6 +36,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import py_trees                                              # noqa: E402
 from mission_bt.mission_tree import AlignToBanner            # noqa: E402
+from mission_bt.scan_geometry import (                       # noqa: E402
+    bearing_to_angle, no_surface)
 from test_fail_closed_stages import FakeMav                  # noqa: E402
 
 
@@ -66,6 +69,16 @@ class SweepMav(FakeMav):
         self.banner_arc = banner_arc
         self.commanded_yaws = []
         self.lag = 0                      # ticks of heading lag to simulate
+        # A COOPERATIVE LIDAR, because these tests are about the SWEEP.
+        #
+        # The sweep's job ends when the banner is centred; squaring up is the
+        # next phase and has its own fake, `GateMav`, which models the gate's
+        # geometry rather than answering with a constant. Without something
+        # here every sweep test would end in the square-up refusing, and would
+        # then be reporting on a phase it is not about.
+        self.surface = {"ok": True, "angle_rad": 0.0, "range_m": 5.0,
+                        "points": 40, "residual_m": 0.004, "extent_m": 3.6,
+                        "reason": ""}
 
     def goto(self, x, y, z, yaw=0.0):
         self.gotos.append((x, y, z, yaw))
@@ -102,6 +115,81 @@ def run(stage, mav, clock, ticks=4000, dt=0.1):
             return status
         clock.advance(dt)
     return py_trees.common.Status.RUNNING
+
+
+class LagMav(SweepMav):
+    """A vehicle that ARRIVES LATE -- in heading AND in position.
+
+    THE BLIND SPOT THIS CLOSES
+
+        Every fake vehicle in this repo followed setpoints instantly. Against
+        one of those, a per-tick proportional correction converges beautifully
+        and the suite goes green; against a real airframe it oscillates,
+        because the aircraft is still moving when the next setpoint is
+        computed and the target recedes at the rate the aircraft closes on it.
+        The team calls that the receding carrot. It has now appeared three
+        times -- in the banner approach, in centring, and in the orbit -- and
+        each time the suite was green when it flew.
+
+        The lag is FIRST ORDER with a rate cap, on both axes:
+
+            first order   the aircraft never quite arrives, so anything that
+                          waits for exact arrival hangs rather than passing
+            rate cap      finite authority, so a large command does not
+                          produce a large single-tick response
+
+        A stage that is correct against this fake is correct about the thing
+        that actually flies. A stage that needs the instant fake was never
+        being tested for what its name claims.
+
+    Position is what makes it new. `SlewMav` lagged the heading only, so every
+    orbit and strafe test in this file measured a vehicle that teleported
+    sideways and re-measured the banner from a place it had reached in zero
+    time -- which is precisely the defect the live orbit had.
+    """
+
+    def __init__(self, banner_at=None, banner_arc=math.radians(30.0),
+                 yaw_gain=0.25, yaw_rate=math.radians(4.0),
+                 pos_gain=0.22, speed_m=0.30):
+        super().__init__(banner_at=banner_at, banner_arc=banner_arc)
+        self.yaw_gain = float(yaw_gain)
+        self.yaw_rate = float(yaw_rate)
+        self.pos_gain = float(pos_gain)
+        self.speed_m = float(speed_m)
+
+    @staticmethod
+    def _wrap(a):
+        return math.atan2(math.sin(a), math.cos(a))
+
+    def _fly(self, x, y, z, yaw):
+        err = self._wrap(yaw - self._yaw)
+        step = max(-self.yaw_rate, min(self.yaw_rate, self.yaw_gain * err))
+        self._yaw = self._wrap(self._yaw + step)
+
+        px, py, pz = self._pos
+        d = math.dist((px, py, pz), (x, y, z))
+        if d > 1e-9:
+            f = min(self.pos_gain * d, self.speed_m) / d
+            self._pos = (px + (x - px) * f, py + (y - py) * f,
+                         pz + (z - pz) * f)
+            self._alt = self._pos[2]
+
+    def goto(self, x, y, z, yaw=0.0):
+        self.gotos.append((x, y, z, yaw))
+        self.commanded_yaws.append(yaw)
+        self._fly(x, y, z, yaw)
+
+    def reached(self, x, y, z, tol=0.6):
+        return math.dist(self._pos, (x, y, z)) < tol
+
+
+class SlewMav(LagMav):
+    """Heading lag only, for the tests that are about yaw convergence."""
+
+    def __init__(self, banner_at, banner_arc=math.radians(30.0),
+                 slew_rad_per_tick=math.radians(3.0)):
+        super().__init__(banner_at=banner_at, banner_arc=banner_arc,
+                         yaw_rate=float(slew_rad_per_tick))
 
 
 class DwellTests(unittest.TestCase):
@@ -310,7 +398,7 @@ class CentringTests(unittest.TestCase):
     def setUp(self):
         self.clock = Clock()
 
-    class Slow(SweepMav):
+    class Slow(LagMav):
         """Identified throughout, converging slowly -- an ordinary approach."""
 
         def __init__(self):
@@ -437,39 +525,6 @@ class FailClosedTests(unittest.TestCase):
         run(stage, mav, self.clock)
         swept = [m for m, _ in mav.logs if "stared" in m]
         self.assertTrue(swept, mav.logs)
-
-
-if __name__ == "__main__":
-    unittest.main()
-
-
-class SlewMav(SweepMav):
-    """A heading that SLEWS toward the command instead of teleporting to it.
-
-    This is the whole point of the class. With a fake that reaches the
-    commanded yaw instantly, a per-tick proportional correction converges
-    beautifully and the tests pass -- which is exactly why the live aircraft
-    oscillated for a hundred seconds while the suite was green.
-
-    A real airframe is still turning when the next setpoint is computed. If
-    that setpoint is recomputed from the CURRENT heading every tick, the
-    target runs away from the aircraft at the same speed the aircraft chases
-    it. The stack has met this before, under the name "receding carrot", in
-    ApproachBanner.
-    """
-
-    def __init__(self, banner_at, banner_arc=math.radians(30.0),
-                 slew_rad_per_tick=math.radians(3.0)):
-        super().__init__(banner_at=banner_at, banner_arc=banner_arc)
-        self.slew = float(slew_rad_per_tick)
-
-    def goto(self, x, y, z, yaw=0.0):
-        self.gotos.append((x, y, z, yaw))
-        self.commanded_yaws.append(yaw)
-        err = math.atan2(math.sin(yaw - self._yaw), math.cos(yaw - self._yaw))
-        step = max(-self.slew, min(self.slew, err))
-        self._yaw = math.atan2(math.sin(self._yaw + step),
-                               math.cos(self._yaw + step))
 
 
 class AlignmentConvergesTests(unittest.TestCase):
@@ -694,289 +749,429 @@ class ZigzagSweepTests(unittest.TestCase):
             self.assertLessEqual(r["heading_deg"], 180.5)
 
 
-class StrafeWhenYawStallsTests(unittest.TestCase):
-    """Yaw cannot centre a long structure. Translation can.
+class GateMav(LagMav):
+    """A vehicle in a world that has a GATE in it, with a real face.
 
-    MEASURED, seed 1001 run 9, with the banner locked on 12 frames of 12:
+    WHY THIS IS NOT A CONSTANT
 
-        correction 1: bearing +0.28 at -30 deg -> commanding -37
-        correction 2: bearing +0.29 at -37 deg -> commanding -44
+        The fake it replaces answered "the board looks 1.4 wide" from a
+        counter, so the orbit tests graded a number the fixture had decided in
+        advance. This one holds a gate at a position with a facing, and works
+        out what the camera and the lidar would each report from wherever the
+        aircraft has actually got to. Moving changes the answers because the
+        geometry changes, which is the only way an orbit test can mean
+        anything.
 
-    Seven degrees of yaw toward a point target should cut a 0.28 bearing by
-    about 0.23. It moved +0.01, the wrong way -- because the gate runs away
-    from the aircraft, so yawing toward it brings more of it into frame and
-    the centroid slides right by as much as the rotation moved it left.
-
-    The operator called this before the measurement did: "move the drone left
-    and right in a horizontal way so that the banner comes in front".
+    THE SCAN PLANE IS MODELLED TOO. The C1 sweeps one horizontal slice, so a
+    gate shorter than the aircraft's altitude is invisible to it however
+    perfectly the aircraft is positioned -- measured on seed 1001 as 0 finite
+    returns of 720 at 5.0 m, and 289 at 3.0 m. A fake without that cannot
+    exercise the descent, and the descent is what makes the whole measurement
+    reachable.
     """
+
+    LIDAR_OFFSET_M = 0.235          # sensor height above the vehicle origin
+
+    def __init__(self, gate=(6.0, 0.0), face_rad=math.pi, start=(0.0, 0.0, 3.0),
+                 gate_top_m=4.0, hfov=math.radians(60.0),
+                 visible=True, lidar_blind=False, **kw):
+        super().__init__(banner_at=None, **kw)
+        self.gate = (float(gate[0]), float(gate[1]))
+        # Which way the face POINTS. The aircraft squares up when its nose is
+        # anti-parallel to this.
+        self.face_rad = float(face_rad)
+        self.gate_top_m = float(gate_top_m)
+        self.hfov = float(hfov)
+        self.visible = visible          # the camera can see it
+        self.lidar_blind = lidar_blind  # the lidar never finds a face
+        self._pos = (float(start[0]), float(start[1]), float(start[2]))
+        self._alt = self._pos[2]
+        self._yaw = 0.0
+        self.surface = None
+        self.sector_vs_camera = []
+
+    # ---- what the geometry actually is ---- #
+    def _to_gate(self):
+        return (self.gate[0] - self._pos[0], self.gate[1] - self._pos[1])
+
+    def _bearing_angle(self):
+        vx, vy = self._to_gate()
+        return self._wrap(math.atan2(vy, vx) - self._yaw)
+
+    def standoff(self):
+        """Perpendicular distance from the aircraft to the gate's face."""
+        vx, vy = self._to_gate()
+        return -(vx * math.cos(self.face_rad) + vy * math.sin(self.face_rad))
+
+    def off_centreline(self):
+        """How far along the face the aircraft is from the gate's centre.
+
+        Positive is to the side `face_rad + 90 degrees` points.
+        """
+        vx, vy = self._to_gate()
+        ux, uy = -math.sin(self.face_rad), math.cos(self.face_rad)
+        return -(vx * ux + vy * uy)
+
+    # ---- what the camera reports ---- #
+    def banner_identified(self):
+        if not self.visible:
+            return False
+        return abs(self._bearing_angle()) < self.hfov / 2.0
+
+    def banner_bearing(self):
+        if not self.banner_identified():
+            return 0.0
+        return -math.tan(self._bearing_angle()) / math.tan(self.hfov / 2.0)
+
+    # ---- what the lidar reports ---- #
+    def surface_ahead(self, bearing_rad, half_width_rad,
+                      expected_range_m=None, **kw):
+        self.surface_calls.append((bearing_rad, half_width_rad,
+                                   expected_range_m))
+        self.sector_vs_camera.append((bearing_rad, self.banner_bearing()))
+        if self.lidar_blind:
+            return no_surface("no flat face in the sector")
+        if self._pos[2] + self.LIDAR_OFFSET_M > self.gate_top_m:
+            return no_surface(
+                f"only 0 lidar return(s) inside the sector; the scan plane at "
+                f"{self._pos[2] + self.LIDAR_OFFSET_M:.2f} m is above "
+                f"everything in the arena")
+        if self.standoff() <= 0.0:
+            return no_surface("the aircraft is behind the face")
+        # The FOOT of the perpendicular, in the aircraft frame.
+        alpha = self._wrap(self.face_rad + math.pi - self._yaw)
+        if abs(self._wrap(alpha - bearing_rad)) > half_width_rad:
+            return no_surface(
+                f"the face lies {math.degrees(alpha):+.0f} deg off the nose, "
+                f"outside the sector the camera named")
+        return {"ok": True, "angle_rad": alpha, "range_m": self.standoff(),
+                "points": 44, "residual_m": 0.005, "extent_m": 3.6,
+                "reason": ""}
+
+
+class SquareOnWithTheLidarTests(unittest.TestCase):
+    """Centred is not square on, and the lidar is what tells them apart.
+
+    THE OPERATOR'S REPORT: "rn it is just flying out of the world ... it should
+    only set the waypoint 10 metres ahead of it when it is completely in front
+    of the banner while it maintains some distance".
+
+    The aspect ratio this replaces plateaued at 1.88-1.91 because the derived
+    box includes the gate posts, so no threshold above that was reachable and
+    every threshold below it fired on noise. Fourteen watched runs.
+    """
+
+    class Sticky(GateMav):
+        """A face the aircraft can never come square to.
+
+        The measurement is always 30 degrees off however the aircraft turns,
+        which is a geometry no manoeuvre resolves. The point is that the stage
+        gives up on its own step budget rather than hovering until the battery
+        runs down -- so the fake keeps the surface visible throughout, instead
+        of letting the aircraft spin itself out of its own search sector and
+        fail for a different reason.
+        """
+
+        def surface_ahead(self, bearing_rad, half_width_rad, **kw):
+            self.surface_calls.append((bearing_rad, half_width_rad, None))
+            self.sector_vs_camera.append((bearing_rad, self.banner_bearing()))
+            return {"ok": True, "angle_rad": math.radians(30.0),
+                    "range_m": self.standoff(), "points": 44,
+                    "residual_m": 0.005, "extent_m": 3.6, "reason": ""}
 
     def setUp(self):
         self.clock = Clock()
-
-    class Stubborn(SweepMav):
-        """A banner whose bearing does not respond to yaw, as measured."""
-
-        def __init__(self, bearing=0.28, yields_to_strafe=True):
-            super().__init__(banner_at=0.0, banner_arc=math.radians(30.0))
-            self._fixed = bearing
-            self.yields = yields_to_strafe
-            self.strafed = 0
-
-        def goto(self, x, y, z, yaw=0.0):
-            if (x, y) != self._pos[:2]:
-                self.strafed += 1
-                if self.yields:
-                    self._fixed *= 0.45      # coming into line with it
-            self._pos = (x, y, z)            # arrives at the commanded point
-            super().goto(x, y, z, yaw)
-
-        def reached(self, x, y, z, tol=0.6):
-            return math.dist(self._pos, (x, y, z)) < max(tol, 0.75)
-
-        def banner_identified(self):
-            return True
-
-        def banner_bearing(self):
-            return self._fixed
 
     def _stage(self, mav, **kw):
         kw.setdefault("clock", self.clock)
         kw.setdefault("dwell_s", 0.4)
         kw.setdefault("align_dwell_s", 0.2)
+        kw.setdefault("hfov_rad", mav.hfov)
+        kw.setdefault("alt_floor_m", 2.0)
         stage = AlignToBanner(mav, **kw)
         stage.initialise()
         return stage
 
-    def test_it_strafes_once_yaw_stops_closing(self):
-        mav = self.Stubborn()
-        stage = self._stage(mav)
-        run(stage, mav, self.clock, ticks=2000)
-        self.assertGreater(mav.strafed, 0,
-                           "kept yawing at a bearing that never improved")
+    def _fly(self, mav, ticks=4000, **kw):
+        stage = self._stage(mav, **kw)
+        return stage, run(stage, mav, self.clock, ticks=ticks)
 
-    def test_a_strafe_STEP_does_not_also_rotate(self):
-        """Yaw and roll both belong here -- the operator asked for exactly
-        that -- but not in the same command. Rotating while translating
-        reintroduces the coupling that made yaw useless: the centroid shift
-        from the rotation would be indistinguishable from the one the
-        translation is trying to measure."""
-        mav = self.Stubborn()
+    # ---- the measurement drives the manoeuvre ---- #
+    def test_an_aircraft_already_square_finishes_without_moving(self):
+        mav = GateMav(gate=(5.0, 0.0), face_rad=math.pi)
+        start = mav.pos()[:2]
+        stage, status = self._fly(mav)
+        self.assertIs(status, py_trees.common.Status.SUCCESS)
+        self.assertLess(math.dist(mav.pos()[:2], start), 0.5,
+                        "moved when it was already in front of the gate")
+
+    def test_it_squares_up_from_the_PORT_side(self):
+        """The gate faces west; the aircraft sits north of its centreline."""
+        mav = GateMav(gate=(5.0, -3.0), face_rad=math.pi)
+        stage, status = self._fly(mav)
+        self.assertIs(status, py_trees.common.Status.SUCCESS,
+                      stage.feedback_message)
+        self.assertLess(abs(math.degrees(mav._wrap(mav.face_rad + math.pi
+                                                   - mav._yaw))), 8.0,
+                        "finished pointing somewhere other than at the face")
+        self.assertLess(abs(mav.off_centreline()), 1.0,
+                        f"finished {mav.off_centreline():+.1f} m off the "
+                        f"gate's centreline")
+
+    def test_it_squares_up_from_the_STARBOARD_side(self):
+        """The mirror image. A sign error passes one of these and not both."""
+        mav = GateMav(gate=(5.0, 3.0), face_rad=math.pi)
+        stage, status = self._fly(mav)
+        self.assertIs(status, py_trees.common.Status.SUCCESS,
+                      stage.feedback_message)
+        self.assertLess(abs(mav.off_centreline()), 1.0,
+                        f"finished {mav.off_centreline():+.1f} m off the "
+                        f"gate's centreline")
+
+    def test_a_gate_turned_away_from_the_approach_is_still_squared_up_to(self):
+        """The gate's face is 25 degrees off the direction the aircraft came
+        from, which is the case the aspect ratio could never distinguish from
+        being square."""
+        mav = GateMav(gate=(6.0, 1.0), face_rad=math.pi - math.radians(25.0))
+        stage, status = self._fly(mav)
+        self.assertIs(status, py_trees.common.Status.SUCCESS,
+                      stage.feedback_message)
+        off = math.degrees(mav._wrap(mav.face_rad + math.pi - mav._yaw))
+        self.assertLess(abs(off), 8.0,
+                        f"finished {off:+.0f} deg off perpendicular")
+
+    def test_the_STANDOFF_is_held_while_the_aircraft_comes_round(self):
+        """"while it maintains some distance". An orbit that closes the
+        distance is an approach, and the approach is a later stage."""
+        mav = GateMav(gate=(5.0, 3.0), face_rad=math.pi)
+        opening = mav.standoff()
         stage = self._stage(mav)
-        prev = None
-        for _ in range(2000):
+        seen = []
+        for _ in range(4000):
+            if stage.update() is not py_trees.common.Status.RUNNING:
+                break
+            self.clock.advance(0.1)
+            if stage.phase is stage.SQUARE:
+                seen.append(mav.standoff())
+        self.assertTrue(seen)
+        self.assertGreater(min(seen), opening - 2.0,
+                           "closed the distance to the gate while squaring up")
+
+    def test_a_standoff_outside_the_sensors_band_is_corrected(self):
+        """Drifting out to the edge of the lidar's range loses the very
+        measurement the stage depends on."""
+        mav = GateMav(gate=(11.0, 0.0), face_rad=math.pi)
+        stage, status = self._fly(mav)
+        self.assertIs(status, py_trees.common.Status.SUCCESS,
+                      stage.feedback_message)
+        self.assertLessEqual(mav.standoff(), 6.5,
+                             "never closed to a range the lidar works at")
+
+    # ---- the refusal ---- #
+    def test_a_CONFIDENT_CAMERA_does_not_advance_a_blind_lidar(self):
+        """The headline rule: the lidar wins. A camera reporting the banner
+        dead ahead is not evidence of perpendicularity, and acting on it is
+        what put the aircraft outside the arena."""
+        mav = GateMav(gate=(5.0, 0.0), face_rad=math.pi, lidar_blind=True)
+        stage, status = self._fly(mav, ticks=6000)
+        self.assertIs(status, py_trees.common.Status.FAILURE)
+        self.assertTrue(mav.banner_identified(),
+                        "the camera was meant to be confident throughout")
+
+    def test_the_refusal_names_the_measurement_it_could_not_take(self):
+        mav = GateMav(gate=(5.0, 0.0), face_rad=math.pi, lidar_blind=True)
+        self._fly(mav, ticks=6000)
+        self.assertIn("no flat face", mav.abort_reason)
+        self.assertIn("refusing to advance", mav.abort_reason)
+
+    def test_a_momentarily_lost_camera_does_not_stop_the_lidar(self):
+        """The camera says WHERE to look and the lidar says what is there. A
+        dropped frame or two must not throw away a measurement the lidar is
+        making perfectly well."""
+        mav = GateMav(gate=(5.0, 1.5), face_rad=math.pi)
+        stage = self._stage(mav)
+        for _ in range(4000):
+            if stage.update() is not py_trees.common.Status.RUNNING:
+                break
+            self.clock.advance(0.1)
+            if stage.phase is stage.SQUARE and stage._sq_steps >= 1:
+                mav.visible = False       # detector drops it mid-square-up
+                break
+        status = run(stage, mav, self.clock, ticks=200)
+        self.assertIsNot(status, py_trees.common.Status.FAILURE,
+                         "a dropped camera frame ended a working measurement")
+
+    def test_the_sector_searched_FOLLOWS_the_camera_bearing(self):
+        """A fixed forward sector would measure the corridor wall behind an
+        open gate rather than the gate. The sector the stage asks for has to
+        be the one the camera is pointing at, every time it asks."""
+        mav = GateMav(gate=(5.0, 4.0), face_rad=math.pi)
+        self._fly(mav)
+        self.assertTrue(mav.sector_vs_camera)
+        off = [(s, b) for s, b in mav.sector_vs_camera
+               if abs(s - bearing_to_angle(b, mav.hfov)) > 1e-6 and b]
+        self.assertEqual(off, [], f"the sector did not follow the camera: "
+                                  f"{off[:3]}")
+
+    def test_an_OFF_CENTRE_banner_is_searched_for_off_the_nose(self):
+        """The invariant above is satisfied trivially if the bearing is always
+        zero. This is the case where it is not."""
+        mav = GateMav(gate=(5.0, 4.0), face_rad=math.pi)
+        stage = self._stage(mav)
+        for _ in range(4000):
+            if stage.update() is not py_trees.common.Status.RUNNING:
+                break
+            self.clock.advance(0.1)
+            if stage.phase is stage.SQUARE:
+                break
+        mav._yaw = mav._wrap(mav._yaw + math.radians(20.0))   # knocked off
+        mav.sector_vs_camera = []
+        run(stage, mav, self.clock, ticks=400)
+        self.assertTrue(mav.sector_vs_camera)
+        self.assertGreater(max(abs(s) for s, _ in mav.sector_vs_camera),
+                           math.radians(5.0),
+                           "kept searching straight ahead with the banner "
+                           "20 degrees off the nose")
+
+    def test_the_measurement_is_taken_from_a_STOPPED_aircraft(self):
+        """Three orbit steps in a row once reported an identical aspect: the
+        stage moved its target and re-read the view in the same breath, so it
+        was measuring the old position every time."""
+        mav = GateMav(gate=(5.0, 3.0), face_rad=math.pi)
+        stage = self._stage(mav)
+        for _ in range(4000):
+            if stage.update() is not py_trees.common.Status.RUNNING:
+                break
+            self.clock.advance(0.1)
+            if stage.phase is stage.SQUARE and stage._sq_phase is stage.MEASURE:
+                ax, ay, az = stage._anchor
+                self.assertTrue(
+                    mav.reached(ax, ay, az, 1.2),
+                    f"measured from {mav.pos()} while still flying to "
+                    f"{(ax, ay, az)}")
+
+    # ---- the scan plane ---- #
+    def test_it_DESCENDS_when_the_scan_plane_is_above_the_gate(self):
+        """MEASURED on seed 1001: 51 consecutive samples in BANNER_ALIGN at
+        5.0 m returned 0 finite ranges out of 720, and the same sensor at
+        3.0 m returned 289. The lidar was not broken and the gate was not
+        missing -- the scan plane was over the top of it."""
+        mav = GateMav(gate=(5.0, 0.0), face_rad=math.pi,
+                      start=(0.0, 0.0, 5.0), gate_top_m=4.0)
+        stage, status = self._fly(mav, ticks=6000)
+        self.assertIs(status, py_trees.common.Status.SUCCESS,
+                      stage.feedback_message)
+        self.assertLess(mav.pos()[2], 4.0 - GateMav.LIDAR_OFFSET_M,
+                        "never got the scan plane below the top of the gate")
+
+    def test_the_descent_stops_at_the_floor_and_then_FAILS_CLOSED(self):
+        """The ladder is not a licence to fly into the ground looking for a
+        surface that is not there."""
+        mav = GateMav(gate=(5.0, 0.0), face_rad=math.pi,
+                      start=(0.0, 0.0, 5.0), gate_top_m=0.5)
+        stage, status = self._fly(mav, ticks=8000, alt_floor_m=3.0)
+        self.assertIs(status, py_trees.common.Status.FAILURE)
+        self.assertGreaterEqual(mav.pos()[2], 2.8,
+                                "descended through its own floor")
+
+    def test_it_does_not_descend_when_the_lidar_can_already_see(self):
+        mav = GateMav(gate=(5.0, 0.0), face_rad=math.pi,
+                      start=(0.0, 0.0, 3.0), gate_top_m=4.0)
+        stage, status = self._fly(mav)
+        self.assertIs(status, py_trees.common.Status.SUCCESS)
+        self.assertAlmostEqual(mav.pos()[2], 3.0, delta=0.2,
+                               msg="descended for no reason")
+
+    # ---- one action at a time ---- #
+    def test_it_never_TURNS_and_TRANSLATES_in_the_same_command(self):
+        """Rotating while translating reintroduces the coupling that made yaw
+        useless: the centroid shift from the rotation is indistinguishable
+        from the one the translation is trying to measure."""
+        mav = GateMav(gate=(6.0, 3.0), face_rad=math.pi - math.radians(20.0))
+        stage = self._stage(mav)
+        for _ in range(4000):
             if stage.update() is not py_trees.common.Status.RUNNING:
                 break
             self.clock.advance(0.1)
             if len(mav.gotos) >= 2:
                 a, b = mav.gotos[-2], mav.gotos[-1]
                 moved = (a[0], a[1]) != (b[0], b[1])
-                turned = abs(a[3] - b[3]) > 1e-6
+                turned = abs(a[3] - b[3]) > 1e-9
                 self.assertFalse(moved and turned,
                                  f"translated and rotated at once: {a} -> {b}")
-            if mav.strafed >= 2:
-                break
 
-    def test_it_strafes_toward_the_side_the_banner_is_on(self):
-        """An object off to starboard comes into line as you move starboard."""
-        mav = self.Stubborn(bearing=0.28)
-        stage = self._stage(mav)
-        start = mav.pos()[:2]
-        for _ in range(2000):
-            if stage.update() is not py_trees.common.Status.RUNNING:
-                break
-            self.clock.advance(0.1)
-            if mav.strafed:
-                break
-        moved = (mav.pos()[0] - start[0], mav.pos()[1] - start[1])
-        # heading ~0 (east), banner to starboard -> -y in ENU
-        self.assertLess(moved[1], -0.1, f"strafed the wrong way: {moved}")
-
-    def test_a_strafe_that_works_ends_in_alignment(self):
-        mav = self.Stubborn(yields_to_strafe=True)
-        status = run(self._stage(mav), mav, self.clock, ticks=4000)
-        self.assertIs(status, py_trees.common.Status.SUCCESS)
-
-    def test_a_strafe_that_never_helps_FAILS_CLOSED(self):
-        """Sliding sideways for ever is not better than hunting for ever."""
-        mav = self.Stubborn(yields_to_strafe=False)
-        status = run(self._stage(mav), mav, self.clock, ticks=6000)
+    def test_a_hopeless_geometry_gives_up_within_its_step_budget(self):
+        """A stage that hovers until the battery runs down has not failed
+        safely, it has just failed later."""
+        mav = self.Sticky(gate=(5.0, 0.0), face_rad=math.pi)
+        stage, status = self._fly(mav, ticks=8000, max_square_steps=6)
         self.assertIs(status, py_trees.common.Status.FAILURE)
-        self.assertIn("sideways", mav.abort_reason)
+        self.assertIn("square", mav.abort_reason)
 
-    def test_a_banner_that_yaw_CAN_centre_never_strafes(self):
-        """The strafe is a fallback, not the normal path: it costs mission
-        time and moves the aircraft near the gate."""
-        mav = SweepMav(banner_at=math.radians(12.0),
-                       banner_arc=math.radians(30.0))
-        stage = self._stage(mav)
-        run(stage, mav, self.clock, ticks=3000)
-        moved = [g for g in mav.gotos if g[:2] != (0.0, 0.0)]
-        self.assertEqual(moved, [], "strafed when yaw was working")
+    def test_the_give_up_message_states_the_angle_AND_the_range(self):
+        mav = self.Sticky(gate=(5.0, 0.0), face_rad=math.pi)
+        self._fly(mav, ticks=8000, max_square_steps=4)
+        self.assertIn("deg off perpendicular", mav.abort_reason)
+        self.assertIn("m standoff", mav.abort_reason)
+
+    # ---- what the operator sees ---- #
+    def test_the_angle_and_standoff_are_reported_while_it_converges(self):
+        mav = GateMav(gate=(5.0, 3.0), face_rad=math.pi)
+        self._fly(mav)
+        self.assertTrue(mav.square_on, "nothing was published for the GCS")
+        good = [p for p in mav.square_on if p["ok"]]
+        self.assertTrue(good)
+        for p in good:
+            self.assertIsNotNone(p["angle_deg"])
+            self.assertIsNotNone(p["standoff_m"])
+
+    def test_the_success_line_carries_the_measured_angle(self):
+        """A run artifact has to say how square it thought it was."""
+        mav = GateMav(gate=(5.0, 2.0), face_rad=math.pi)
+        self._fly(mav)
+        lines = [m for m, _ in mav.logs if "SQUARE ON" in m]
+        self.assertTrue(lines, mav.logs)
+        self.assertIn("off perpendicular", lines[-1])
+        self.assertIn("standoff", lines[-1])
 
 
-class SquareOnBeforeAdvancingTests(unittest.TestCase):
-    """Centred is not in front. The waypoint may only be set from square-on.
+class TheAspectGateIsGoneTests(unittest.TestCase):
+    """It is DELETED, not demoted.
 
-    THE OPERATOR'S REPORT: "rn it is just flying out of the world ... it should
-    only set the waypoint 10 metres ahead of it when it is completely in front
-    of the banner while it maintains some distance".
-
-    Facing the gate from off to one side and then committing to a waypoint
-    through it drives at the board rather than through the opening. A board is
-    widest seen face-on, so its apparent aspect answers "am I in front of it"
-    directly -- and orbiting (sideways step, then yaw back on to it) walks an
-    arc around it at constant range without ever closing the distance.
+    A fallback that fires on bad data is how the aircraft flew out of the
+    world: a single noisy narrowing at aspect 1.4 satisfied the peak
+    detector and the aircraft latched a 10 m waypoint while badly off-axis.
+    Keeping the old path "just in case" keeps that failure reachable.
     """
 
     def setUp(self):
         self.clock = Clock()
 
-    class Oblique(SweepMav):
-        """Centred immediately, but only square after a few orbit steps."""
-
-        def __init__(self, steps_to_square=3, ceiling=3.6, start=1.1):
-            super().__init__(banner_at=0.0, banner_arc=math.radians(30.0))
-            self.aspect = start
-            self.steps = 0
-            self.steps_to_square = steps_to_square
-            self.ceiling = ceiling
-
-        def goto(self, x, y, z, yaw=0.0):
-            if (x, y) != self._pos[:2]:
-                self.steps += 1
-                if self.steps <= self.steps_to_square:
-                    self.aspect = min(self.ceiling, self.aspect * 1.35)
-            self._pos = (x, y, z)
-            super().goto(x, y, z, yaw)
-
-        def reached(self, x, y, z, tol=0.6):
-            return math.dist(self._pos, (x, y, z)) < max(tol, 0.75)
-
-        def banner_identified(self):
-            return True
-
-        def banner_bearing(self):
-            return 0.0
-
-        def banner_aspect(self):
-            return self.aspect
-
-    def _stage(self, mav, **kw):
-        kw.setdefault("clock", self.clock)
-        kw.setdefault("dwell_s", 0.4)
-        kw.setdefault("align_dwell_s", 0.2)
-        stage = AlignToBanner(mav, **kw)
+    def test_a_perfect_aspect_ratio_cannot_substitute_for_a_measurement(self):
+        mav = GateMav(gate=(5.0, 0.0), face_rad=math.pi, lidar_blind=True)
+        mav.banner_board_aspect = 3.6         # as square as a board ever looks
+        mav.banner_aspect = lambda: 3.6
+        stage = AlignToBanner(mav, clock=self.clock, dwell_s=0.4,
+                              align_dwell_s=0.2, hfov_rad=mav.hfov,
+                              alt_floor_m=2.0)
         stage.initialise()
-        return stage
+        self.assertIs(run(stage, mav, self.clock, ticks=6000),
+                      py_trees.common.Status.FAILURE)
 
-    def test_a_centred_but_OBLIQUE_banner_does_not_finish_alignment(self):
-        mav = self.Oblique()
-        stage = self._stage(mav)
-        for _ in range(6):
-            self.assertIs(stage.update(), py_trees.common.Status.RUNNING)
-            self.clock.advance(0.1)
+    def test_the_stage_has_no_aspect_knobs_left_to_turn(self):
+        """These parameters named a measurement that could not answer the
+        question. A stage that still accepts them still has the code."""
+        import inspect
+        args = inspect.signature(AlignToBanner.__init__).parameters
+        for gone in ("min_square_aspect", "peak_min_aspect", "square_gain",
+                     "max_strafes", "max_strafes_square", "stall_before_strafe"):
+            self.assertNotIn(gone, args, f"{gone} survived the rewrite")
 
-    def test_it_orbits_until_the_board_looks_like_a_BANNER(self):
-        """Not "until it stops widening" -- a board that never widens at all
-        satisfies that, which is how the aircraft sat at aspect 0.99 (edge on)
-        and advanced into the gate."""
-        mav = self.Oblique(steps_to_square=3, ceiling=3.6)
-        stage = self._stage(mav)
-        status = run(stage, mav, self.clock, ticks=3000)
-        self.assertIs(status, py_trees.common.Status.SUCCESS)
-        self.assertGreaterEqual(mav.steps, 2, "did not orbit to come square")
-        self.assertGreaterEqual(mav.aspect, 2.0, "finished before it was square")
+    def test_the_stage_never_asks_the_camera_how_wide_the_board_looks(self):
+        src = inspect.getsource(AlignToBanner)
+        self.assertNotIn("banner_aspect", src,
+                         "the aspect ratio is still being read")
 
-    def test_the_orbit_never_closes_the_DISTANCE(self):
-        """"while it maintains some distance" -- the advance is a separate
-        stage and comes afterwards. Every step here is perpendicular to the
-        heading, so range to the board is preserved."""
-        mav = self.Oblique()
-        stage = self._stage(mav)
-        run(stage, mav, self.clock, ticks=3000)
-        for a, b in zip(mav.gotos, mav.gotos[1:]):
-            if (a[0], a[1]) == (b[0], b[1]):
-                continue
-            step = math.atan2(b[1] - a[1], b[0] - a[0])
-            off = abs(math.atan2(math.sin(step - a[3]), math.cos(step - a[3])))
-            self.assertAlmostEqual(off, math.pi / 2, places=1,
-                                   msg="moved along the heading, not across it")
 
-    def test_a_banner_already_square_finishes_without_orbiting(self):
-        mav = self.Oblique(steps_to_square=0, ceiling=3.6, start=3.6)
-        stage = self._stage(mav)
-        status = run(stage, mav, self.clock, ticks=3000)
-        self.assertIs(status, py_trees.common.Status.SUCCESS)
-        self.assertEqual(mav.steps, 0, "orbited when already in front of it")
-
-    def test_a_board_that_never_comes_square_REFUSES_to_advance(self):
-        """The failure the operator watched: edge-on at 0.99, and it pitched
-        in anyway. Refusing is the only safe answer -- advancing at a board
-        seen edge-on drives into it."""
-        mav = self.Oblique(steps_to_square=0, ceiling=1.0, start=1.0)
-        stage = self._stage(mav)
-        status = run(stage, mav, self.clock, ticks=6000)
-        self.assertIs(status, py_trees.common.Status.FAILURE)
-        self.assertIn("in front", mav.abort_reason)
-
-    def test_the_orbit_keeps_ONE_direction(self):
-        """Direction used to come from the sign of the bearing, which flips
-        about zero once the banner is centred -- so the aircraft rolled left,
-        right, left, going nowhere. Watched live."""
-        mav = self.Oblique(steps_to_square=3, ceiling=3.6)
-        stage = self._stage(mav)
-        seen = []
-        for _ in range(3000):
-            if stage.update() is not py_trees.common.Status.RUNNING:
-                break
-            self.clock.advance(0.1)
-            if len(mav.gotos) >= 2:
-                a, b = mav.gotos[-2], mav.gotos[-1]
-                if (a[0], a[1]) != (b[0], b[1]):
-                    seen.append(math.atan2(b[1] - a[1], b[0] - a[0]))
-        if len(seen) >= 2:
-            for d in seen[1:]:
-                self.assertLess(
-                    abs(math.atan2(math.sin(d - seen[0]),
-                                   math.cos(d - seen[0]))), 0.3,
-                    f"orbit reversed direction: {seen}")
-
-    def test_a_PEAKED_orbit_counts_as_square(self):
-        """MEASURED on the arena's gate: orbiting took the board from 0.97 to
-        1.91 and plateaued -- the derived box includes the posts and never
-        reads as slender as a bare banner. A fixed bar of 2.00 was unreachable,
-        so the aircraft orbited all fourteen steps and refused, having been in
-        front of the gate since step eight.
-
-        A hill climb that keeps turning round is standing on the summit."""
-        class Plateau(SquareOnBeforeAdvancingTests.Oblique):
-            def __init__(self):
-                super().__init__(steps_to_square=99, ceiling=1.9, start=0.97)
-                self.dir_flips = 0
-
-            def goto(self, x, y, z, yaw=0.0):
-                if (x, y) != self._pos[:2]:
-                    self.steps += 1
-                    # climbs, then wobbles below the peak like the real board
-                    self.aspect = (min(1.9, self.aspect * 1.3)
-                                   if self.steps < 5 else 1.3)
-                self._pos = (x, y, z)
-                SweepMav.goto(self, x, y, z, yaw)
-
-            def reached(self, x, y, z, tol=0.6):
-                return math.dist(self._pos, (x, y, z)) < max(tol, 0.75)
-
-        mav = Plateau()
-        stage = self._stage(mav, min_square_aspect=99.0)   # bar unreachable
-        status = run(stage, mav, self.clock, ticks=6000)
-        self.assertIs(status, py_trees.common.Status.SUCCESS,
-                      "refused a board it had already come square to")
-
-    def test_a_peak_on_an_EDGE_ON_board_is_not_accepted(self):
-        """Turning round twice in front of something that never looked like a
-        banner is not evidence of anything."""
-        mav = self.Oblique(steps_to_square=0, ceiling=1.0, start=1.0)
-        stage = self._stage(mav, min_square_aspect=99.0)
-        status = run(stage, mav, self.clock, ticks=6000)
-        self.assertIs(status, py_trees.common.Status.FAILURE)
+if __name__ == "__main__":
+    unittest.main()

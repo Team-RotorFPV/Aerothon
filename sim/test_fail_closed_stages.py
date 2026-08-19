@@ -27,6 +27,7 @@ sys.path.insert(0, os.path.join(
 
 import py_trees
 
+from mission_bt.scan_geometry import no_surface
 from mission_bt.mission_tree import (
     Corridor,
     ScanStartQR,
@@ -71,6 +72,19 @@ class FakeMav:
         self.banner_x = 0.0
         self.banner_y = 0.0
         self.banner_reject = ""
+        # THE LIDAR SEAM. The tree asks for the flat face in a sector and gets
+        # back the dict `fit_surface` returns, or a refusal. Nothing here
+        # builds a LaserScan: the geometry is tested against synthetic scans
+        # in test_scan_geometry.py, and the stages are tested against the
+        # answers those scans would produce. Neither test grades a copy of the
+        # other's arithmetic.
+        #
+        # The default is a REFUSAL, deliberately. A fake that reports a
+        # perfect surface until told otherwise would let a stage that never
+        # asks the lidar anything pass every test in the suite.
+        self.surface = None
+        self.surface_calls = []
+        self.square_on = []
 
     # ---- stage interface ---- #
     def goto(self, *a, **k):
@@ -109,6 +123,19 @@ class FakeMav:
 
     def banner_rejection_summary(self, top=3):
         return self.banner_reject or "nothing green ever entered the frame"
+
+    def surface_ahead(self, bearing_rad, half_width_rad,
+                      expected_range_m=None, **kw):
+        self.surface_calls.append((bearing_rad, half_width_rad,
+                                   expected_range_m))
+        if callable(self.surface):
+            return self.surface(self, bearing_rad, half_width_rad)
+        if self.surface is None:
+            return no_surface("no lidar scan has arrived on /scan")
+        return self.surface
+
+    def publish_square_on(self, payload):
+        self.square_on.append(payload)
 
     def avoidance_stuck(self):
         return self.stuck

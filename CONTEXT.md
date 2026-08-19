@@ -41,7 +41,13 @@ laterally in bands.
 optionally by reading its lettering. Stronger than detect.
 
 **Align** — the aircraft has yawed to face an identified banner. The rulebook
-scores "detect ... and autonomously align" as one task.
+scores "detect ... and autonomously align" as one task. Align says where the
+nose points, nothing about where the aircraft is.
+
+**Square on** — the aircraft is perpendicular to the banner's face, within
+tolerance, at a measured standoff. Stronger than align, and measured by the
+lidar rather than inferred from the camera. An aircraft can be aligned while
+well off to one side; only a square-on aircraft may advance through the gate.
 
 **Scan** — point the camera at a QR marker and attempt a read.
 
