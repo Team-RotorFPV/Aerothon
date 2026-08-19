@@ -991,6 +991,52 @@ class SquareOnWithTheLidarTests(unittest.TestCase):
                              "never closed to a range the lidar works at")
 
     # ---- the refusal ---- #
+    def test_squaring_up_TRAVELS_round_the_board_rather_than_turning(self):
+        """MEASURED IN FLIGHT, run 17, and the same shape four times:
+
+            square-up 1/14: banner face is +51.2 deg off perpendicular at
+            5.5 m (36 returns, residual 2.8 cm); turning to +8 deg
+            [next tick] only 0 lidar return(s) inside the 70 deg sector
+
+        `angle_rad` is the direction of the surface NORMAL, not of the
+        surface. Turning 51 degrees to face the normal points the nose along a
+        line that misses the board, so the aircraft ends up perpendicular to
+        the face while staring at the air beside it -- and both instruments
+        lose the gate at once.
+
+        Squaring up is a translation. The aircraft travels round the board and
+        the camera keeps the nose on it.
+        """
+        mav = GateMav(gate=(6.0, 3.0), face_rad=math.pi)
+        stage = self._stage(mav)
+        travelled = 0.0
+        start = mav.pos()[:2]
+        for _ in range(4000):
+            if stage.update() is not py_trees.common.Status.RUNNING:
+                break
+            self.clock.advance(0.1)
+            if stage.phase is stage.SQUARE:
+                travelled = max(travelled, math.dist(mav.pos()[:2], start))
+        self.assertGreater(travelled, 1.0,
+                           "squared up without ever moving, which no rotation "
+                           "can do")
+
+    def test_the_obliquity_actually_SHRINKS_step_by_step(self):
+        """The arc has to converge, not merely happen."""
+        mav = GateMav(gate=(6.0, 3.0), face_rad=math.pi)
+        stage = self._stage(mav)
+        seen = []
+        for _ in range(4000):
+            if stage.update() is not py_trees.common.Status.RUNNING:
+                break
+            self.clock.advance(0.1)
+            if stage._surface is not None and stage._surface["ok"]:
+                seen.append(abs(stage._surface["angle_rad"]))
+        self.assertTrue(seen)
+        self.assertLess(math.degrees(seen[-1]), math.degrees(seen[0]) / 2.0,
+                        f"obliquity went {math.degrees(seen[0]):.0f} deg -> "
+                        f"{math.degrees(seen[-1]):.0f} deg")
+
     def test_a_CONFIDENT_CAMERA_does_not_advance_a_blind_lidar(self):
         """The headline rule: the lidar wins. A camera reporting the banner
         dead ahead is not evidence of perpendicularity, and acting on it is
@@ -1023,11 +1069,16 @@ class SquareOnWithTheLidarTests(unittest.TestCase):
                 break
             self.clock.advance(0.1)
             if stage.phase is stage.SQUARE and stage._sq_steps >= 1:
-                mav.visible = False       # detector drops it mid-square-up
                 break
-        status = run(stage, mav, self.clock, ticks=200)
-        self.assertIsNot(status, py_trees.common.Status.FAILURE,
-                         "a dropped camera frame ended a working measurement")
+        mav.visible = False               # the detector drops a few frames
+        for _ in range(25):
+            self.assertIs(stage.update(), py_trees.common.Status.RUNNING,
+                          "a dropped camera frame ended a working measurement")
+            self.clock.advance(0.1)
+        mav.visible = True
+        self.assertIs(run(stage, mav, self.clock, ticks=4000),
+                      py_trees.common.Status.SUCCESS,
+                      "never recovered after the camera came back")
 
     def test_the_sector_searched_FOLLOWS_the_camera_bearing(self):
         """A fixed forward sector would measure the corridor wall behind an

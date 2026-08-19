@@ -1117,66 +1117,113 @@ class AlignToBanner(py_trees.behaviour.Behaviour):
         self._standoff = fit["range_m"]
         alpha, standoff = fit["angle_rad"], fit["range_m"]
 
-        # 1. HEADING. Perpendicularity is a property of where the nose points,
-        #    so it is corrected first and on its own.
+        # 1. OBLIQUITY IS FIXED BY MOVING, NOT BY TURNING.
+        #
+        # THE BUG THIS REPLACES, watched live and repeated four times in one
+        # run. The aircraft measured a good surface -- 36 to 91 returns, 2 cm
+        # residual -- found it 50 degrees off perpendicular, and TURNED 50
+        # degrees to square up. The next scan had zero returns in the sector,
+        # every time:
+        #
+        #     square-up 1/14: banner face is +51.2 deg off perpendicular at
+        #     5.5 m (36 returns, residual 2.8 cm); turning to +8 deg
+        #     [next tick] only 0 lidar return(s) inside the 70 deg sector
+        #
+        # `angle_rad` is the direction of the surface NORMAL, not the
+        # direction of the surface. Turning to face the normal points the nose
+        # along a line that misses the board entirely, so the aircraft ends up
+        # perpendicular to the face while staring at the empty air beside it.
+        #
+        # Being square on needs the nose along the normal AND the board dead
+        # ahead, and no rotation satisfies both: turning to fix one breaks the
+        # other. The only manoeuvre that does is travelling round the board.
+        # So obliquity commands a TANGENTIAL step and the camera keeps the
+        # board centred with yaw -- which is the arc the spec asked for, and
+        # the reason the two jobs are split between the two instruments.
         if abs(alpha) > self.square_tol:
+            # THE ARC NEEDS BOTH INSTRUMENTS. A tangential step does not move
+            # `alpha` by itself -- perpendicularity is a property of HEADING,
+            # measured at station 3 of the ground probe as 1.1 degrees of
+            # change for 3 metres of lateral travel. What the step does is
+            # take the board off frame centre, and the camera's yaw correction
+            # is what converts that into a change of heading. Translation and
+            # re-centring together walk the arc; either alone goes nowhere.
+            #
+            # So with the detector blind there is no point spending a step:
+            # hold station, keep measuring, and let the lost-banner timeout
+            # decide when this has stopped being a dropped frame.
+            if not self.mav.banner_identified():
+                gone = self.clock() - self._last_seen
+                if gone > self.settle_timeout_s:
+                    return self._relocate(
+                        f"the banner has not been seen for {gone:.0f} s while "
+                        f"squaring up, and the arc cannot be flown without it")
+                self.feedback_message = (
+                    f"squaring up: {math.degrees(alpha):+.1f} deg off "
+                    f"perpendicular, waiting {gone:.1f} s for the detector")
+                return py_trees.common.Status.RUNNING
             if self._sq_steps >= self.max_square_steps:
                 return self._square_failure(
                     f"AlignToBanner: {self._sq_steps} steps did not bring the "
                     f"aircraft square to the banner; {self._measured()}")
             self._sq_steps += 1
-            self._align_target = self._wrap(self.mav.yaw() + alpha)
-            self._sq_phase = self.TURNING
+            # The chord of the arc that removes this much obliquity at this
+            # radius. `d * tan(alpha)` is the tangent line and overshoots
+            # badly past 30 degrees; the chord is what actually gets flown.
+            chord = 2.0 * standoff * math.sin(min(abs(alpha), math.pi / 2.0)
+                                              / 2.0)
+            # A face whose perpendicular foot is to PORT means the aircraft is
+            # standing off to starboard of the board's centreline, so it
+            # travels to starboard-negative -- toward the foot.
+            lat = -math.copysign(min(chord, self.strafe_step_m), alpha)
+            ax, ay, az = self._anchor
+            psi = self._align_target
+            self._anchor = (ax + lat * math.cos(psi + math.pi / 2.0),
+                            ay + lat * math.sin(psi + math.pi / 2.0), az)
+            self._sq_phase = self.MOVING
             self._align_t0 = self.clock()
             self._stable = 0
+            # A translation changes the geometry the yaw budget was being
+            # spent against, so centring starts again from the new position.
+            self._corrections = 0
             self.mav.log(
                 f"AlignToBanner square-up {self._sq_steps}/"
                 f"{self.max_square_steps}: banner face is "
                 f"{math.degrees(alpha):+.1f} deg off perpendicular at "
                 f"{standoff:.1f} m ({fit['points']} returns, residual "
-                f"{fit['residual_m'] * 100:.1f} cm); turning to "
-                f"{math.degrees(self._align_target):+.0f} deg")
+                f"{fit['residual_m'] * 100:.1f} cm); travelling {abs(lat):.1f} m "
+                f"{'port' if lat > 0 else 'starboard'} round it")
             return py_trees.common.Status.RUNNING
 
-        # 2. POSITION. The nose is perpendicular to the face, so the camera
-        #    bearing now maps cleanly onto how far off the gate's centreline
-        #    the aircraft is standing -- an offset in METRES, because the
-        #    standoff came out of the same fit.
-        lateral = standoff * math.tan(
-            bearing_to_angle(self._last_good_bearing, self.hfov))
+        # 2. RANGE. Square to the face and centred on it; all that is left is
+        #    standing at a distance the lidar and the camera both work at.
         radial = 0.0
         if standoff > self.max_standoff:
             radial = standoff - self.max_standoff
         elif standoff < self.min_standoff:
             radial = standoff - self.min_standoff
-
-        if abs(lateral) > self.lateral_tol_m or radial != 0.0:
+        if radial != 0.0:
             if self._sq_steps >= self.max_square_steps:
                 return self._square_failure(
                     f"AlignToBanner: {self._sq_steps} steps did not bring the "
-                    f"aircraft in front of the banner; {self._measured()}, "
-                    f"still {lateral:+.1f} m off its centreline")
+                    f"aircraft to a workable standoff; {self._measured()}")
             self._sq_steps += 1
-            cap = self.strafe_step_m
-            fwd = max(-cap, min(cap, radial))
-            lat = max(-cap, min(cap, lateral))
+            fwd = max(-self.strafe_step_m,
+                      min(self.strafe_step_m, radial))
             ax, ay, az = self._anchor
             psi = self._align_target
-            # Port is psi + 90 degrees in ENU, and `lateral` is positive to
-            # port because the lidar frame is.
-            self._anchor = (
-                ax + fwd * math.cos(psi) + lat * math.cos(psi + math.pi / 2.0),
-                ay + fwd * math.sin(psi) + lat * math.sin(psi + math.pi / 2.0),
-                az)
+            self._anchor = (ax + fwd * math.cos(psi),
+                            ay + fwd * math.sin(psi), az)
             self._sq_phase = self.MOVING
             self._align_t0 = self.clock()
             self._stable = 0
+            self._corrections = 0
             self.mav.log(
                 f"AlignToBanner square-up {self._sq_steps}/"
-                f"{self.max_square_steps}: square to the face at "
-                f"{standoff:.1f} m but {lateral:+.1f} m off its centreline; "
-                f"stepping {lat:+.1f} m {'port' if lat > 0 else 'starboard'}"
-                + (f" and {fwd:+.1f} m along the standoff" if fwd else ""))
+                f"{self.max_square_steps}: square to the face but standing at "
+                f"{standoff:.1f} m, outside the {self.min_standoff:.1f}-"
+                f"{self.max_standoff:.1f} m band; moving {fwd:+.1f} m along "
+                f"the standoff")
             return py_trees.common.Status.RUNNING
 
         # 3. SQUARE ON. Held, not sampled once.
@@ -1186,8 +1233,9 @@ class AlignToBanner(py_trees.behaviour.Behaviour):
                 f"AlignToBanner: SQUARE ON -- "
                 f"{math.degrees(alpha):+.1f} deg off perpendicular "
                 f"(tolerance {math.degrees(self.square_tol):.0f} deg) at "
-                f"{standoff:.1f} m standoff, {lateral:+.2f} m off the "
-                f"centreline, from {fit['points']} lidar returns")
+                f"{standoff:.1f} m standoff, bearing "
+                f"{self._last_good_bearing:+.2f}, from {fit['points']} "
+                f"lidar returns")
             self.feedback_message = (
                 f"square on: {math.degrees(alpha):+.1f} deg, "
                 f"{standoff:.1f} m")
