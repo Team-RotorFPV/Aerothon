@@ -48,7 +48,9 @@ from mavros_msgs.msg import State
 from mavros_msgs.srv import CommandBool, CommandTOL, SetMode
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
+from geometry_msgs.msg import Vector3
 from sensor_msgs.msg import LaserScan
+from std_msgs.msg import String
 
 sys.path.insert(0, __file__.rsplit("/", 2)[0]
                 + "/src/aerothon_mission/mission_bt")
@@ -64,12 +66,23 @@ class Probe(Node):
         self.scans = []                 # arrival timestamps, for the rate
         self.scan = None
         self._sp = None
+        # THE CAMERA'S HALF OF THE ANSWER. The lidar wants the scan plane
+        # inside the gate, which puts a ceiling on altitude; the camera was
+        # refusing frames for "green region too small", which is about
+        # apparent size and wants range closed. Whether a workable altitude
+        # exists at all is a question about BOTH, so both are measured here.
+        self.banner = Vector3()
+        self.banner_detail = {}
+        self.ident = []                 # identified verdicts over the dwell
         self.create_subscription(State, "/mavros/state",
                                  lambda m: setattr(self, "state", m), 10)
         self.create_subscription(PoseStamped, "/mavros/local_position/pose",
                                  self._on_pose, qos_profile_sensor_data)
         self.create_subscription(LaserScan, "/scan", self._on_scan,
                                  qos_profile_sensor_data)
+        self.create_subscription(Vector3, "/percep/banner", self._on_banner, 10)
+        self.create_subscription(String, "/percep/banner/detail",
+                                 self._on_banner_detail, 10)
         self.pub_sp = self.create_publisher(
             PoseStamped, "/mavros/setpoint_position/local", 10)
         self.cli_mode = self.create_client(SetMode, "/mavros/set_mode")
@@ -87,6 +100,17 @@ class Probe(Node):
         self.scan = m
         self.scans.append(time.time())
         del self.scans[:-200]
+
+    def _on_banner(self, m):
+        self.banner = m
+        self.ident.append(m.z >= 1.0)
+        del self.ident[:-400]
+
+    def _on_banner_detail(self, m):
+        try:
+            self.banner_detail = json.loads(m.data)
+        except (ValueError, TypeError):
+            pass
 
     def _stream(self):
         if self._sp is not None and self.state.armed:
@@ -157,6 +181,13 @@ def report(p, half_rad, sweep_step_deg):
     print(f"    returns     {len(fin)} finite of "
           f"{len(p.scan.ranges) if p.scan else 0}"
           + (f", nearest {min(fin):.2f} m" if fin else ""))
+    hits = sum(1 for v in p.ident if v)
+    frac = hits / len(p.ident) if p.ident else 0.0
+    print(f"    CAMERA      identified {hits}/{len(p.ident)} frames "
+          f"({frac * 100:.0f}%)"
+          + (f"  bearing {p.banner.x:+.2f}" if hits else "")
+          + (f"  refused: {str(p.banner_detail.get('reason', ''))[:44]}"
+             if frac < 1.0 else ""))
     f = p.fit(0.0, half_rad)
     if f["ok"]:
         print(f"    FIT ahead   {math.degrees(f['angle_rad']):+7.1f} deg  "
@@ -245,11 +276,15 @@ def main():
                             < math.radians(6.0)),
                    45, "the station")
         p.scans.clear()
+        p.ident.clear()
         p.spin(a.settle)
         f = report(p, half, a.sweep_step_deg)
         rows.append({"station": [x, y, z, math.degrees(yaw)],
                      "pose": list(p.pose), "rate_hz": round(p.rate_hz(), 2),
                      "finite": len(p.finite()),
+                     "cam_frames": len(p.ident),
+                     "cam_hits": sum(1 for v in p.ident if v),
+                     "cam_reason": str(p.banner_detail.get("reason", ""))[:60],
                      "fit_ahead": p.fit(0.0, half)})
 
     if a.json:

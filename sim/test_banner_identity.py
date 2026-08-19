@@ -419,10 +419,21 @@ class AlignToBannerTests(unittest.TestCase):
         self.assertEqual(self.leaf.status, self.py_trees.common.Status.RUNNING)
 
     def test_no_banner_eventually_FAILS_closed(self):
+        """Still fail-closed -- but a full turn from one spot is no longer the
+        end of the search, so this has to run out the relocation budget as
+        well. The assertion is unchanged; only the patience is."""
         self.mav.banner = self.Vector3(x=0.0, y=0.0, z=0.0)
-        self.tick(n=600)
+        self.tick(n=12000)
         self.assertEqual(self.leaf.status, self.py_trees.common.Status.FAILURE)
         self.assertIn("banner", self.mav.abort_reason.lower())
+
+    def test_the_failure_names_the_VANTAGE_POINTS_not_only_the_headings(self):
+        """A yaw sweep cannot fix a position error, so a message naming only
+        headings cannot explain a failure caused by standing in the wrong
+        place. That is exactly how run 16 needed a live watch to diagnose."""
+        self.mav.banner = self.Vector3(x=0.0, y=0.0, z=0.0)
+        self.tick(n=12000)
+        self.assertIn("vantage point", self.mav.abort_reason)
 
 
 # --------------------------------------------------------------------------- #
@@ -547,7 +558,7 @@ class BannerSweepBoundTests(AlignToBannerTests):
     def test_the_sweep_gives_up_rather_than_turning_for_ever(self):
         self.mav.banner = self.Vector3(x=0.0, y=0.0, z=0.0)
         leaf = self._leaf(yaw_step=0.4, timeout_ticks=10000)
-        self.tick(leaf, n=2000)
+        self.tick(leaf, n=12000)
         self.assertEqual(leaf.status, self.py_trees.common.Status.FAILURE)
         self.assertIn("deg", self.mav.abort_reason)
 
@@ -580,7 +591,7 @@ class BannerSweepBoundTests(AlignToBannerTests):
 
         leaf = self._leaf(yaw_step=0.4, timeout_ticks=10000, min_hit_ratio=0.6)
         self.mav.banner_identified = Flickering(self.mav)
-        self.tick(leaf, n=2000)
+        self.tick(leaf, n=12000)
         self.assertEqual(leaf.status, self.py_trees.common.Status.FAILURE,
                          "aligned to something seen in one frame in six")
 
@@ -738,7 +749,7 @@ class BannerFailureIsDiagnosableTests(unittest.TestCase):
         leaf = self.AlignToBanner(self.mav, tol=0.1, yaw_step=0.5,
                                   timeout_ticks=20, stable_frames=3,
                                   dwell_s=0.6, clock=clock)
-        for _ in range(2000):
+        for _ in range(20000):
             leaf.tick_once()
             clock.advance(0.1)
             if leaf.status == self.py_trees.common.Status.FAILURE:

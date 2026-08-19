@@ -1,0 +1,1945 @@
+            AeroTHON 2026
+
+
+
+
+                  Track 1
+ROTORCRAFT SYSTEMS CHALLENGE (UAS)
+
+       DESIGN, BUILD AND FLY CONTEST
+
+Theme: Aerial Surveillance and Rapid Delivery
+
+              Rule Book
+                  Revision 1
+                  March 2026
+                                    REVISION HISTORY
+          Revision                         Date                                  Description
+
+                1                       March 2026                                   First Issue
+
+
+
+
+SAEINDIA AEROTHON – ROTORCRAFT SYSTEMS CHALLENGE (UAS) – DESIGN, BUILD AND FLY CONTEST 2026        PAGE | 2
+                                            FOREWORD
+            Welcome to SAEINDIA AEROTHON – ROTORCRAFT SYSTEMS CHALLENGE
+            (UAS) – DESIGN, BUILD AND FLY CONTEST 2026. The system requirements are
+            developed to align with real-world Uncrewed Aerial Vehicle requirements to provide
+            industrial exposure to Students.
+            The contest is planned in two phases:
+            1. Phase 1: Design Report & Presentation
+            2. Phase 2: Flying Competition
+
+            The student teams must submit a design report of their UAS in Phase 1, adhering to
+            the contest design rules and guidelines, and give a presentation to the jury. The top
+            performing teams from Phase 1 will qualify for Phase 2 of the contest in which the
+            qualified teams are required to build an Uncrewed Aircraft System and successfully
+            complete the missions as described in the rulebook during the flying competition.
+            Winners will be awarded as per the announcement made by the Organising
+            Committee. Please refer to AeroTHON 2026 webpage on SAEINDIA site.
+
+            Universities/Institutions can nominate any number of teams as long as they meet
+            the team formation requirements listed in this document.
+
+            Lastly, contesting teams are requested to pay special attention to the bold and
+            italicized fonts throughout this document. These are important updates and
+            clarifications on a variety of aspects pertaining to the design. Please read these
+            rules carefully. Watch out for official announcements and updates concerning this
+            contest and rule interpretations on SAEINDIA website.
+
+            Best of luck to you all!!
+
+           SAEINDIA Aerospace Forum
+           SAEINDIA
+           AEROTHON 2026 Organising Committee
+
+
+
+
+SAEINDIA AEROTHON – ROTORCRAFT SYSTEMS CHALLENGE (UAS) – DESIGN, BUILD AND FLY CONTEST 2026   PAGE | 3
+                                     TABLE OF CONTENTS
+1.0. CONTEST DETAILS                                                                                 7
+    1.1 OVERVIEW                                                                                     7
+    1.2 OBJECTIVES                                                                                   9
+    1.3 RULES AND ORGANIZER AUTHORITY                                                               10
+      1.3.1     General Authority                                                                   10
+      1.3.2     Rules Authority                                                                     10
+      1.3.3     Rules Validity                                                                      10
+      1.3.4     Rules Compliance                                                                    11
+      1.3.5     Understanding the Rules                                                             11
+      1.3.6     Consideration of “Participation” in the contest                                     11
+      1.3.7     Violations of Rule Intent                                                           11
+      1.3.8     Conditions and Penalties                                                            11
+      1.3.9     Mode of Communication                                                               12
+      1.3.10       Force Majeure                                                                    12
+    1.4 ELIGIBILITY                                                                                 13
+      1.4.1     Team member                                                                         13
+      1.4.2     Society membership                                                                  13
+    1.5 OFFICIAL LANGUAGES                                                                          14
+    1.6 CONTEST PHASES                                                                              14
+      1.6.1     Phase 1: Design Report & Presentation                                               14
+      1.6.2     Phase 2: Flying Competition                                                         14
+    1.7 REGISTRATION AND FEES                                                                       15
+    1.8 CANCELLATION OF CONTEST REGISTRATION                                                        15
+    1.9 EXPECTATIONS                                                                                16
+      1.9.1     Design with no professional’s involvement                                           16
+      1.9.2     Original design                                                                     16
+      1.9.3     Unique designs                                                                      17
+2.0. UAS DESIGN AND FLIGHT EQUIREMENTS                                                              18
+    2.1 DESIGN REQUIREMENTS                                                                         19
+3.0. PHASE 1: TECHNICAL DESIGN REPORT & PRESENTATION                                                20
+    3.1 TECHNICAL DESIGN REPORT                                                                     21
+    3.2 DESIGN PRESENTATION                                                                         25
+4.0. PHASE 2: FLYING COMPETITION                                                                    26
+
+
+SAEINDIA AEROTHON – ROTORCRAFT SYSTEMS CHALLENGE (UAS) – DESIGN, BUILD AND FLY CONTEST 2026   PAGE | 4
+    4.1 TECHNICAL INSPECTION                                                                        26
+      4.1.1     UAS Conformance to 2D Drawing                                                       27
+      4.1.2     Deviations from 2D Drawing                                                          28
+      4.1.3     Inspection of Spare UAS Components                                                  28
+      4.1.4     Inspection Requirements throughout the Contest                                      28
+      4.1.5     Technical and Safety Inspection Penalties                                           28
+    4.2 FLYING COMPETITION                                                                          28
+      4.2.1     General Mission Requirements                                                        29
+      4.2.2     Flying Competition Chronology                                                       30
+      4.2.3 Flight Mission 1 – Eyes in the Sky: Obstacle, Observation & Payload Delivery
+           – Manual Operation                                                          31
+      4.2.4 Flight Mission 2 – SkyScan: Autonomous Rapid Delivery – Autonomous
+           Operation                                                                                35
+5.0. EVALUATION CRITERIA                                                                            38
+    5.1 PHASE 1 - DESIGN REPORT SUBMISSION                                                          38
+    5.2 PHASE 1 - TECHNICAL PRESENTATION                                                            39
+    5.3 PHASE 1 - TOTAL SCORE                                                                       39
+    5.4 PHASE 2 - TECHNICAL INSPECTION – 50 Marks                                                   40
+    5.5 PHASE 2 - FLIGHT MISSION 1- Manual Operation – 100 Marks                                    41
+    5.6 PHASE 2 - FLIGHT MISSION 2 - Autonomous Operation – 100 Marks                               42
+    5.7 PHASE 2 - TOTAL SCORE                                                                       43
+    5.8 TIGER’S CAVE- BUSINESS PLAN PROPOSAL                                                        43
+6.0. DESIGN REPORT GUIDELINES FOR PHASE 1                                                           45
+    6.1 INTRODUCTION                                                                                45
+    6.2 ORIGINAL WORK                                                                               45
+    6.3 ORGANIZATION OF CONTENTS                                                                    46
+    6.4 WRITING PROCESS                                                                             47
+    6.5 DESIGN REPORT SPECIFICATIONS                                                                48
+      6.5.1     Page Limit                                                                          48
+      6.5.2     Electronic Report Format                                                            48
+      6.5.3     Font                                                                                48
+      6.5.4     Margin                                                                              48
+      6.5.5     Page size                                                                           48
+      6.5.6     Cover page                                                                          49
+      6.5.7     Submission of Reports                                                               49
+
+
+SAEINDIA AEROTHON – ROTORCRAFT SYSTEMS CHALLENGE (UAS) – DESIGN, BUILD AND FLY CONTEST 2026   PAGE | 5
+    6.6 ELECTRONIC DOCUMENT SPECIFICATIONS                                                          49
+      6.6.1     Format Size                                                                         49
+      6.6.2     Required Views                                                                      49
+      6.6.3     Dimensions                                                                          49
+      6.6.4     Summary Data                                                                        49
+      6.6.5     Weight and Balance Data                                                             49
+      6.6.6     Other Required Markings                                                             50
+    6.7 SUBMISSION DEADLINES                                                                        50
+7.0. PRESENTATION GUIDELINES FOR PHASE 1                                                            50
+    7.1 INTRODUCTION                                                                                50
+    7.2 GENERAL                                                                                     50
+    7.3 ORGANIZATION OF CONTENTS                                                                    51
+    7.4 TIME LIMIT                                                                                  52
+8.0. REFERENCE BOOKS                                                                                53
+APPENDIX A                                                                                          54
+APPENDIX B                                                                                          55
+APPENDIX C                                                                                          56
+
+
+
+
+SAEINDIA AEROTHON – ROTORCRAFT SYSTEMS CHALLENGE (UAS) – DESIGN, BUILD AND FLY CONTEST 2026   PAGE | 6
+1.0.            CONTEST DETAILS
+1.1 OVERVIEW
+
+    AeroTHON 2026 continues to be a crucial initiative for engineering students in India as
+    the country accelerates its push to become a global leader in Uncrewed Aircraft Systems
+    (UAS) and drone technologies. This vision aligns with the Government of India’s
+    Atmanirbhar Bharat Abhiyan, which emphasizes indigenous development and self-
+    reliance in critical technologies, including drones and autonomous aerial systems.
+
+    Globally, the UAS industry is experiencing rapid expansion, driven by advancements in
+    artificial intelligence, sensing technologies, autonomy, and connectivity. Drones are
+    increasingly being deployed across a wide range of sectors such as agriculture,
+    infrastructure inspection, logistics, disaster response, environmental monitoring, and
+    defense operations. The growing demand for unmanned aerial systems is transforming
+    industries by improving efficiency, safety, and operational capabilities.
+
+    India’s drone ecosystem is also expanding rapidly, supported by progressive regulatory
+    reforms, government initiatives, and increasing adoption across commercial, industrial,
+    and public sectors. The country’s drone market is expected to witness significant growth
+    in the coming years, driven by technological innovation, expanding applications, and
+    supportive policies that encourage indigenous development and manufacturing of drone
+    technologies.
+
+    In parallel, the Government of India has introduced several initiatives to promote domestic
+    drone innovation and manufacturing, including the Production-Linked Incentive (PLI)
+    scheme, “Drone Shakti” initiatives, and expanded research and development programs.
+    These initiatives aim to strengthen the domestic drone ecosystem, encourage local
+    technology development, and position India as a global hub for drone innovation.
+
+    In this context, the SAEINDIA Aerospace Forum is organizing the SAEINDIA
+    AeroTHON 2026 – Rotorcraft Systems Challenge, a Design–Build–Fly competition for
+    engineering students. The primary objective of this challenge is to develop students’
+    capabilities in designing, building, and operating unmanned rotorcraft systems, preparing
+    them to contribute effectively to the rapidly evolving drone industry.
+
+
+SAEINDIA AEROTHON – ROTORCRAFT SYSTEMS CHALLENGE (UAS) – DESIGN, BUILD AND FLY CONTEST 2026   PAGE | 7
+    This competition provides undergraduate and graduate engineering students with a real-
+    world engineering experience, exposing them to the practical challenges faced by
+    engineers in the aerospace and drone sectors. Participating teams will conduct trade
+    studies, perform engineering analyses, and make design decisions to develop a rotorcraft
+    system that satisfies the defined mission requirements and system specifications.
+
+    As part of the competition, teams will design, build, integrate, and demonstrate a flight-
+    worthy UAS capable of successfully performing the prescribed mission tasks during the
+    flight demonstration event. This process requires students to apply multidisciplinary
+    engineering principles, including aerodynamics, propulsion systems, structures, avionics
+    integration, control systems, and systems engineering.
+
+    In essence, AeroTHON 2026 – Rotorcraft Systems Challenge offers students a unique
+    opportunity to experience the complete engineering lifecycle of a UAS, from conceptual
+    design and system architecture to subsystem integration, testing, validation, and final
+    flight demonstration.
+
+    Through initiatives such as AeroTHON, SAEINDIA aims to nurture the next generation of
+    aerospace and drone engineers in India. As the nation progresses toward becoming a
+    global hub for drone technology, there is a growing need for skilled professionals capable
+    of designing, developing, and operating advanced unmanned systems. By providing
+    students with a hands-on platform to innovate, experiment, and demonstrate real-world
+    engineering solutions, AeroTHON plays a vital role in strengthening India’s drone
+    ecosystem and supporting the country’s vision of technological leadership in autonomous
+    aerial systems by 2030.
+
+    The importance of practical and interpersonal communication skills is often overlooked by
+    engineers. It is important to note that, apart from technical knowledge, written and
+    communication skills are vital in the engineering workplace. To help the students develop
+    these skills, the contest has been divided into two phases:
+
+                         1. Phase 1: Design Report & Presentation
+                         2. Phase 2: Flying Competition
+
+
+
+
+SAEINDIA AEROTHON – ROTORCRAFT SYSTEMS CHALLENGE (UAS) – DESIGN, BUILD AND FLY CONTEST 2026   PAGE | 8
+    Phase 1: Design Report & Presentation
+    In the first phase, students will focus on designing a UAS that adheres to current technical
+    standards and mission requirements. The trade-off decisions made here reflect the
+    cutting-edge technology being developed globally. Students will also focus on producing
+    a detailed design report and presentations, reflecting the growing importance of
+    documentation and communication skills in the engineering workplace, whether
+    presenting to stakeholders, clients, senior engineers or regulatory authorities.
+
+    Phase 2: Flying Competition
+    The second phase will require students to build and test a working UAS that meets the
+    mission requirements. In a competitive environment where safety and performance are
+    paramount, the students' designs will be put to the test. Drones capable of performing
+    complex tasks like thermal imaging, real-time data processing, and autonomous disaster
+    situation identification will be key to success.
+
+1.2 OBJECTIVES
+    1.      To inculcate innovation mindset among the student community in emerging
+    technologies like Uncrewed aerial vehicles (UAS)
+    2.      To incubate and nurture aeronautical design skills and engineering
+    capabilities in young minds, preparing them to contribute to the vision of
+    Atmanirbhar Bharat in critical aerospace technologies
+    3.      To provide a platform for aerospace-passionate students to demonstrate their
+    expertise in UAS design, development, and system integration.
+    4.      To inspire and support the development of the next generation of innovators and
+    entrepreneurs in the aerospace and drone ecosystem.
+
+
+
+
+SAEINDIA AEROTHON – ROTORCRAFT SYSTEMS CHALLENGE (UAS) – DESIGN, BUILD AND FLY CONTEST 2026   PAGE | 9
+1.3 RULES AND ORGANIZER AUTHORITY
+
+   1.3.1        General Authority
+                SAEINDIA AEROTHON – ROTORCRAFT SYSTEMS CHALLENGE (UAS) –
+                DESIGN, BUILD AND FLY CONTEST 2026 committee reserves the right to
+                revise the schedule of any contest and/or interpret or modify the contest rules
+                at any time and in any manner that is, in their sole judgment, required for the
+                efficient operation of the event.
+
+   1.3.2        Rules Authority
+                SAEINDIA Aerospace Forum owns the responsibility and authority of the rules
+                of SAEINDIA AEROTHON – ROTORCRAFT SYSTEMS CHALLENGE (UAS) –
+                DESIGN, BUILD AND FLY CONTEST 2026 and it has been issued under the
+                authority of the SAEINDIA. Official announcements from the SAEINDIA
+                AEROTHON – ROTORCRAFT SYSTEMS CHALLENGE (UAS) – DESIGN,
+                BUILD AND FLY CONTEST 2026 Organizing Committee shall be considered
+                part of and have the same validity as these rules. Ambiguities or questions
+                concerning the meaning or intent of these rules will be resolved by the officials,
+                SAEINDIA AEROTHON – ROTORCRAFT SYSTEMS CHALLENGE (UAS) –
+                DESIGN, BUILD AND FLY CONTEST 2026 Organizing Committee or
+                SAEINDIA Staff.
+
+   1.3.3        Rules Validity
+                The SAEINDIA AEROTHON – ROTORCRAFT SYSTEMS CHALLENGE
+                (UAS) – DESIGN, BUILD AND FLY CONTEST 2026 Rules posted on the
+                SAEINDIA Website and dated for the calendar year of the contest are the rules
+                in effect for the contest. Rule sets dated for other years are invalid.
+
+
+
+
+SAEINDIA AEROTHON – ROTORCRAFT SYSTEMS CHALLENGE (UAS) – DESIGN, BUILD AND FLY CONTEST 2026   PAGE | 10
+   1.3.4        Rules Compliance
+                By entering the SAEINDIA AEROTHON – ROTORCRAFT SYSTEMS
+                CHALLENGE (UAS) – DESIGN, BUILD AND FLY CONTEST 2026, the team
+                members, faculty advisors and other personnel of the participating
+                university/institute has agreed to comply with and be bound by the rules,
+                interpretations or procedures issued or announced by SAEINDIA AEROTHON
+                – ROTORCRAFT SYSTEMS CHALLENGE (UAS) – DESIGN, BUILD AND FLY
+                CONTEST 2026 Committee. All team members, faculty advisors and other
+                university representatives are requested to cooperate and follow all instructions
+                from the contest organizers, officials and the jury.
+
+   1.3.5        Understanding the Rules
+                The participating student teams are responsible for reading and understanding
+                the rules in their entirety, their effect on the contest in which they are
+                participating. The section and paragraph headings of these rules are provided
+                to facilitate reading and will not affect the paragraph contents.
+
+   1.3.6        Consideration of “Participation” in the contest
+                Teams,       team      members        as    individuals,     faculty     advisors,   and   other
+                representatives of a registered university who are listed as team members while
+                registering their team are considered to be “participating” in the contest from the
+                time they register for the event until the conclusion of the contest or earlier in
+                the case of withdrawal.
+
+   1.3.7        Violations of Rule Intent
+                The violations of the intent of a rule will be considered a violation of the rule
+                itself. Questions about the intent or meaning of a rule may be addressed to the
+                SAEINDIA AEROTHON – ROTORCRAFT SYSTEMS CHALLENGE (UAS) –
+                DESIGN, BUILD AND FLY CONTEST 2026 Committee or SAEINDIA Staff.
+
+   1.3.8        Conditions and Penalties
+                Organizers have the right to modify the points and/or penalties listed in the
+                various event descriptions to better reflect the design of their events, or any
+                special conditions unique to the contest.
+
+
+SAEINDIA AEROTHON – ROTORCRAFT SYSTEMS CHALLENGE (UAS) – DESIGN, BUILD AND FLY CONTEST 2026            PAGE | 11
+   1.3.9        Mode of Communication
+                The The official mode of communication for the event will be through the
+                registered        email       address         provided        on      the     event   website:
+                https://saeindia.org/aerothon2026/. All teams are required to regularly monitor
+                communications sent to their registered email address.
+
+
+                Any communication through WhatsApp groups or similar messaging platforms
+                is intended only for convenience and for sending alerts. Such platforms will not
+                be considered an official channel for important announcements or instructions.
+                Teams are advised not to contact industry experts, judges, or event officials
+                related to the competition through social media or any other unofficial
+                communication channels. Any such attempt to reach out may be considered a
+                violation of the competition rules, and appropriate action may be taken against
+                the team.
+
+   1.3.10       Force Majeure
+            •   The AeroTHON 2026 Organizing Committee and SAEINDIA shall not be
+                held responsible for any failure or delay in fulfilling their obligations under
+                this agreement if such failure or delay is caused by the occurrence of one or
+                more Force Majeure Events. These events include, but are not limited to,
+                acts of God, war, floods, earthquakes, strikes, lockouts, pandemics,
+                epidemics, riots, civil commotion, or scarcity of essential utilities such as
+                water, electricity, or other basic facilities.
+            •   The organizing committee shall inform the participating teams about the
+                occurrence and cessation of such events within one week of the decision
+                being made.
+            •   If conducting the event becomes infeasible due to an extended duration of
+                Force Majeure conditions or any other unforeseen circumstances beyond the
+                control of the organizers, the event may be postponed, modified, or
+                cancelled for the year.
+
+
+
+
+SAEINDIA AEROTHON – ROTORCRAFT SYSTEMS CHALLENGE (UAS) – DESIGN, BUILD AND FLY CONTEST 2026           PAGE | 12
+            Force Majeure Events include, but are not limited to:
+            •   Natural disasters such as earthquakes, floods, inundation, landslides,
+                storms, tempests, hurricanes, cyclones, lightning, thunder, pandemics,
+                epidemics, extreme atmospheric disturbances, or any other act of God.
+            •   Strikes, labour disruptions, or industrial disturbances not arising due to the
+                acts or omissions of the organizers; war, hostilities (declared or undeclared),
+                invasion, acts of foreign enemies, terrorism, rebellion, riots, armed conflict,
+                military actions, civil war, ionizing radiation, contamination by radioactivity
+                from nuclear fuel or waste, radioactive or toxic explosions, volcanic
+                eruptions, or any similar events beyond the reasonable control of the
+                organizers.
+            •   Acts of expropriation, compulsory acquisition or takeover by any government
+                agency of the said venue where the event is to be held or any part thereof
+            •   Any prohibitory or restraining order issued by a court of law or competent
+                government authority preventing the conduct of the event.
+
+1.4 ELIGIBILITY
+
+   1.4.1        Team member
+                Members of a Team must be undergraduate or postgraduate student, and
+                every member of the team must be a member of SAE India.
+
+   1.4.2        Society membership
+                A university or institute can nominate as many teams as they wish by
+                paying the requisite fee for each team. However, each team must work
+                independently.
+                The registration fees indicated in the Section 1 . 7 are required to be paid
+                within 15 days of registration for offline registration. For online registrations, the
+                fee payment must be made at the time of registration.
+
+
+
+
+SAEINDIA AEROTHON – ROTORCRAFT SYSTEMS CHALLENGE (UAS) – DESIGN, BUILD AND FLY CONTEST 2026   PAGE | 13
+1.5 OFFICIAL LANGUAGES
+                The official language of the SAEINDIA AEROTHON – ROTORCRAFT
+                SYSTEMS CHALLENGE (UAS) – DESIGN, BUILD AND FLY CONTEST 2026
+                is English. Document submissions, presentations, and discussions in English
+                are acceptable during all the phases of the contest.
+
+1.6 CONTEST PHASES
+
+   1.6.1        Phase 1: Design Report & Presentation
+                •    This phase invites innovative designs from the participant teams
+                •    The innovative designs will be evaluated by industry and academic experts
+                •    The top performing teams in Phase 1 will be shortlisted for Phase 2.
+
+                The AEROTHON organizing committee reserves the right to select the top-
+                performing teams from Phase1 to advance to Phase 2, with the number of teams
+                varying based on performance in Phase 1.
+
+   1.6.2        Phase 2: Flying Competition
+                •    Students will build a fully functional physical model based on the design
+                     presented in Phase 1.
+                •    A flight test demonstration will be conducted to evaluate the
+                     performance of the UAS.
+                •    Awards will be presented to the top performing teams based on their
+                     overall performance in the competition.
+
+
+            IMPORTANT DATES
+                Kindly refer to the AeroTHON 2026 website for the latest updates on the dates
+                and timelines (https://saeindia.org/aerothon2026/)
+                *SAEINDIA AEROTHON – ROTORCRAFT SYSTEMS CHALLENGE (UAS) –
+                DESIGN, BUILD AND FLY CONTEST 2026 Organizing Committee reserves
+                right to alter any of the dates. Watch out the website for the latest updates.
+
+
+
+
+SAEINDIA AEROTHON – ROTORCRAFT SYSTEMS CHALLENGE (UAS) – DESIGN, BUILD AND FLY CONTEST 2026   PAGE | 14
+1.7 REGISTRATION AND FEES
+                A team can comprise a minimum of 5 students and a maximum of 10 students
+                of multiple disciplines with one faculty advisor. Please note that all student
+                participants must be SAEINDIA members to participate in events or contests by
+                SAEINDIA. Faculty advisors are advised to become members of SAEINDIA,
+                though it is not mandatory.
+
+                The Registration fee for AEROTHON is Rs.20,000/- (Rupees Twenty
+                Thousand only) per team excluding 18% GST. To register for AEROTHON
+                and registration guidelines visit: https://saeindia.org/aerothon2026/
+
+                Steps to become a SAEINDIA Member
+
+                If you are not a SAEINDIA member, go to www.saeindia.com and select the
+                “Membership” link. Students need to select the “Student Membership” link and
+                provide the details as indicated. Alternate link to sign up for SAEINDIA
+                membership https://www.saeindia.org/become-a-member. Faculty members
+                who wish to become SAEINDIA members should choose the “Professional
+                Membership” link.
+
+1.8 CANCELLATION OF CONTEST REGISTRATION
+                Registration fees are not refundable and non-transferable to other teams or to
+                subsequent year's competition. Teams registering for SAEINDIA AEROTHON
+                – ROTORCRAFT SYSTEMS CHALLENGE (UAS) – DESIGN, BUILD AND FLY
+                CONTEST 2026 are required to submit a design report on the design of the
+                UAS. Failure to submit the Design report on or within the specified date will
+                constitute an automatic withdrawal of your team from the contest. Your team
+                will be notified the next day of the due date about non-submission; your team’s
+                registration will be cancelled two days after this notification and no refund will
+                be given.
+
+
+
+
+SAEINDIA AEROTHON – ROTORCRAFT SYSTEMS CHALLENGE (UAS) – DESIGN, BUILD AND FLY CONTEST 2026   PAGE | 15
+1.9 EXPECTATIONS
+
+   1.9.1        Design with no professional’s involvement
+                The UAS must be designed solely by SAEINDIA student members, without
+                direct involvement from faculty members or external professionals in the design
+                process. Students may refer to literature or publicly available information related
+                to UAS or aircraft design and construction. They may also seek guidance from
+                industry mentors or professors; however, such interactions must be limited to
+                discussions        of   design      alternatives,      including      their   advantages   and
+                disadvantages.
+
+
+                External professionals, mentors, or faculty members shall not make design
+                decisions, prepare drawings, contribute to the design report, or participate in the
+                construction of the UAS.
+
+
+                The Faculty Advisor must review the team’s work and sign the Statement of
+                Compliance provided in Appendix A, confirming that the design and
+                development work has been carried out solely by the student team members in
+                accordance with the competition rules.
+
+   1.9.2        Original design
+                     •   Any UAS presented in the contest must be an original design, with the
+                         configuration conceived and developed by the student team members.
+                         Replication or direct copying of existing UAS designs is not permitted.
+                     •   Photographic scaling, reverse engineering, or direct reproduction
+                         of any existing model UAS design is strictly prohibited. Teams must
+                         demonstrate that their design is the result of their own conceptual
+                         development and engineering analysis.
+
+
+
+
+SAEINDIA AEROTHON – ROTORCRAFT SYSTEMS CHALLENGE (UAS) – DESIGN, BUILD AND FLY CONTEST 2026           PAGE | 16
+   1.9.3        Unique designs
+                Universities or institutions may register more than one team for the SAEINDIA
+                AeroTHON – Rotorcraft Systems Challenge (UAS) – Design, Build and Fly
+                Contest 2026. However, each team entry must present a unique and
+                independently developed UAS design that is significantly different from the
+                others.
+
+
+                If multiple teams from the same university or institution submit designs that are
+                not significantly different, as determined by the Organizing Committee, the
+                university/institution will be considered to have only one valid entry. In such
+                cases, only one team will be permitted to participate in the contest.
+                For example, two designs having the same configuration, motor layout, and
+                overall dimensions will not be considered significantly different.
+
+                Each team is expected to have a Faculty Advisor from the registered university
+                or institution. Non-faculty members are not allowed to be advisors. The Faculty
+                Advisor will be considered as the official university representative for that team
+                by contest organisers.
+
+
+                Faculty Advisors may advise their teams on general engineering and
+                engineering project management theory but should not be directly involved in
+                the design of any part of the vehicle nor directly participate in the development
+                of any documentation or presentation. They may review the design reports and
+                provide suggestions and guide the team prior to the report submission and flying
+                competition.
+
+
+
+
+SAEINDIA AEROTHON – ROTORCRAFT SYSTEMS CHALLENGE (UAS) – DESIGN, BUILD AND FLY CONTEST 2026   PAGE | 17
+2.0.            UAS DESIGN AND FLIGHT EQUIREMENTS
+                The objective of this year’s contest is to design, build, and operate a multirotor
+                Uncrewed Aircraft System (UAS) capable of successfully completing two
+                mission scenarios that evaluate manual piloting skills, autonomous navigation,
+                sensing capability, and payload delivery performance.
+
+                In Mission 1 – Eyes in the Sky: Obstacle, Observation & Payload Delivery
+                (Fully Manual Mission), teams must manually pilot their UAS through a defined
+                obstacle course while maintaining stable flight and avoiding restricted flying
+                zones. During the mission, the UAS must reach designated observation zones
+                where specific observation tasks will be performed. Upon successful completion
+                of the obstacle course and observation tasks, the UAS must deliver a payload
+                accurately to a designated target area.
+
+                In Mission 2 – SkyScan: Autonomous Rapid Delivery (Fully Autonomous
+                Mission), the UAS must operate in a fully autonomous mode. The drone must
+                autonomously take off, scan a QR code, navigate through a corridor, and locate
+                the delivery zone. The system must identify the correct QR code associated with
+                the delivery target and avoid restricted red zones within the mission area. Once
+                the correct location is identified, the UAS must deliver the payload accurately by
+                lowering it to the target point maintaining mission altitude. After completing the
+                delivery, the UAS must autonomously return to the take-off point by navigating
+                back through the corridor while avoiding obstacles, without any manual
+                intervention.
+
+                Teams are required to design their UAS with the capability to carry and deploy
+                the payload securely, perform stable manual flight through obstacles, and
+                execute autonomous navigation, sensing, QR code detection, and
+                precision payload delivery to successfully complete both missions.
+
+
+
+
+SAEINDIA AEROTHON – ROTORCRAFT SYSTEMS CHALLENGE (UAS) – DESIGN, BUILD AND FLY CONTEST 2026   PAGE | 18
+2.1 DESIGN REQUIREMENTS
+
+                The design requirements of the UAS are listed in Table 2 and the payload
+                dimensions for missions 1 and 2 are shown in Figure 1.
+
+                                  Table 1: UAS Design Requirements
+
+      Sl. No.       Parameter                                      Requirement/Limitation
+          1.        UAS Type                                       Multirotor
+          2.        UAS Category                                  Micro UAS (i.e., Take-off weight < 2kg)
+          3.        UAS MTOW                                      2 kg
+          4.        Payload Capacity                               100 Grams
+          5.        Propulsion Type                                Electric
+          6.        Communication System Range                    At least 1 km
+
+
+
+
+                          Figure 1: Payload Dimensions – Missions 1 & 2
+
+            Note: AeroTHON 2026 Track 1 contest is only for multirotor UASs. Fixed
+            wings and VTOL Fixed wings are not allowed. Students are expected to bring
+            innovation in the payload dropping method and mechanism to ensure a safe and
+            precision delivery of payload to the target point. Provide design and analysis details
+            of various systems and sub-systems, selection of Commercially Off the Shelf
+            (COTS) items like batteries, motors etc. Students should consider safety of the
+            platform and the environment in the design and highlight the risks and how they
+            have been mitigated in the design.
+
+
+
+SAEINDIA AEROTHON – ROTORCRAFT SYSTEMS CHALLENGE (UAS) – DESIGN, BUILD AND FLY CONTEST 2026       PAGE | 19
+3.0.             PHASE 1: TECHNICAL DESIGN REPORT & PRESENTATION
+                 In Phase 1, participating teams are required to submit a comprehensive
+                 Technical Design Report describing their proposed Unmanned Aerial System
+                 (UAS). The report must strictly adhere to the design requirements, mission
+                 objectives, and constraints specified in Section 2.0 of this rulebook. Teams
+                 should clearly demonstrate the technical feasibility, design methodology,
+                 innovation, and operational efficiency of their proposed system.
+
+                 The design report should include detailed explanations of the airframe
+                 configuration,         propulsion        system,       avionics       architecture,   payload
+                 integration, control strategy,                 safety considerations,          and mission
+                 execution approach. Teams are also encouraged to justify their design
+                 decisions through analysis, calculations, simulations, or experimental
+                 validation wherever applicable.
+
+                 In addition to the written submission, shortlisted teams will be required to
+                 present their design to a panel of industry professionals and academic
+                 experts. The presentation will provide teams with an opportunity to explain their
+                 design approach, highlight innovative aspects, and address questions from the
+                 evaluation panel.
+
+                 The Phase 1 evaluation will consider the following aspects
+
+                          •   Technical depth and engineering rigor
+
+                          •   Innovation and originality of the design
+
+                          •   Compliance with the contest requirements and constraints
+
+                          •   Feasibility of mission execution
+
+                          •   Quality of analysis, documentation, and presentation
+
+                 Only teams demonstrating a strong technical foundation and a viable design
+                 will be selected to advance to the next phase of the competition.
+
+
+
+
+SAEINDIA AEROTHON – ROTORCRAFT SYSTEMS CHALLENGE (UAS) – DESIGN, BUILD AND FLY CONTEST 2026            PAGE | 20
+    3.1          TECHNICAL DESIGN REPORT
+
+                 The Design Report serves as the main tool for teams to communicate to the
+                 judges how their Uncrewed Aircraft System (UAS) was designed to best
+                 accomplish the intended mission. The report should outline the team’s design
+                 decisions, demonstrating how the UAS is specifically suited to perform the
+                 required tasks. It should explain the team’s thought processes and engineering
+                 philosophy that guided their choices, along with a detailed description of the
+                 methods, procedures, and calculations used to reach the final design solution.
+
+                 Teams are required to submit the Design Report as per the timeline given in
+                 Section 1.6 and prepare a detailed presentation (Microsoft Power Point
+                 Format) and present it to the jury panel. The design report and presentation
+                 must have the following contents:
+
+                 Technical Design Report Contents
+
+                 The Technical Design Report (TDR) submitted in Phase 1 must clearly
+                 document the conceptual development, engineering analysis, and final
+                 design of the proposed UAS. The report shall include, but not be limited to,
+                 the following sections.
+
+                 a) Conceptual Design
+                     ➢ High-Level Physical Overview
+                          Provide a detailed description of the primary physical elements of the
+                          UAS and their arrangement, illustrating the overall design approach.
+                 b) Detailed Design
+                     ➢ Preliminary Weight Estimation
+                          Estimate the initial weight of the UAS, considering all components and
+                         their contributions.
+                     ➢ Thrust Requirements Estimation
+                          Calculate the thrust required for optimal UAS performance based on
+                          design specifications.
+                     ➢ Propulsion System Selection
+                          Select and justify the choice of propulsion system (e.g., motors,
+                          engines), ensuring compatibility with the overall design.
+SAEINDIA AEROTHON – ROTORCRAFT SYSTEMS CHALLENGE (UAS) – DESIGN, BUILD AND FLY CONTEST 2026   PAGE | 21
+                     ➢ UAS Sizing
+                          Provide detailed sizing parameters for key components, including:
+                                      ▪    Wheelbase
+                                      ▪    Rotor arm length
+                                      ▪    Hub size
+                                      ▪    Propeller clearance
+                                      ▪    Landing gear dimensions
+                     ➢ UAS Performance Estimation
+                          Estimate critical performance metrics, including:
+                                      ▪    Power requirements
+                                      ▪    Battery selection
+                                      ▪    Endurance estimation
+                     ➢ Material Selection
+                          Justify the choice of materials for the UAS structure, considering
+                          weight, strength, and durability.
+                     ➢ Subsystem Selection
+                          Identify and justify the selection of key subsystems, such as:
+                                      ▪    Communication system
+                                      ▪    Control & navigation systems
+                                      ▪    Avionics and sensors
+                     ➢ Center of Gravity (C.G.) Estimation & Stability Analysis
+                          Calculate the center of gravity and conduct a stability analysis to
+                          ensure proper flight dynamics.
+                     ➢ Preliminary CAD Model
+                          Teams shall submit preliminary 2D engineering drawings (front, top,
+                          and side views) along with a 3D CAD model of the proposed UAS
+                          configuration.
+                     ➢ Computational Analysis
+                          Conduct computational analysis to verify design performance and
+                          efficiency, including simulations.
+
+
+
+
+SAEINDIA AEROTHON – ROTORCRAFT SYSTEMS CHALLENGE (UAS) – DESIGN, BUILD AND FLY CONTEST 2026   PAGE | 22
+                     ➢    Optimized Final Design
+                          Present a summary of any design changes or optimizations made,
+                          with:
+                                      ▪    Final CAD model
+                                      ▪    Final 2D drafting
+                                      ▪    Updated C.G. analysis
+                     ➢    Detailed Weight Breakdown & C.G. Analysis
+                          Provide a detailed breakdown of the final UAS weight distribution and
+                          a thorough center of gravity analysis.
+                     ➢    UAS Performance Recalculation
+                          Recalculate performance metrics including:
+                                      ▪    Thrust-to-weight ratio
+                                      ▪    Power requirements for the mission
+                                      ▪    Endurance calculation
+                 c) Final UAS Specifications and Bill of Materials (BoM)
+                     ➢    Submit a detailed specification of the final UAS design, along with an
+                          exhaustive Bill of Materials (BoM), listing all components used in the
+                          construction of the UAS.
+
+
+                 d) Methodology for Autonomous Operations
+                 Teams shall provide a detailed methodology for implementing the
+                 autonomous mission, addressing the following aspects:
+                 ➢ QR Code Detection and Identification - Describe the approach and
+                     algorithms used for detecting and decoding QR codes during the mission.
+                     Teams should explain how the system identifies the relevant QR code
+                     information required for navigation and delivery.
+                 ➢ Autonomous Navigation Through the Corridor - Explain the strategy used
+                     for autonomous flight through the designated corridor, including
+                     navigation control, obstacle detection, and path planning to safely
+                     traverse the corridor without manual intervention.
+
+
+
+
+SAEINDIA AEROTHON – ROTORCRAFT SYSTEMS CHALLENGE (UAS) – DESIGN, BUILD AND FLY CONTEST 2026   PAGE | 23
+                 ➢ Delivery Zone Identification - Describe the method used to locate and
+                     identify the correct delivery zone based on the QR code information
+                     obtained during the mission.
+                 ➢ Restricted Zone Avoidance - Explain the techniques used to detect and
+                     avoid restricted (red) zones during flight while navigating toward the
+                     delivery location.
+                 ➢ Payload Delivery Methodology - Describe the payload delivery
+                     mechanism and control logic used to lower and release the payload
+                     accurately at the designated target location.
+                 ➢ Autonomous Return and Landing Strategy - Explain the strategy for the
+                     autonomous return flight to the take-off location, including safe navigation
+                     back through the corridor while avoiding obstacles.
+
+
+                 Summary of Innovations
+                     ▪    Provide a concise summary of the innovative aspects of the proposed
+                          UAS design. Teams should highlight any novel features, advanced
+                          technologies, unique design approaches, or system integrations
+                          that distinguish their design from conventional solutions and enhance
+                          the overall mission capability.
+                     ▪    If applicable, teams should also explain how these innovations
+                          improve       performance,          reliability,     efficiency,    or   mission
+                          effectiveness.
+
+
+                 Refer to Sections 5.0, 6.0, and 7.0 for detailed information on the evaluation criteria,
+                 Technical Design Report submission requirements, and presentation guidelines.
+
+
+
+
+SAEINDIA AEROTHON – ROTORCRAFT SYSTEMS CHALLENGE (UAS) – DESIGN, BUILD AND FLY CONTEST 2026          PAGE | 24
+3.2 DESIGN PRESENTATION
+
+                 In addition to the Technical Design Report, teams are required to present their
+                 proposed UAS design to a panel of jury members comprising industry experts, subject
+                 matter specialists, and academic professionals.
+
+                 The presentation should clearly communicate the key elements of the team’s
+                 design process, demonstrating how the proposed UAS meets the mission
+                 objectives and competition requirements. Teams are expected to explain
+                 their design methodology, engineering analyses, subsystem selections,
+                 and the rationale behind major design decisions.
+
+                 The presentation should be structured in a manner that effectively engages an
+                 audience with diverse technical backgrounds, ensuring that the content is
+                 technically sound while remaining clear and comprehensible. The use of
+                 visual aids such as slides, diagrams, CAD models, simulations, or system
+                 architecture diagrams is strongly encouraged to support the explanation of the
+                 design and technical concepts.
+
+                 Teams must also be prepared to respond to questions from the jury panel
+                 and justify their design decisions, demonstrating a thorough understanding
+                 of the engineering principles and trade-offs involved in their UAS design.
+
+
+
+
+SAEINDIA AEROTHON – ROTORCRAFT SYSTEMS CHALLENGE (UAS) – DESIGN, BUILD AND FLY CONTEST 2026   PAGE | 25
+4.0.             PHASE 2: FLYING COMPETITION
+                 Phase 2 of the SAEINDIA AeroTHON – Rotorcraft Systems Challenge (UAS) –
+                 Design, Build and Fly Contest 2026 will consist of two stages:
+
+                     1. Technical Inspection
+                     2. Flying Competition
+
+4.1 TECHNICAL INSPECTION
+
+                 All Uncrewed Aircraft Systems (UAS) will undergo a Technical Inspection
+                 conducted by designated UAS technical inspectors before being permitted to
+                 participate in any flight demonstrations. The inspection will assess compliance
+                 with both technical and safety standards in accordance with general industry
+                 safety guidelines. The decisions of the UAS inspector(s) are final.
+                 The Technical and Safety Inspection will verify the following:
+                1. Compliance with UAS Design Requirements:
+                         o Ensuring adherence to the specified UAS design criteria as
+                              outlined in Phase 1
+                2. Overall Safety and Airworthiness:
+                         o Evaluation of the UAS's structural integrity, safety features, and
+                              flight readiness.
+
+                All UASs must successfully pass the Technical and Safety Inspection to
+                be eligible for the flying competition. Teams are strongly encouraged to
+                perform a self-inspection prior to arrival at the contest to ensure compliance.
+
+                During the Technical Inspection, the following checks will be conducted:
+                ➢ UAS Dimensions: Verification that the UAS conforms to the 2D drawings
+                     submitted during Phase 1.
+                ➢ Component Verification: Ensuring the use of components as specified
+                     in Phase 1, including:
+                         o Propulsion system: Motor, Electronic Speed Controller (ESC),
+                              Propeller, and Power System (Battery)
+                         o Control & Communication System: Flight Controller, Radio
+                              Transmitter, and Receiver
+
+SAEINDIA AEROTHON – ROTORCRAFT SYSTEMS CHALLENGE (UAS) – DESIGN, BUILD AND FLY CONTEST 2026   PAGE | 26
+                ➢ Take-off Weight: Confirmation that the UAS weight matches the value
+                     reported in the design report.
+                ➢ Structural Integrity: Examination of the UAS’s structure, including:
+                         o Proper securing of components, appropriate wiring (no hanging
+                              wires, use of proper wire gauge and connectors)
+                         o Secure fasteners (locknuts or thread locker used, no loose or
+                              shaking components)
+                         o Propeller and payload attachment integrity
+                ➢ Other Checks:
+                         o Control system responsiveness (motor RPM) to radio controller
+                              inputs
+                         o Motor/propeller rotation direction
+                         o Radio range check
+                         o Motor arming and disarming check
+                         o FPV video transmission check
+                         o Any deviations from the above checks must be addressed through
+                              the Change Request Process as outlined in APPENDIX B
+
+                 A detailed technical inspection will be conducted prior to the first flight, while
+                 subsequent flights will be subject to a visual inspection, provided the UAS
+                 remains incident-free. If the UAS is damaged during a mission or trial, a
+                 detailed inspection will be performed again. It is recommended that teams
+                 bring strategically selected spare parts and components in the event of any
+                 unforeseen incidents during transit or the competition.
+
+    4.1.1        UAS Conformance to 2D Drawing
+
+                 During Technical Inspection, the UAS will be inspected and measured for
+                 conformance to the 2D drawing presented in the Design Report.
+                 a) At a minimum, UAS arm length, landing gear height and UAS height
+                     dimensions will be measured and compared to the 2D drawing.
+                 b) All teams must have a hard copy of their design report with them
+                     during technical inspection.
+                 c) UAS actual empty CG will be compared to the empty CG presented
+                     in the design report’s 2D drawing.
+
+SAEINDIA AEROTHON – ROTORCRAFT SYSTEMS CHALLENGE (UAS) – DESIGN, BUILD AND FLY CONTEST 2026   PAGE | 27
+    4.1.2        Deviations from 2D Drawing
+                 Any deviation in construction of the UAS from the submitted 2D drawing
+                 since submission of the Design Report must be reported in writing.
+                 •   Each design change must be documented separately using the
+                     Modification Change Request (CR).
+                 •   Only one design change may be submitted by CR form.
+                 •   Jury will assess penalty points for design changes.
+
+    4.1.3        Inspection of Spare UAS Components
+                 •   All spare UAS components (structural parts, motors, propeller, batteries
+                     etc.) must be presented for inspection at the same time as the UAS
+                     inspection.
+
+    4.1.4        Inspection Requirements throughout the Contest
+                 •   All UAS must meet all Technical and Safety Inspection requirements
+                     throughout the contest.
+                 •   Any official may request that an UAS be re-inspected if a general or
+                     safety requirement problem is seen on an UAS at any time during the
+                     event.
+                 •   This includes any unintended errors or omissions made by officials
+                     during inspection.
+
+    4.1.5        Technical and Safety Inspection Penalties
+                 •   Points are allotted for the Technical and Safety Inspection.
+                 •   Teams may only lose points because of errors and problems
+                     encountered during the inspection process. Any penalties assessed
+                     during Technical Inspection will be applied to the overall contest score.
+
+4.2 FLYING COMPETITION
+                 Participants      shall    refer    to   the    SAEINDIA         AeroTHON    2026   website
+                 https://saeindia.org/aerothon2026/ for the Phase 2 flying competition dates and
+                 schedule.
+
+
+
+
+SAEINDIA AEROTHON – ROTORCRAFT SYSTEMS CHALLENGE (UAS) – DESIGN, BUILD AND FLY CONTEST 2026          PAGE | 28
+    4.2.1        General Mission Requirements
+                 The objective of AeroTHON 2026 is to design, build, and operate a multirotor
+                 Uncrewed Aircraft System (UAS) capable of completing manual obstacle
+                 navigation and observation tasks, as well as performing autonomous QR-based
+                 navigation and precise payload delivery
+                 Aircraft Consistency:
+                    •   The aircraft must remain substantially identical to the design documented
+                        in the submitted report.
+                 Timely start:
+                 Teams must report to the assigned flight field strictly as per the scheduled time
+                 slot. If a team is not present at the field or is unable to initiate take-off within 5
+                 minutes of being called to the podium, a penalty will be imposed for the delay.
+                 The nature of the penalty will be communicated by the organizers and may
+                 range from negative scoring to forfeiture of the mission. Failure of a team to
+                 report during their allocated time slot will be treated as a forfeiture of that
+                 mission attempt, and the team will not be permitted to perform the mission later
+                 unless otherwise decided by the organizing committee.
+                 Flight Missions:
+                 The competition will consist of two distinct flight missions:
+                          • Mission 1: Eyes in the Sky – Obstacle Navigation, Observation &
+                          Precision Payload Delivery – Manual Operation
+                          • Mission 2: SkyScan – Autonomous QR Detection, Corridor Navigation
+                          & Rapid Payload Delivery – Autonomous Operation
+                 Scoring:
+                    •   Scoring will be awarded individually for each mission: one for manual
+                        operation and one for autonomous operation.
+                 Damage and Repairs:
+                    •   If the UAS is damaged after an unsuccessful flight mission, teams may
+                        carry out necessary repairs, provided that no modifications are made that
+                        deviate from the design submitted in Phase 1. However, the UAS must
+                        undergo a re-inspection and be cleared as airworthy before the next
+                        mission attempt. Failure to pass the inspection will result in disqualification
+                        from the next mission attempt.
+
+
+SAEINDIA AEROTHON – ROTORCRAFT SYSTEMS CHALLENGE (UAS) – DESIGN, BUILD AND FLY CONTEST 2026   PAGE | 29
+                 In the Event of Irreparable Damage:
+                     •    If the UAS is damaged beyond repair or deemed unfit for flight by the UAS
+                          inspectors, the team will forfeit their opportunity to attempt the next
+                          mission.
+                 Design Deviations:
+                     •    Any deviation from the original design submitted in Phase 1 during repairs
+                          or overhauling will be grounds for disqualification, subject to the decision
+                          of the Jury Panel.
+
+    4.2.2        Flying Competition Chronology
+
+                 •       The flying schedule will be sent via email to all teams at least two days
+                         ahead of the demonstration event, also a copy of schedule will be shared
+                         with the Teams during Phase 2 event registration. Teams are expected
+                         to follow this schedule during their flight presentations.
+                         The schedule must be adhered to without exception. Teams that do not
+                         attempt the flying event at their designated time will get penalty and
+                         opportunity would be given upon Technical Committee advise.
+                 •       Each team will have a 15-minute window to complete their mission. If a
+                         team encounters issues during their scheduled attempt due to the
+                         following reasons, they can overhaul the UAS and try again, if their initial
+                         flight time is under 2 minutes:
+                            ➢ UAS failed to take off
+                            ➢ UAS took off but landed immediately
+                            ➢ UAS took off and crashed
+                 Note: Jury members hold the authority to make final decisions in these cases
+
+                 Inability to Engage in Phase 2 Scenarios
+
+                 •       If any team is unable to attend the flying competition due to conflicts with
+                         examination schedules, medical emergencies, or similar reasons, a delegate
+                         or substitute may be permitted to fly the UAS at the venue, provided a letter
+                         is issued by the Institute's HoD, Principal, or Faculty Advisor.
+                 •       The delegate or substitute must be from the same university but does not
+                         have to be from the same team.
+                 •       Teams must notify SAEINDIA in writing, along with the letter, at least 10 days
+                         in advance.
+
+
+SAEINDIA AEROTHON – ROTORCRAFT SYSTEMS CHALLENGE (UAS) – DESIGN, BUILD AND FLY CONTEST 2026    PAGE | 30
+                 •   The SAEINDIA AeroTHON 2026 Organizing Committee reserves the right to
+                     approve requests for delegates or substitutes. The committee's decision will
+                     be final and binding for all teams.
+
+    4.2.3        Flight Mission 1 – Eyes in the Sky: Obstacle, Observation &
+                 Payload Delivery – Manual Operation
+                 Mission Objective
+
+                          •   Navigation through obstacles: transport a payload through a
+                              challenging course filled with static obstacles such as hurdles,
+                              tunnels, hoops, and slalom sections while avoiding restricted or no-
+                              Fly zones. The primary objective is to navigate these obstacles with
+                              high precision while ensuring the payload remains undamaged.
+                          •   Arial Survey: Continue the course passing through an observation
+                              zone, identify and report identified visual observations or objects. This
+                              phase of the mission is typically to demonstrate applications of drones
+                              in various segments e.g. Agri, field survey, remote area surveillance
+                              and monitoring etc.
+
+                          •   Payload Delivery: Deliver payloads in identified zone post in-flight
+                              navigations through obstacles and avoiding no-fly zones. This phase
+                              is to replicate typical urban delivery applications
+
+                 Mission Details:
+
+                     • In this mission, the UAS must be manually piloted through a structured
+                     obstacle course consisting of various challenges such as hurdles, tunnels,
+                     hoops, and slalom sections. The objective is to demonstrate precise piloting
+                     skills, situational awareness, and stable flight control while carrying the
+                     payload.
+
+                     • The mission course may also include restricted or no-fly zones marked
+                     with red banners or boundary markings. Pilots must carefully navigate the
+                     drone to avoid entering these restricted areas while continuing the mission
+                     path.
+
+                     • During the mission, the drone must also perform observation tasks at
+                     designated observation zones. These tasks may include identifying visual
+                     elements such as aerial views of structures or infrastructure, or 2D/3D
+                     shapes placed within the course. Teams must hover at the observation
+                     zone and verbally report the observation to the jury before continuing the
+                     mission.
+
+                     • After completing the obstacle navigation and observation tasks, the drone
+                     must proceed to the payload delivery zone and accurately place the payload
+                     within the designated target area.
+
+SAEINDIA AEROTHON – ROTORCRAFT SYSTEMS CHALLENGE (UAS) – DESIGN, BUILD AND FLY CONTEST 2026   PAGE | 31
+                     • The mission is considered complete when the drone successfully delivers
+                     the payload and returns home.
+
+                 Mission Tasks:
+
+                 •    Manual Obstacle Navigation: Fly the drone through various obstacles
+                     such as hurdles, hoops, tunnels, and slalom gates while maintaining stable
+                     control.
+
+                 •   Restricted Zone Avoidance: Detect and avoid marked red/restricted zones
+                     without entering the restricted areas.
+                 •   Observation and Reporting: Hover at designated observation zones and
+                     correctly identify and verbally report the observed objects or features to the
+                     jury.
+
+                 •   Payload Transport: Safely carry the payload throughout the mission without
+                     dropping or destabilizing it during flight.
+
+                 •   Precision Payload Delivery: Place the payload accurately within the
+                     designated delivery zone.
+
+                 •   Return to Home: After the payload is placed, navigate the course back to
+                     the home base or takeoff point, avoiding obstacles and ensuring a safe
+                     return.
+
+                 •   Time Constraints: Complete the mission within a 15-minute time slot.
+
+                 Operation:
+
+                     ➢ Takeoff and Start: The UAS must take off from the designated start
+                          zone. Pilots must remain within the take-off control zone for the
+                          entire mission.
+                     ➢ Obstacle Course Navigation: The pilot must manually maneuver the
+                          UAS through the obstacle course while maintaining stable flight and
+                          avoiding collisions.
+                     ➢ Restricted Zone Avoidance: Restricted areas marked by red banners
+                          or ground markings must not be entered. Pilots must adjust their flight
+                          path in real time to avoid these zones.
+                     ➢ Observation Zones: At designated observation points, the pilot must
+                          stabilize the UAS, visually identify the observation target, and verbally
+                          report the observation to the jury before continuing.
+
+
+
+
+SAEINDIA AEROTHON – ROTORCRAFT SYSTEMS CHALLENGE (UAS) – DESIGN, BUILD AND FLY CONTEST 2026   PAGE | 32
+                     ➢ Payload Delivery: After completing the required navigation and
+                          observation tasks, the pilot must proceed to the delivery zone and
+                          place the payload inside the designated target area.
+                     ➢ Finish Zone: The mission concludes once the drone successfully
+                          delivers the payload and UAS must return to the takeoff point and
+                          land safely.
+                     ➢ Manual Control Requirement: This mission must be performed
+                          entirely under manual control, and no autonomous flight assistance
+                          is permitted.
+                     ➢ Safety Compliance: Safety remains the highest priority. Unsafe flying,
+                          repeated collisions, or violation of safety rules may lead to
+                          penalties or disqualification.
+                     ➢ Scoring: A successful flight requires completing the obstacle course,
+                          placing the payload, returning to the home base, and landing safely.
+                          See Section 5.5 for scoring details.
+                     ➢ Flight Time: Teams have 15 minutes to complete the mission, starting
+                          when throttle input for takeoff is increased.
+                     ➢ FPV Option: Teams may use a First-Person View (FPV) camera to aid
+                          navigation, but it’s not mandatory.
+                     ➢ Field Conditions: Actual conditions may vary slightly from those
+                          depicted in Figure 2.
+
+
+
+
+SAEINDIA AEROTHON – ROTORCRAFT SYSTEMS CHALLENGE (UAS) – DESIGN, BUILD AND FLY CONTEST 2026   PAGE | 33
+                            Figure 2 - Flight Mission 1 – Manual Mission Profile
+
+The flight path will be clearly marked on the ground to assist the pilot in navigating the
+obstacle course and accurately delivering the payload. Additionally, a debrief will be
+provided before the mission commences.
+
+
+
+
+SAEINDIA AEROTHON – ROTORCRAFT SYSTEMS CHALLENGE (UAS) – DESIGN, BUILD AND FLY CONTEST 2026   PAGE | 34
+    4.2.4        Flight Mission 2 – SkyScan: Autonomous Rapid Delivery –
+                 Autonomous Operation
+
+                 Mission Details:
+
+                 • In this mission, the UAS must operate in fully autonomous mode to perform
+                 a rapid delivery task based on information obtained from a QR code. The drone
+                 must first scan the QR code to determine the required delivery location and then
+                 navigate through a designated corridor while autonomously avoiding obstacles.
+
+                 • After scanning the QR code, the drone must descend and travel through a 3.5-
+                 meter-wide navigation corridor, demonstrating its ability to perform precise
+                 autonomous navigation avoiding the walls.
+
+                 • Upon reaching the delivery zone, the drone must ascend to the required
+                 altitude and identify the correct QR code corresponding to the delivery
+                 location. Multiple QR codes will be placed within the delivery zone, and the
+                 UAS must correctly identify the matching code while avoiding designated
+                 restricted (red) zones.
+
+                 • Once the correct target location is identified, the drone must descend to the
+                 specified altitude and lower the payload accurately at the designated QR
+                 code location.
+
+                 • After successfully delivering the payload, the drone must ascend and
+                 autonomously return to the starting point, navigating back through the
+                 corridor while avoiding obstacles, and land safely at the take-off location.
+
+                 Mission Tasks:
+
+                 •   QR Code Detection: Take off and scan the start QR code from a 5-meter
+                     altitude and decode the delivery location information.
+                 •   Corridor Entry Detection Forward Lap: Detect the AeroTHON 2026
+                     Banner with Green Background placed at the corridor entrance and
+                     autonomously align with the corridor before beginning corridor navigation.
+
+                 •   Autonomous Corridor Navigation: Navigate through a 3.5-meter-wide
+                     corridor while autonomously avoiding obstacles.
+
+                 •   Target Identification: Ascend to 10-meter altitude and identify the correct
+                     QR code within the delivery zone that corresponds to the scanned delivery
+                     information.
+
+                 •   Restricted Zone Avoidance: Detect and avoid designated red or
+                     restricted zones within the delivery area.
+
+                 •   Payload Delivery: Descend to 5-meter altitude and accurately lower and
+                     release the payload at the correct QR code location.
+
+SAEINDIA AEROTHON – ROTORCRAFT SYSTEMS CHALLENGE (UAS) – DESIGN, BUILD AND FLY CONTEST 2026   PAGE | 35
+                 •   Corridor Entry Detection Return Lap: Detect the AeroTHON 2026
+                     Banner with Green Background placed at the corridor entrance and
+                     autonomously align with the corridor before beginning corridor navigation.
+
+                 •   Autonomous Return: After delivery, return through the corridor while
+                     autonomously avoiding obstacles and land safely at the take-off point.
+
+
+                 Operation:
+
+                 •   Takeoff: The UAS must take off autonomously from the designated ground
+                     start point.
+                 •   QR Code Scan: The drone must ascend to 5-meter altitude, move forward
+                     approximately 1-meter, and scan the QR code containing the delivery
+                     information.
+
+                 •   Corridor Navigation: After scanning the QR code, the UAS must identify
+                     the AeroTHON 2026 Green Banner marking the entrance of the navigation
+                     corridor and align itself before descending to the corridor navigation altitude,
+                     the drone must descend to 10 feet (approximately 3-meter) altitude and
+                     autonomously navigate through the corridor while avoiding obstacles.
+
+                 •   Delivery Zone Navigation: Upon reaching the delivery zone, the drone
+                     must ascend to approximately 10 meters altitude to identify the correct
+                     QR code. Delivery zone geo-fence coordinates will be provided to teams
+                     during Phase 2.
+
+                 •   Payload Delivery: Once the correct QR code location is identified, the drone
+                     must descend to 5-meter altitude, lower the payload, and release it
+                     accurately at the designated location.
+
+                 •   Return Flight: After payload delivery, the UAS must ascend to 10-meter
+                     altitude, navigate back through the corridor while avoiding obstacles, and
+                     return to the take-off location.
+
+                 •   Landing: The mission concludes once the drone lands safely at the
+                     designated take-off point.
+                 •   Geo-fencing: Coordinates for the geo-fence boundary will be provided.
+                     Teams must program these into the ground station software to ensure the
+                     UAS stays within the designated area.
+
+                 •   Flight Time: Each team will have 15 minutes to complete the mission.
+                     Scoring will be based on mission success.
+
+
+
+
+SAEINDIA AEROTHON – ROTORCRAFT SYSTEMS CHALLENGE (UAS) – DESIGN, BUILD AND FLY CONTEST 2026   PAGE | 36
+                 Criteria for a Successful Flight:
+
+                 A flight will be deemed successful only if the UAS:
+                 •   A flight will be considered successful only if the UAS:
+
+                 •   Takes off autonomously from the start point.
+
+                 •   Scans and correctly interprets the QR code.
+
+                 •   Successfully navigates the corridor while avoiding obstacles.
+
+                 •   Identifies the correct QR code within the delivery zone.
+                 •   Delivers the payload accurately at the designated location.
+
+                 •   Returns through the corridor and land safely at the take-off point. Please
+                     refer to Section 5.6 for detailed scoring criteria. The course for autonomous
+                     operations is shown in Figure 3; however, field conditions may vary.
+                 •   The UAS should be equipped to record flight data and share it with the jury
+                     panel once the mission is completed.
+
+
+
+
+             Figure 3 - Flight Mission 2 – Autonomous Mission Profile
+
+
+
+
+SAEINDIA AEROTHON – ROTORCRAFT SYSTEMS CHALLENGE (UAS) – DESIGN, BUILD AND FLY CONTEST 2026   PAGE | 37
+5.0.             EVALUATION CRITERIA
+5.1 PHASE 1 - DESIGN REPORT SUBMISSION
+                        PHASE 1 - DESIGN REPORT EVALUATION – 50 Marks
+                                               Parameter                                                Score
+     1     Technical Content                                                                              20
+
+     1.1   Conceptual Design Process                                                                      2
+
+     1.2   Product Benchmark                                                                              2
+
+     1.3   Preliminary Weight Estimation                                                                  2
+
+     1.4   Thrust Required Estimation & Propulsion System Selection                                       2
+
+     1.5   Aircraft Sizing (Rotor Arm, Hub, Wheelbase, Propeller Clearance, Landing Gear)                 2
+
+     1.6   Aircraft Performance (Power Estimation, Battery, Endurance)                                    2
+
+     1.7   Material Selection                                                                             2
+
+     1.8   Subsystem Selection (Communication, Control, Navigation)                                       2
+
+     1.9   Autonomous Navigation System Hardware & Software                                               2
+
+    1.10   C.G. Calculation & Stability Analysis                                                          2
+
+       2   Computational Analysis                                                                         6
+
+ Computational Analysis (CFD, FEM, MATLAB, etc.)                                                          6
+
+       3   Methodology for Autonomous Operation                                                           12
+
+     3.1   Autonomous Flight Algorithm.                                                                   4
+
+     3.2   Autonomous Object Detection and Counting Algorithm                                             4
+           Autonomous Payload Drop Mechanism including algorithm, hardware, and system
+     3.3                                                                                                  4
+           selection
+       4   Flight Safety                                                                                  2
+
+     4.1   Safety Features & SORA Assessment                                                              2
+ Assesses the implementation of flight safety features, such as Return-to-Home, battery fail-safe, telemetry
+ fail-safe, and radio fail-safe
+       5   Innovation                                                                                     10
+ Participants must bring innovative solutions to address challenges in the drone industry, such as battery life,
+ safety, and regulations. Innovation should span the UAS life cycle—design, manufacturing, testing, operations,
+ and maintenance—focusing on efficiency, autonomy, and sustainability. Solutions should leverage advanced
+ materials, AI, and smart systems to enhance performance and overcome current limitations.
+
+
+
+
+SAEINDIA AEROTHON – ROTORCRAFT SYSTEMS CHALLENGE (UAS) – DESIGN, BUILD AND FLY CONTEST 2026           PAGE | 38
+5.2 PHASE 1 - TECHNICAL PRESENTATION
+                           PHASE 1 - TECHNICAL PRESENTATION – 50 Marks
+                                                 Parameter                                                  Score
+   1       Technical Design & System Architecture                                                            12
+Overall UAS design, structural configuration, propulsion system selection, payload integration, stability
+considerations, and alignment with mission requirements
+   2       Mission Strategy & System Integration                                                             10
+Clear explanation of how the UAS design supports both missions’ including obstacle navigation, observation
+tasks, QR scanning, corridor navigation, payload lowering mechanism, and return strategy.
+   3       Autonomous Operation Methodology                                                                  10
+Algorithms and approach for QR code detection, corridor navigation, obstacle avoidance, red-zone avoidance,
+delivery zone identification, and autonomous payload deployment.
+   4       Engineering Analysis & Design Validation                                                          8
+Weight estimation, thrust-to-weight calculations, endurance estimation, CG analysis, safety margins, and
+simulation or computational validation of the design.
+   5       Structure & Clarity of Presentation                                                               5
+Logical flow of ideas, clear introduction and conclusion, effective use of diagrams, CAD visuals, and ability to
+explain complex ideas clearly within the time limit.
+   6       Presentation Skills & Technical Communication                                                     5
+Clear, confident communication, teamwork, ability to answer technical questions, interaction with judges, and
+professionalism during the presentation.
+
+
+
+5.3 PHASE 1 - TOTAL SCORE
+                                  PHASE 1 - TOTAL SCORE – 100 Marks
+                                                 EVENTs                                                 Score
+       1      TECHNICAL DESIGN REPORT                                                                       50
+       2      PRESENTATION                                                                                  50
+                                                                                      TOTAL SCORE        100
+
+
+
+
+SAEINDIA AEROTHON – ROTORCRAFT SYSTEMS CHALLENGE (UAS) – DESIGN, BUILD AND FLY CONTEST 2026             PAGE | 39
+5.4 PHASE 2 - TECHNICAL INSPECTION – 50 Marks
+                            PHASE 2, TECHNICAL INSPECTION – 50 Marks
+                                               Parameter                                               Score
+     1     Aircraft Dimensions Conformance to 2D Drawings (10)
+
+    1.1    Verification of Dimensions against Phase 1 design submitted values                           10
+ The design of the frames and their dimensions should strictly adhere to the Phase 1 design specifications.
+ There will be significant penalty points if the UAS does not conform to the Phase 1 design, potentially
+ leading to disqualification.
+      2    Use of Same Components as Selected in Phase 1 with identical technical specifications (6)
+
+     2.1   Propulsion System: Motor (KV Rating), ESC (Amps), & Propeller (Size)                         2
+
+     2.2   Power System: Battery [Voltage (V), Capacity (mAh), & C-Ratings]                             2
+
+     2.3   Control & Communication System: Flight Controller, Radio Transmitter & Receiver              2
+
+      3    Take-off Weight Consistency with Design Report (10)
+
+     3.1   Weight Difference < 50g                                                                      10
+
+     3.2   Weight Difference > 50g & < 100g                                                             8
+
+     3.3   Weight Difference > 100g & < 200g                                                            5
+
+     3.4   Weight Difference > 200g                                                                     0
+
+      4    Structural Integrity (10)
+
+     4.1   Components Secured Properly                                                                  2
+
+     4.2   Proper Wiring (No wires hanging, use of appropriate gauge wires and connectors)              2
+
+     4.3   Secure Fasteners (use of locknuts, thread locker)                                            2
+
+     4.4   Proper Payload Attachment                                                                    2
+
+     4.5   No Loose or Shaking Structural Components                                                    2
+
+      5    Static System Checks (8)
+
+     5.1   Motor & Propeller Check: Inspect mounting and ensure no visible damage.                      2
+
+     5.2   Battery Inspection (secure attachment, no visible damage, proper wiring)                     2
+
+     5.3   Controller System Check: Ensure the flight controller is secure and wiring is intact.        2
+
+     5.4   Radio Range Check: Move the transmitter to a set distance to test UAS communication.         2
+
+      6    Fail-Safe Systems Check (4)
+
+     6.1   RTL on Low Battery: Ensure low battery return-to-launch functionality is configured.         1
+
+     6.2   RTL on Datalink Loss: Ensure automatic return is configured in case of data loss.            1
+
+     6.3   Geo-Fence Check: Verify geo-fence limits and configurations.                                 2
+
+      7    Aesthetics (2)
+
+     7.1   Inspector Marks: Based on build quality, attention to detail, and system integrity.          2
+
+
+
+
+SAEINDIA AEROTHON – ROTORCRAFT SYSTEMS CHALLENGE (UAS) – DESIGN, BUILD AND FLY CONTEST 2026          PAGE | 40
+5.5 PHASE 2 - FLIGHT MISSION 1- Manual Operation – 100 Marks
+                               PHASE 2 - FLIGHT MISSION 1 – 100 Marks
+                                             Parameter                                        Score
+     1     Obstacle Navigation                                                                 40
+UAS successfully takes off and maintains the required mission altitude throughout the obstacle
+navigation course. UAS skillfully navigates through the obstacles on the forward lap without causing
+damage to the UAS or obstacles. Points are awarded based on precision and smoothness. Penalties
+are applied for collisions or crashes, with up to Negative 5 points subtracted for each incident.
+    2    Red /Restricted zone avoidance                                                   15
+ UAS shall avoid identified no-fly zones during navigation. Points are awarded for successful
+avoidance of identified red zones. Each violation to avoid the Red /Restricted zones could lead to
+negative 10 points subtraction from the scores earned
+     3      Arial Survey: In – flight Observation                                              15
+UAS to have required systems and navigate observation zones to perform in flight arial survey of
+identified Observation Zone(s). Points are awarded for successfully identifying and manually
+reporting to the jury about the objects identified. A negative 5 points shall be avoided for each
+incorrect object identification.
+    4    Payload Delivery                                                                    10
+Points are awarded for identifying and successfully placing the payload at Ground Zero (target point).
+The more accurate the placement, the higher the score.
+     6     Take-off, Return to Take-off Point & Land Safely without functional damage          5
+The UAS returns to the takeoff point and lands safely and no functional damage to UAS
+     7     Within Time Completion & Start                                                      15
+The UAS completes the mission within the allotted 15-minutes flight time.
+
+
+Note:
+
+The above scoring criteria are preliminary and may be updated for the Phase 2 Flying
+Competition. Final evaluation criteria will be shared after Phase 1 to ensure fair and
+transparent assessment.
+
+
+
+
+SAEINDIA AEROTHON – ROTORCRAFT SYSTEMS CHALLENGE (UAS) – DESIGN, BUILD AND FLY CONTEST 2026   PAGE | 41
+5.6 PHASE 2 - FLIGHT MISSION 2 - Autonomous Operation – 100 Marks
+                               PHASE 2 - FLIGHT MISSION 2 – 100 Marks
+                                               Parameter                                      Score
+      1     Autonomous Takeoff and Initial QR Code Detection                                   10
+ The UAS autonomously takes off, ascends to approximately 5 m, moves forward and successfully
+ scans and decodes the QR code containing the delivery location information. Marks proportional
+ for partial success.
+      2     Autonomous Corridor Navigation                                                     15
+ The UAS descends to approximately 3 m (10 feet) altitude and successfully navigates through the
+ 3.5-meter-wide corridor while maintaining stable autonomous flight. Marks proportional for partial
+ completion or minor deviations
+      3     Delivery Zone QR Code Identification                                               10
+ The UAS ascends to approximately 10 m altitude and correctly identifies the target QR code
+ corresponding to the scanned delivery information among multiple QR codes placed in the
+ delivery zone. Partial marks for incorrect or delayed identification.
+      4     Restricted Zone / Red Zone Avoidance                                               10
+ The UAS successfully detects and avoids designated red zones while navigating within the
+ delivery area. Each violation to avoid the Red /Restricted zones could lead to negative 5 points
+ subtraction from the scores earned
+      5     Payload Delivery Accuracy                                                          15
+ The UAS descends to approximately 5 m altitude, lowers and releases the payload accurately at
+ the designated QR code location. Marks will be awarded based on drop accuracy, altitude
+ compliance, and stability during delivery.
+      6     Autonomous Return Navigation                                                       20
+ After payload delivery, the UAS ascends and autonomously navigates back through the
+ corridor, avoiding obstacles while returning to the start point.
+      7     Safe Autonomous Landing                                                             5
+ The UAS lands safely at the designated take-off location without manual intervention.
+      8     Mission Completion Within Time                                                     15
+ The UAS completes the mission within the allotted 15-minutes flight time. The marks will be
+ proportional to how quickly the mission is completed.
+
+
+Note:
+
+The above scoring criteria are preliminary and may be updated for the Phase 2 Flying
+Competition. Final evaluation criteria will be shared after Phase 1 to ensure fair and
+transparent assessment.
+
+
+
+
+SAEINDIA AEROTHON – ROTORCRAFT SYSTEMS CHALLENGE (UAS) – DESIGN, BUILD AND FLY CONTEST 2026   PAGE | 42
+5.7 PHASE 2 - TOTAL SCORE
+                                 PHASE 2 - TOTAL SCORE – 100 Marks
+                                         EVENT / MISSIONs                                           Score
+      1       TECHNICAL INSPECTION                                                                   50
+      2       FLIGHT MISSION - 1                                                                     100
+      3       FLIGHT MISSION - 2                                                                     100
+                                                                                      TOTAL SCORE    250
+
+5.8 TIGER’S CAVE- BUSINESS PLAN PROPOSAL
+          This year AEROTHON organising committee has included a new stage specially for
+          developing entrepreneur mindset. Through this stage, we are looking for teams that
+          have an appetite to not just solve challenges but also set new trends of growth and
+          success in Drone industry.
+
+
+          During this event, teams would pitch their product in front of notable jury from
+          successful drone start-ups and related industries and gain insights from them. This
+          opportunity to pitch your product in front of industry trailblazers is a win, the best team
+          will be awarded a special category prize.
+
+
+          The team will be presenting to a panel of 3-4 tigers with a time limit of 15 minutes (10
+          mins presentation & 5 mins Q&A). The team is free to decide on the format of their
+          presentation, props, display parts to make an impact.
+
+          The evaluation criteria are not defined as the winning team decided by the tigers, but
+          the recommended topics to cover could be:
+          •          Business plan proposal
+          •          Capability of your UAS- key points
+          •          Key Technical aspects and differentiators
+          •          Practical market/ use case to which your system could be implemented.
+          •          Market survey on the scope and growth of your use case
+          •          Unique Selling Point (USP) of your design.
+          •          Innovations used in your product which sets it apart from other teams.
+          •          Financial, fund raising, sponsorships so far, plan to scale up.
+          •          Team’s structure for future success
+
+SAEINDIA AEROTHON – ROTORCRAFT SYSTEMS CHALLENGE (UAS) – DESIGN, BUILD AND FLY CONTEST 2026         PAGE | 43
+        These are just helpful points to start with, but the teams are free to decide what points
+        to cover and present them. Think of it as a shark tank experience.
+
+        This is an imagination exercise of what your product could be!!
+
+        Note: Scores of this stage will not be included in overall contest score.
+
+
+
+
+SAEINDIA AEROTHON – ROTORCRAFT SYSTEMS CHALLENGE (UAS) – DESIGN, BUILD AND FLY CONTEST 2026   PAGE | 44
+6.0.             DESIGN REPORT GUIDELINES FOR PHASE 1
+6.1 INTRODUCTION
+                 Technical report writing is a skill that is different from informal writing – letters,
+                 notes, email – and, like all skills, needs the practice to master them. The
+                 SAEINDIA AEROTHON – ROTORCRAFT SYSTEMS CHALLENGE (UAS) –
+                 DESIGN, BUILD AND FLY CONTEST 2026 provides an excellent opportunity
+                 for students to exercise this skill. This document provides guidelines to help
+                 design teams write clear, concise, and data-rich reports.
+
+6.2 ORIGINAL WORK
+
+                 The Technical Design Report shall be the team’s original work for the current
+                 contest year. Resubmissions of previous and current year’s design reports will
+                 not be accepted. Recitation of previous year’s work is acceptable if and only if
+                 appropriately cited and credited to the original author(s). Plagiarism is forbidden
+                 in industry and academic practice. All references, quoted text and reused
+                 images from any source shall have an appropriate citation within the text and
+                 within the Technical Design Report’s table of references, providing credit to the
+                 original author and editor.
+
+                 Reports may be checked against previous and current years’ submissions to
+                 determine if re-use, copying, or other elements of plagiarism are indicated.
+
+                 For the SAEINDIA AEROTHON – ROTORCRAFT SYSTEMS CHALLENGE
+                 (UAS) – DESIGN, BUILD AND FLY CONTEST 2026, plagiarism is defined as
+                 any of the following:
+
+                 a) Use of information from textbooks, reports, or other published material
+                    without proper citation
+                 b) Use of sections or work from previous SAE Aero Design contests without
+                    proper citation
+
+                 If plagiarism is detected in the design report, the team will be disqualified, or
+                 points will be deducted as deemed by the rules committee/ jury depending on
+                 the amount of plagiarized content present in the design report.
+
+
+SAEINDIA AEROTHON – ROTORCRAFT SYSTEMS CHALLENGE (UAS) – DESIGN, BUILD AND FLY CONTEST 2026   PAGE | 45
+                 The SAEINDIA AEROTHON – ROTORCRAFT SYSTEMS CHALLENGE (UAS)
+                 – DESIGN, BUILD AND FLY CONTEST 2026 Rules Committee & SAEINDIA
+                 has the sole discretion to determine whether plagiarism is indicated, and the
+                 above rules are enacted. The above rules may be implemented at any time
+                 before, during, or for up to six (6) months after the contest.
+
+6.3 ORGANIZATION OF CONTENTS
+                 Reports are written for a person or group to read, and these readers have a
+                 purpose for reading the report. In the SAE contest, the readers are the jury, and
+                 their purpose in reading is to grade the paper. Therefore, the design team
+                 authors should write the design report using techniques that make it easy for the
+                 jury to grade them. Organizing the report for the reader's purpose is the first
+                 technique for effective technical writing.
+                 Outline - The judge’s grading criteria predominantly depend on the technical
+                 aspects. So, the teams are expected to,
+
+                 •   Explain the team’s thought processes and engineering philosophy that
+                     drove them to their conclusions.
+                 •   Detail the methods, procedures, and where applicable, the
+                     calculations used to arrive at the presented solution.
+                 •    Covering these topics
+                         ❖ UAS configuration selection
+                         ❖ UAS design includes rotor arm, hub, landing gear, etc.
+                         ❖ Subsystem Selection
+                         ❖ UAS Performance
+                         ❖ UAS C.G., stability, and control
+                         ❖ Computational Analysis
+                         ❖ Other as appropriate
+                 It also covers the administrative aspects of the report – page limits, formats, and
+                 specific graphs and drawings. Although it may be harder to write the report
+                 to this outline, it will be easier for the jury to grade it. This outline also forces the
+                 team to address topics the jury must grade and develop necessary data.
+
+
+
+
+SAEINDIA AEROTHON – ROTORCRAFT SYSTEMS CHALLENGE (UAS) – DESIGN, BUILD AND FLY CONTEST 2026     PAGE | 46
+6.4 WRITING PROCESS
+                 Writing a multi-page design report can be made less daunting by using a multi-
+                 step process. The first step is described above, generating an outline that
+                 addresses the reader’s purpose. The next steps, described below, help in
+                 generating a data-rich, well-edited design report.
+
+                 Allocate Pages – Allocate 40 pages to the sections of the outline. The
+                 allocations should reflect the emphasis on areas of the team’s design. Do this
+                 before writing begins and adjust after reviewing the first draft. For each page of
+                 the design report, define the topic to be discussed and the message to be
+                 delivered. Make writing assignments for each page. Giving authors page-by-
+                 page assignments makes it easier to attack the writing – they are writing only
+                 one page at a time.
+
+                 Create the Figures – Most juries will be engineers, and engineers are
+                 graphically inclined - they can understand a concept more easily when looking
+                 at a picture. Therefore, build each page around at least one figure. Create the
+                 figures first and review them before starting to write. Each figure needs a
+                 message which should be summarized in the figure title. Make the figures data-
+                 rich, but legible (9-point font is a minimum size - another advantage of using
+                 figures is that the rules do not constrain type font or spacing on figures).
+                 Equations can be incorporated in figures to save space.
+
+                 Draft the Text - Use text to highlight, explain, or further develop the major points
+                 of the figure. Writing guidelines for clarity and succinctness are presented in a
+                 subsequent section.
+
+                 Edit the Text and Figures – Take the time to edit the document at least twice. A
+                 good approach is to perform one edit cycle based on a group review of the draft
+                 document (called a Red Team). Have the Red Team members read the
+                 document as juries, supplying them with a scoring sheet and a copy of the rules.
+
+                 Create the Final Document – Although several persons may contribute to the
+                 writing process, one team member should make the final version. This person
+                 works to achieve a consistent style to the text and to make the messages
+
+
+SAEINDIA AEROTHON – ROTORCRAFT SYSTEMS CHALLENGE (UAS) – DESIGN, BUILD AND FLY CONTEST 2026   PAGE | 47
+                 consistent.
+
+                 Schedule the Effort – Although this is the first step, it is described last so that the
+                 reader can see what the team needs to schedule! A good report takes more
+                 than a week to create. One month is a guideline for the duration of the writing
+                 effort. Create a schedule of the above tasks and status it regularly. An efficient
+                 method is to establish the outline, page allocations, and figures early in the
+                 project, so the team can generate the necessary data as the design progresses.
+                 This reduces both the last-minute cram and the amount of unused
+                 documentation.
+
+6.5 DESIGN REPORT SPECIFICATIONS
+
+    6.5.1        Page Limit
+                 The design report must not exceed forty (40) single-spaced, typewritten pages,
+                 cover page, table of contents and appendix. The maximum limit of the document
+                 is given below:
+                                Document                     Max. Number of Pages
+                 Main content                                          30
+                 Appendix- additional supporting material              10
+                 Note: Statement of Compliance will not be counted toward the 40-page limit.
+
+    6.5.2        Electronic Report Format
+                 All reports must be submitted in (.PDF) format only. The document should be
+                 submitted electronically, and no handwritten documents will be accepted.
+
+    6.5.3        Font
+                 The minimum font size and type is Arial 12 point proportional.
+
+    6.5.4        Margin
+                 The report margins shall be: 1” Left, 0.5” right, 0.5” top, and 0.5” bottom. Each
+                 page, except the cover page, Certificate of Compliance, 2D Drawing and
+                 technical data sheet shall include a page number.
+
+    6.5.5        Page size
+                 All report pages shall be A4 portrait format.
+
+
+SAEINDIA AEROTHON – ROTORCRAFT SYSTEMS CHALLENGE (UAS) – DESIGN, BUILD AND FLY CONTEST 2026   PAGE | 48
+    6.5.6        Cover page
+                 All Design Reports must feature a cover page that states the team’s name,
+                 college or university, and team number. The cover page will count against the
+                 30-page limit.
+    6.5.7        Submission of Reports
+                 Teams are required to upload technical reports to PDF file by the deadline date
+                 at the web link.
+
+6.6 ELECTRONIC DOCUMENT SPECIFICATIONS
+
+    6.6.1        Format Size
+                 Plan sheet must be in A3 page (PDF) format (11 x 17 inches). Plans must only
+                 consist of one (1) page and must have the US-standard third-order projection.
+
+    6.6.2        Required Views
+                 The plans shall consist of a standard aeronautical three-view, using a US-
+                 standard third order projection, i.e., right side view in the lower left with the nose
+                 pointing right, top view above the right-side view also with the nose pointing
+                 right, and front view in the lower right.
+
+    6.6.3        Dimensions
+                 At a minimum, the UAS must have length, width, height, and CG location
+                 marked clearly and dimensioned in the submitted engineering drawings. All
+                 dimensions must be in Metric units to an appropriate level of precision. (Hint:
+                 four decimal places are too many!)
+
+    6.6.4        Summary Data
+                 The plans must also contain a table with a summary of pertinent UAS data such
+                 as dimensions, empty weight, motor/engine make and model.
+
+    6.6.5        Weight and Balance Data
+                 The plans must also contain a weight and balance table with a summary of
+                 pertinent UAS equipment (motor, battery, payload, etc.), location from datum in
+                 metric units, moment arms and resultant moment of CG.
+
+
+
+SAEINDIA AEROTHON – ROTORCRAFT SYSTEMS CHALLENGE (UAS) – DESIGN, BUILD AND FLY CONTEST 2026   PAGE | 49
+                 • All UAS must have a designated UAS datum indicated on the 2D
+                     drawings.
+                 • All UAS drawings must indicate the following static CG margins: forward
+                     CG limit, aft CG limit and empty weight CG. Hint: Weight and Balance
+                     worksheet should correspond with static margins on 2D drawings.
+
+    6.6.6        Other Required Markings
+                 The plans must be marked with the team’s name and university or institute
+                 name.
+
+6.7 SUBMISSION DEADLINES
+                 The Design Report and 2D drawing plans must be electronically submitted to
+                 SAEINDIA no later than the date indicated on the Action. Neither the Organizer
+                 nor the SAEINDIA is responsible for any lost or misdirected reports, plans, or
+                 Server routing delays. SAEINDIA will not receive any paper copies of the reports
+                 through regular mail or email.
+
+
+7.0.             PRESENTATION GUIDELINES FOR PHASE 1
+7.1 INTRODUCTION
+                 Creating slides for presentation is a skill that is different from design report.
+                 PowerPoint Presentations skill is one of the effective visual communication tools
+                 that create the best first impression among the targeted audience. The
+                 SAEINDIA AEROTHON – ROTORCRAFT SYSTEMS CHALLENGE (UAS) –
+                 DESIGN, BUILD AND FLY CONTEST 2026 provides an excellent opportunity
+                 for students to master their presentation skills and showcase their project to
+                 Jury.
+
+7.2 GENERAL
+                 Presentation slides should effectively capture the work of the team. Follow a
+                 logical sound structure to organize the presentation. Here are some tips for
+                 making an effective presentation
+
+                 •   Plan and prepare your presentation professionally to deliver an
+                     effective message.
+
+
+SAEINDIA AEROTHON – ROTORCRAFT SYSTEMS CHALLENGE (UAS) – DESIGN, BUILD AND FLY CONTEST 2026   PAGE | 50
+                 •       Use visual points effectively, do not overwhelm your audience. A
+                         good PowerPoint presentation visual shouldn't complicate your
+                         message.
+                 •       Practice to perfection; rehearse your timing and delivery so that your
+                         points land as practiced with the Jury.
+                 •       Present with a relaxed calm and confident outward projection.
+                         Give your audience warmth, excitement, and energy.
+                 •       Avoid typos, cheesy clip art, and miscues like reading directly from your
+                         slides.
+
+                 The team can identify preferably one or two team members to present their work
+                 in a compelling and influential manner to the Jury.
+
+7.3 ORGANIZATION OF CONTENTS
+                 Similar to the design report, the presentation must all contain the following,
+                     •    Explain the team’s thought processes and engineering philosophy that
+                          drove them to their conclusions
+                     •    Detail the methods, procedures, and where applicable, the calculations
+                          used to arrive at the presented solution
+                     •    Covering these topics
+                              ❖ UAS configuration selection
+                              ❖ UAS design includes rotor arm, hub, landing gear, etc.
+                              ❖ Subsystem Selection
+                              ❖ UAS Performance
+                              ❖ UAS C.G., stability and control
+                              ❖ Computational Analysis
+                              ❖ Other as appropriate
+
+                 Note: The teams/students shall have all the CAD and CAE files in the
+                 PC or Laptop they will be using during the presentation. During the
+                 presentation, the teams can open the CAD model files and
+                 Computational analysis files in the appropriate software and present
+                 them to the jury for validation. The teams are expected to have the
+                 following documents ready during their presentation
+
+
+SAEINDIA AEROTHON – ROTORCRAFT SYSTEMS CHALLENGE (UAS) – DESIGN, BUILD AND FLY CONTEST 2026       PAGE | 51
+                 1. CAD files of the UAS
+
+                 2. FEA input file along with format details
+
+                 3. CFD input file along with format details.
+
+7.4 TIME LIMIT
+                 While there is no limit on the number of PowerPoint slides, Teams needs to
+                 complete their presentation within the allotted 15 minutes. In case teams are
+                 unable to complete their whole presentation, they would be stopped at
+                 whatever point they are at after the end of 15 minutes. Post completion of the
+                 presentation, there will be 10 minutes of Q&A with Jury Panel.
+
+
+
+
+SAEINDIA AEROTHON – ROTORCRAFT SYSTEMS CHALLENGE (UAS) – DESIGN, BUILD AND FLY CONTEST 2026   PAGE | 52
+8.0.             REFERENCE BOOKS
+                 1. Introduction to UAS Systems - Paul Fahlstrom and Thomas Gleason
+                 2. Unmanned Aircraft Systems: UASS Design, Development and
+                     Deployment - Reg Austin
+                 3. Advanced Aircraft Design: Conceptual Design, Analysis and
+                     Optimization of Subsonic Civil Airplanes - Egbert Torenbeek
+                 4. Aircraft design: A conceptual approach - Daniel P. Raymer
+                 5. Introduction to Flight- John D. Anderson
+                 6. Fundamentals of Aerodynamics - John D. Anderson
+                 7. Airplane Performance and Design - John D. Anderson
+                 8. Flight stability and automatic control, Robert C. Nelson
+                 9. Airframe stress analysis and sizing – Michael Chun-Yung Niu
+                 10. Aircraft Structures, T.H.G. MEGSON (4th Edition)
+                 11. https://docs.px4.io/master/en/concept/ (Ty Audronis , Designing Purpose-
+                     Built Drones for Ardupilot Pixhawk 2.1: Build drones with Ardupilot)
+
+
+
+
+SAEINDIA AEROTHON – ROTORCRAFT SYSTEMS CHALLENGE (UAS) – DESIGN, BUILD AND FLY CONTEST 2026   PAGE | 53
+                                                APPENDIX A
+
+
+                           STATEMENT OF COMPLIANCE
+                                             Certification of Qualification
+
+
+
+     Team Name: ________________
+     University/Institute: ___________
+     Faculty Advisor: ______________
+
+     Faculty Advisor’s Email: _______
+
+
+    Statement of Compliance:
+
+    As Faculty Advisor, I certify that the registered team members are enrolled in collegiate
+    courses. This team has designed the UAS for the SAE AEROTHON 2026 contest, without
+    direct assistance from professional engineers, R/C model experts or pilots, or related
+    professionals.
+
+
+
+
+      Signature of Faculty Advisor                                                            Date
+
+
+
+    Team Captain Information:
+
+     Team Captain’s Name:
+
+     Team Captain's E-mail:
+
+     Team Captain’s Phone:
+
+    Note:
+            A copy of this statement needs to be included in your Design Report as page 2
+
+SAEINDIA AEROTHON – ROTORCRAFT SYSTEMS CHALLENGE (UAS) – DESIGN, BUILD AND FLY CONTEST 2026          PAGE | 54
+                                                APPENDIX B
+
+                       Engineering Change Request Form
+
+                                              Change Request
+      Team Name:                                             Team ID:
+      Institute:
+      Change Requester:                                      Date:
+      Change Requests information
+      (Fill in appropriate information)
+      Change Description:
+
+
+
+      Details of Change:
+
+
+
+      Alternates considered before selecting this change:
+
+
+
+
+      Impact to previous Design:
+
+
+
+
+      Why proposed change request should be approved? Explain
+
+
+
+
+      What are the consequences if proposed change (s) is not implemented? Explain
+
+
+
+
+            I have reviewed the information contained in this change request form and agree
+
+
+
+
+    Signature of Team Lead                                               Signature of Faculty Advisor
+
+    *Use additional sheets if the information cannot be accommodated in above form
+
+
+SAEINDIA AEROTHON – ROTORCRAFT SYSTEMS CHALLENGE (UAS) – DESIGN, BUILD AND FLY CONTEST 2026      PAGE | 55
+                                                APPENDIX C
+
+
+                                     Geofence Information
+            The specific geofence parameters for Phase 2 will be made available to all qualified
+            teams following the completion of Phase 1. These details will be shared in advance
+            to ensure teams have sufficient time to prepare for the subsequent phase of the
+            competition. Only teams that successfully qualify for Phase 2 will receive the
+            necessary geofence information to proceed.
+
+
+
+
+SAEINDIA AEROTHON – ROTORCRAFT SYSTEMS CHALLENGE (UAS) – DESIGN, BUILD AND FLY CONTEST 2026   PAGE | 56
+
