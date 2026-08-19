@@ -599,3 +599,214 @@ class AlignmentConvergesTests(unittest.TestCase):
         stage = self._stage(mav)
         status = run(stage, mav, self.clock, ticks=3000)
         self.assertIs(status, py_trees.common.Status.SUCCESS)
+
+
+class ZigzagSweepTests(unittest.TestCase):
+    """The sweep searches OUTWARD from where it started, not round in a circle.
+
+    THE OPERATOR'S INSTRUCTION: "instead of rotating i want it to oscillate
+    like 30 to the right then 60 to the left then 90 to the right and then 120
+    to the left and so on".
+
+    WHY IT IS BETTER, not merely different. The gate is in front of the
+    aircraft far more often than it is behind it -- the start pad faces it.
+    A one-way rotation gives the most likely headings no priority at all, so
+    a banner 30 degrees to the right costs one step if you happen to turn
+    right and eleven if you turn left. Expanding alternately means the nearest
+    headings are always tried first, and the worst case is still one full
+    turn.
+    """
+
+    def setUp(self):
+        self.clock = Clock()
+
+    def _headings(self, mav, stage, limit=12):
+        seen = []
+        for _ in range(4000):
+            if stage.update() is not py_trees.common.Status.RUNNING:
+                break
+            self.clock.advance(0.1)
+            h = round(math.degrees(stage._target_yaw))
+            if not seen or seen[-1] != h:
+                seen.append(h)
+            if len(seen) >= limit:
+                break
+        return seen
+
+    def test_it_alternates_outward_from_the_start_heading(self):
+        mav = SweepMav(banner_at=None)
+        stage = AlignToBanner(mav, clock=self.clock, dwell_s=0.5,
+                              step_rad=math.radians(30.0))
+        stage.initialise()
+        seen = self._headings(mav, stage, limit=7)
+        self.assertEqual(seen[:7], [0, -30, 30, -60, 60, -90, 90],
+                         f"not an expanding zigzag: {seen}")
+
+    def test_the_first_move_is_to_the_RIGHT(self):
+        """"30 to the right" first, as asked."""
+        mav = SweepMav(banner_at=None)
+        stage = AlignToBanner(mav, clock=self.clock, dwell_s=0.5,
+                              step_rad=math.radians(30.0))
+        stage.initialise()
+        seen = self._headings(mav, stage, limit=2)
+        self.assertLess(seen[1], seen[0])
+
+    def test_it_still_covers_a_full_turn(self):
+        mav = SweepMav(banner_at=None)
+        stage = AlignToBanner(mav, clock=self.clock, dwell_s=0.5,
+                              step_rad=math.radians(30.0))
+        stage.initialise()
+        run(stage, mav, self.clock)
+        self.assertEqual(len(stage.step_reports), 12)
+        covered = sorted(round(r["heading_deg"]) for r in stage.step_reports)
+        self.assertEqual(len(set(covered)), 12, f"repeated a heading: {covered}")
+
+    def test_a_banner_just_to_the_right_is_found_in_ONE_step(self):
+        """The whole point: nearest first."""
+        mav = SweepMav(banner_at=math.radians(-30.0),
+                       banner_arc=math.radians(20.0))
+        stage = AlignToBanner(mav, clock=self.clock, dwell_s=0.5,
+                              step_rad=math.radians(30.0))
+        stage.initialise()
+        status = run(stage, mav, self.clock)
+        self.assertIs(status, py_trees.common.Status.SUCCESS)
+        self.assertLessEqual(len(stage.step_reports), 2,
+                             "took the long way round to a banner 30 deg away")
+
+    def test_a_banner_just_to_the_LEFT_is_found_in_two_steps(self):
+        mav = SweepMav(banner_at=math.radians(30.0),
+                       banner_arc=math.radians(20.0))
+        stage = AlignToBanner(mav, clock=self.clock, dwell_s=0.5,
+                              step_rad=math.radians(30.0))
+        stage.initialise()
+        status = run(stage, mav, self.clock)
+        self.assertIs(status, py_trees.common.Status.SUCCESS)
+        self.assertLessEqual(len(stage.step_reports), 3)
+
+    def test_headings_are_reported_as_offsets_that_make_sense(self):
+        mav = SweepMav(banner_at=None)
+        stage = AlignToBanner(mav, clock=self.clock, dwell_s=0.5,
+                              step_rad=math.radians(30.0))
+        stage.initialise()
+        run(stage, mav, self.clock)
+        for r in stage.step_reports:
+            self.assertGreaterEqual(r["heading_deg"], -180.5)
+            self.assertLessEqual(r["heading_deg"], 180.5)
+
+
+class StrafeWhenYawStallsTests(unittest.TestCase):
+    """Yaw cannot centre a long structure. Translation can.
+
+    MEASURED, seed 1001 run 9, with the banner locked on 12 frames of 12:
+
+        correction 1: bearing +0.28 at -30 deg -> commanding -37
+        correction 2: bearing +0.29 at -37 deg -> commanding -44
+
+    Seven degrees of yaw toward a point target should cut a 0.28 bearing by
+    about 0.23. It moved +0.01, the wrong way -- because the gate runs away
+    from the aircraft, so yawing toward it brings more of it into frame and
+    the centroid slides right by as much as the rotation moved it left.
+
+    The operator called this before the measurement did: "move the drone left
+    and right in a horizontal way so that the banner comes in front".
+    """
+
+    def setUp(self):
+        self.clock = Clock()
+
+    class Stubborn(SweepMav):
+        """A banner whose bearing does not respond to yaw, as measured."""
+
+        def __init__(self, bearing=0.28, yields_to_strafe=True):
+            super().__init__(banner_at=0.0, banner_arc=math.radians(30.0))
+            self._fixed = bearing
+            self.yields = yields_to_strafe
+            self.strafed = 0
+
+        def goto(self, x, y, z, yaw=0.0):
+            if (x, y) != self._pos[:2]:
+                self.strafed += 1
+                if self.yields:
+                    self._fixed *= 0.45      # coming into line with it
+            self._pos = (x, y, z)
+            super().goto(x, y, z, yaw)
+
+        def banner_identified(self):
+            return True
+
+        def banner_bearing(self):
+            return self._fixed
+
+    def _stage(self, mav, **kw):
+        kw.setdefault("clock", self.clock)
+        kw.setdefault("dwell_s", 0.4)
+        kw.setdefault("align_dwell_s", 0.2)
+        stage = AlignToBanner(mav, **kw)
+        stage.initialise()
+        return stage
+
+    def test_it_strafes_once_yaw_stops_closing(self):
+        mav = self.Stubborn()
+        stage = self._stage(mav)
+        run(stage, mav, self.clock, ticks=2000)
+        self.assertGreater(mav.strafed, 0,
+                           "kept yawing at a bearing that never improved")
+
+    def test_a_strafe_STEP_does_not_also_rotate(self):
+        """Yaw and roll both belong here -- the operator asked for exactly
+        that -- but not in the same command. Rotating while translating
+        reintroduces the coupling that made yaw useless: the centroid shift
+        from the rotation would be indistinguishable from the one the
+        translation is trying to measure."""
+        mav = self.Stubborn()
+        stage = self._stage(mav)
+        prev = None
+        for _ in range(2000):
+            if stage.update() is not py_trees.common.Status.RUNNING:
+                break
+            self.clock.advance(0.1)
+            if len(mav.gotos) >= 2:
+                a, b = mav.gotos[-2], mav.gotos[-1]
+                moved = (a[0], a[1]) != (b[0], b[1])
+                turned = abs(a[3] - b[3]) > 1e-6
+                self.assertFalse(moved and turned,
+                                 f"translated and rotated at once: {a} -> {b}")
+            if mav.strafed >= 2:
+                break
+
+    def test_it_strafes_toward_the_side_the_banner_is_on(self):
+        """An object off to starboard comes into line as you move starboard."""
+        mav = self.Stubborn(bearing=0.28)
+        stage = self._stage(mav)
+        start = mav.pos()[:2]
+        for _ in range(2000):
+            if stage.update() is not py_trees.common.Status.RUNNING:
+                break
+            self.clock.advance(0.1)
+            if mav.strafed:
+                break
+        moved = (mav.pos()[0] - start[0], mav.pos()[1] - start[1])
+        # heading ~0 (east), banner to starboard -> -y in ENU
+        self.assertLess(moved[1], -0.1, f"strafed the wrong way: {moved}")
+
+    def test_a_strafe_that_works_ends_in_alignment(self):
+        mav = self.Stubborn(yields_to_strafe=True)
+        status = run(self._stage(mav), mav, self.clock, ticks=4000)
+        self.assertIs(status, py_trees.common.Status.SUCCESS)
+
+    def test_a_strafe_that_never_helps_FAILS_CLOSED(self):
+        """Sliding sideways for ever is not better than hunting for ever."""
+        mav = self.Stubborn(yields_to_strafe=False)
+        status = run(self._stage(mav), mav, self.clock, ticks=6000)
+        self.assertIs(status, py_trees.common.Status.FAILURE)
+        self.assertIn("sideways", mav.abort_reason)
+
+    def test_a_banner_that_yaw_CAN_centre_never_strafes(self):
+        """The strafe is a fallback, not the normal path: it costs mission
+        time and moves the aircraft near the gate."""
+        mav = SweepMav(banner_at=math.radians(12.0),
+                       banner_arc=math.radians(30.0))
+        stage = self._stage(mav)
+        run(stage, mav, self.clock, ticks=3000)
+        moved = [g for g in mav.gotos if g[:2] != (0.0, 0.0)]
+        self.assertEqual(moved, [], "strafed when yaw was working")

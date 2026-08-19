@@ -432,3 +432,89 @@ class StageWiringTests(unittest.TestCase):
         stage.initialise()
         self.assertIs(stage.update(), py_trees.common.Status.RUNNING)
         self.assertTrue(mav.gotos)
+
+
+class GateAdvanceTests(unittest.TestCase):
+    """Passing THROUGH the gate is a distance, not a detector state.
+
+    THE OPERATOR'S REPORT: "the drone thinks it has been into the drop
+    location because it detected the banner". ApproachBanner ended when the
+    banner left the top of the frame, which happens when you get close to the
+    board -- so a detection was being treated as arrival and the mission ran
+    the delivery-zone stages while still at the mouth.
+    """
+
+    def _stage(self, mav, **kw):
+        from mission_bt.mission_tree import GateAdvance
+        kw.setdefault("advance_m", 10.0)
+        kw.setdefault("alt", 3.0)
+        stage = GateAdvance(mav, **kw)
+        stage.initialise()
+        return stage
+
+    def test_it_does_not_arrive_just_because_the_banner_is_visible(self):
+        mav = RoutedMav(at=(0.0, 0.0, 3.0))
+        mav.banner_z = 1.0
+        stage = self._stage(mav)
+        self.assertIs(stage.update(), py_trees.common.Status.RUNNING)
+
+    def test_it_arrives_after_the_configured_DISTANCE(self):
+        mav = RoutedMav(at=(0.0, 0.0, 3.0))
+        stage = self._stage(mav, advance_m=10.0)
+        stage.update()
+        mav._pos = (10.0, 0.0, 3.0)
+        self.assertIs(stage.update(), py_trees.common.Status.SUCCESS)
+
+    def test_the_target_is_LATCHED_not_recomputed_each_tick(self):
+        """A target recomputed from the current position recedes as fast as
+        the aircraft chases it -- the defect that pitched arena 1002 to 50
+        degrees."""
+        mav = RoutedMav(at=(0.0, 0.0, 3.0))
+        stage = self._stage(mav)
+        stage.update()
+        first = stage._target
+        for step in (2.0, 4.0, 6.0):
+            mav._pos = (step, 0.0, 3.0)
+            stage.update()
+        self.assertEqual(stage._target, first)
+
+    def test_it_advances_along_the_ALIGNED_heading(self):
+        mav = RoutedMav(at=(0.0, 0.0, 3.0))
+        mav._yaw = math.pi / 2.0            # aligned north
+        stage = self._stage(mav, advance_m=10.0)
+        stage.update()
+        self.assertAlmostEqual(stage._target[0], 0.0, places=3)
+        self.assertAlmostEqual(stage._target[1], 10.0, places=3)
+
+    def test_obstacle_avoidance_is_ON_for_the_leg(self):
+        """The corridor walls are close and red ground is confirmed by now."""
+        mav = RoutedMav(at=(0.0, 0.0, 3.0))
+        stage = self._stage(mav)
+        stage.update()
+        self.assertTrue(mav.avoidance)
+
+    def test_avoidance_is_released_when_the_leg_ends(self):
+        mav = RoutedMav(at=(0.0, 0.0, 3.0))
+        stage = self._stage(mav)
+        stage.update()
+        mav._pos = (10.0, 0.0, 3.0)
+        stage.update()
+        stage.terminate(py_trees.common.Status.SUCCESS)
+        self.assertFalse(mav.avoidance)
+
+    def test_a_navigator_that_gets_stuck_FAILS_CLOSED(self):
+        mav = RoutedMav(at=(0.0, 0.0, 3.0))
+        stage = self._stage(mav)
+        stage.update()
+        mav.stuck = True
+        self.assertIs(stage.update(), py_trees.common.Status.FAILURE)
+        self.assertIn("gate", mav.abort_reason.lower())
+
+    def test_the_corridor_exit_pose_is_recorded_on_arrival(self):
+        """The return leg navigates back to it."""
+        mav = RoutedMav(at=(0.0, 0.0, 3.0))
+        stage = self._stage(mav)
+        stage.update()
+        mav._pos = (10.0, 0.0, 3.0)
+        stage.update()
+        self.assertIsNotNone(mav.corridor_exit_pose)

@@ -266,7 +266,9 @@ class AlignToBanner(py_trees.behaviour.Behaviour):
                  settle_tol_rad=math.radians(6.0), settle_timeout_s=8.0,
                  min_hit_ratio=0.6, min_samples=4, clock=None,
                  hfov_rad=1.0472, align_gain=0.8, align_dwell_s=1.0,
-                 max_corrections=8):
+                 max_corrections=8, min_fallback_hits=4,
+                 fallback_margin=0.5, strafe_step_m=1.5, max_strafes=6,
+                 stall_before_strafe=2):
         super().__init__("AlignToBanner")
         self.mav = mav
         self.tol = tol
@@ -292,11 +294,45 @@ class AlignToBanner(py_trees.behaviour.Behaviour):
         self.align_gain = float(align_gain)
         self.align_dwell_s = float(align_dwell_s)
         self.max_corrections = int(max_corrections)
+        # Fallback when a full turn produced no CONFIDENT dwell.
+        self.min_fallback_hits = int(min_fallback_hits)
+        self.fallback_margin = float(fallback_margin)
+        # Yaw cannot centre a long structure; translation can. See _strafe().
+        self.strafe_step_m = float(strafe_step_m)
+        self.max_strafes = int(max_strafes)
+        self.stall_before_strafe = int(stall_before_strafe)
         self.clock = clock or time.monotonic
         self.n_steps = max(1, int(round(2 * math.pi / self.step_rad)))
+        self.sweep_offsets = self._zigzag_offsets(self.step_rad, self.n_steps)
         self.step_index = 0
         self.step_reports = []
         self._reset()
+
+    @staticmethod
+    def _zigzag_offsets(step_rad, n):
+        """Headings to stare at, as offsets from where the sweep began.
+
+        EXPANDING ALTERNATELY, not round in a circle:
+
+            0, -30, +30, -60, +60, -90, +90, -120, +120, -150, +150, 180
+
+        The gate is in front of the aircraft far more often than behind it --
+        the start pad faces it. A one-way rotation gives the likeliest
+        headings no priority, so a banner 30 degrees to the right costs one
+        step if you happen to turn that way and eleven if you do not. This
+        tries the nearest headings first and still covers a full turn in the
+        same number of steps.
+
+        Right first (negative in ENU), as the operator asked for.
+        """
+        offsets = [0.0]
+        k = 1
+        while len(offsets) < n:
+            offsets.append(-k * step_rad)
+            if len(offsets) < n:
+                offsets.append(k * step_rad)
+            k += 1
+        return offsets[:n]
 
     def _reset(self):
         self.phase = self.SEARCH
@@ -310,10 +346,14 @@ class AlignToBanner(py_trees.behaviour.Behaviour):
         self._best_bearing = None
         self._stable = 0
         self._last_seen = 0.0
+        self._sweep_origin = 0.0
         self._align_target = None
         self._align_settled = False
         self._align_t0 = 0.0
         self._corrections = 0
+        self._strafes = 0
+        self._stalled = 0
+        self._last_bearing = None
         self._t = 0
 
     def initialise(self):
@@ -357,7 +397,9 @@ class AlignToBanner(py_trees.behaviour.Behaviour):
         if self._anchor is None:
             self._anchor = self.mav.pos()
         if self._target_yaw is None:
-            self._target_yaw = self.mav.yaw()
+            self._sweep_origin = self.mav.yaw()
+            self._target_yaw = self._wrap(self._sweep_origin
+                                          + self.sweep_offsets[0])
             self._enter(self.SETTLE)
 
         if self.phase is self.CENTRE:
@@ -424,17 +466,119 @@ class AlignToBanner(py_trees.behaviour.Behaviour):
             self._align_settled = False
             self._align_t0 = self.clock()
             self._corrections = 0
+            self._strafes = 0
+            self._stalled = 0
+            self._last_bearing = None
             return py_trees.common.Status.RUNNING
 
         if len(self.step_reports) >= self.n_steps:
             return self._give_up()
 
         self.step_index += 1
-        self._target_yaw = self._wrap(self._target_yaw + self.step_rad)
+        self._target_yaw = self._wrap(self._sweep_origin
+                                      + self.sweep_offsets[self.step_index])
         self._enter(self.SETTLE)
         return py_trees.common.Status.RUNNING
 
+    def _best_of_turn(self):
+        """After a full turn with nothing CONFIDENT, take the best heading.
+
+        MEASURED, seed 1001, run 5. The whole turn looked like this:
+
+            -0 0/11; 30 0/12; 60 0/11; 90 0/12; 120 0/12; 150 0/12;
+            180 0/12; -150 0/12; -120 0/12; -90 0/12; -60 6/12; -30 0/12
+
+        Exactly one heading saw the banner at all, on half its frames, and the
+        stage failed the mission because half is under the 0.6 confidence
+        floor. That floor exists to stop the aircraft locking onto a decoy --
+        but a decoy needs something to be confused WITH, and eleven headings
+        saw nothing whatsoever.
+
+        So: a confident dwell still wins immediately, wherever it occurs. If
+        the turn finishes without one, the best heading is taken provided it
+        is unambiguous -- enough hits to be more than a flicker, and no other
+        heading close to it. This is the "best candidate across the whole
+        turn" rule the spec asked for originally, kept as a fallback rather
+        than as the primary rule so a good banner is still acted on at once.
+        """
+        ranked = sorted(self.step_reports, key=lambda r: r["hits"],
+                        reverse=True)
+        if not ranked:
+            return None
+        best = ranked[0]
+        runner_up = ranked[1]["hits"] if len(ranked) > 1 else 0
+        if best["hits"] < self.min_fallback_hits:
+            return None
+        if runner_up > best["hits"] * float(self.fallback_margin):
+            return None                      # two candidates: too ambiguous
+        return best
+
+    def _strafe(self, bearing):
+        """Step sideways, holding heading, to bring the banner in front.
+
+        Perpendicular to the current heading, toward the side the banner is
+        on: an object off to starboard comes into line as the aircraft moves
+        to starboard. Heading is held throughout -- rotating here would
+        reintroduce the very coupling that made yaw useless.
+
+        Bounded, and it re-measures after every step, so a strafe that does
+        not help stops as quickly as a yaw that does not.
+        """
+        x, y, z = self._anchor
+        psi = self._align_target
+        # Starboard in ENU is psi - 90 degrees; port is psi + 90.
+        side = -1.0 if bearing > 0 else 1.0
+        ang = psi + side * (math.pi / 2.0)
+        step = self.strafe_step_m
+        self._anchor = (x + step * math.cos(ang), y + step * math.sin(ang), z)
+        self._strafes += 1
+        self._stalled = 0
+        self._last_bearing = None
+        # A strafe changes the geometry the yaw budget was being spent
+        # against, so the budget starts again from the new position. Without
+        # this the correction count ran out (8) long before the strafe count
+        # did (6), and the stage failed complaining about yaw while the
+        # sideways steps that were meant to rescue it had barely begun.
+        self._corrections = 0
+        self._align_settled = True          # heading unchanged; only position
+        self._align_t0 = self.clock()
+        self.mav.log(
+            f"AlignToBanner: yaw stopped closing on the banner "
+            f"(bearing {bearing:+.2f}); strafing {step:.1f} m "
+            f"{'starboard' if side < 0 else 'port'} to bring it in front "
+            f"({self._strafes}/{self.max_strafes})")
+        if self._strafes > self.max_strafes:
+            reason = (f"AlignToBanner: {self._strafes} sideways steps did not "
+                      f"bring the banner in front (bearing {bearing:+.2f})")
+            self.feedback_message = reason
+            self.mav.abort_reason = reason
+            self.mav.log(reason, warn=True)
+            return py_trees.common.Status.FAILURE
+        self._hold(self._align_target)
+        return py_trees.common.Status.RUNNING
+
     def _give_up(self):
+        fallback = self._best_of_turn()
+        if fallback is not None:
+            self.mav.log(
+                f"AlignToBanner: no dwell reached "
+                f"{self.min_hit_ratio * 100:.0f}%, but "
+                f"{fallback['heading_deg']:.0f} deg saw the banner on "
+                f"{fallback['hits']}/{fallback['samples']} frames and nothing "
+                f"else came close; aligning to it")
+            self._target_yaw = math.radians(fallback["heading_deg"])
+            self._align_target = self._target_yaw
+            self._align_settled = False
+            self._align_t0 = self.clock()
+            self._corrections = 0
+            self._strafes = 0
+            self._stalled = 0
+            self._last_bearing = None
+            self._stable = 0
+            self._last_seen = self.clock()
+            self._enter(self.CENTRE)
+            return py_trees.common.Status.RUNNING
+
         why = (self.mav.banner_rejection_summary()
                if hasattr(self.mav, "banner_rejection_summary")
                else "no detail available")
@@ -557,6 +701,36 @@ class AlignToBanner(py_trees.behaviour.Behaviour):
             self.mav.abort_reason = reason
             self.mav.log(reason, warn=True)
             return py_trees.common.Status.FAILURE
+
+        # DID THE LAST CORRECTION ACTUALLY HELP?
+        #
+        # MEASURED, seed 1001 run 9, with the banner locked 12/12:
+        #
+        #     correction 1: bearing +0.28 at -30 deg -> commanding -37
+        #     correction 2: bearing +0.29 at -37 deg -> commanding -44
+        #
+        # Seven degrees of yaw toward a point target should cut a bearing of
+        # 0.28 by about 0.23. It moved +0.01, the wrong way.
+        #
+        # The gate is not a point. It is a long structure running away from
+        # the aircraft, so yawing toward it brings MORE of it into frame and
+        # the box centroid slides right by as much as the rotation moved it
+        # left. The two cancel, and no amount of yaw will centre it.
+        #
+        # Translation does what rotation cannot: strafing toward the side the
+        # banner is on brings the aircraft into line with it. The operator
+        # called this before the measurement did -- "move the drone left and
+        # right in a horizontal way so that the banner comes in front".
+        improved = (self._last_bearing is None
+                    or abs(bearing) < abs(self._last_bearing) - 0.03)
+        if not improved:
+            self._stalled += 1
+        else:
+            self._stalled = 0
+        self._last_bearing = bearing
+
+        if self._stalled >= self.stall_before_strafe:
+            return self._strafe(bearing)
 
         # Positive bearing means the banner is to the RIGHT of frame centre,
         # so the aircraft must yaw right, which is NEGATIVE yaw in ENU.
@@ -1073,6 +1247,99 @@ class ApproachBanner(py_trees.behaviour.Behaviour):
             f"approaching mouth from ({x:.1f}, {y:.1f}) toward "
             f"({self._target[0]:.1f}, {self._target[1]:.1f}) "
             f"heading {target_yaw:+.2f}")
+        return py_trees.common.Status.RUNNING
+
+
+class GateAdvance(py_trees.behaviour.Behaviour):
+    """Fly a measured distance THROUGH the gate, avoiding what is in the way.
+
+    WHAT THIS REPLACES
+
+        ApproachBanner: 1.5 m steps toward the banner, ending when the banner
+        left the top of the frame. That end condition is "I got close to it",
+        not "I went through it" -- so the mission treated a DETECTION as
+        arrival and carried on into the delivery-zone stages while still at
+        the gate. Watched live: "the drone thinks it has been into the drop
+        location because it detected the banner".
+
+        It also drove at the board. The banner marks the mouth; the aircraft
+        has to pass through it, and how far through is a distance, not a
+        detector state.
+
+    WHY A LATCHED WAYPOINT AND NOT A CARROT
+
+        The target is computed once, from where the aircraft was when the gate
+        was identified, and re-issued until reached. Recomputing it from the
+        current position every tick is the receding carrot that pitched the
+        aircraft to 50 degrees in arena 1002.
+
+    Obstacle avoidance is on for the whole leg: the corridor walls are close
+    and the run has already confirmed red ground by this point.
+    """
+
+    def __init__(self, mav, advance_m=10.0, alt=3.0, tol=1.0,
+                 timeout_ticks=600, clearance_m=DEFAULT_CLEARANCE_M):
+        super().__init__("GateAdvance")
+        self.mav = mav
+        self.advance_m = float(advance_m)
+        self.alt = alt
+        self.tol = float(tol)
+        self.timeout_ticks = int(timeout_ticks)
+        self.router = LegRouter(clearance_m=clearance_m, tol=tol)
+        self._target = None
+        self._t = 0
+
+    def initialise(self):
+        self._target = None
+        self._t = 0
+        self.router.reset()
+
+    def terminate(self, new_status):
+        self.mav.enable_avoidance(False)
+
+    def update(self):
+        self._t += 1
+        x, y, z = self.mav.pos()
+
+        if self._target is None:
+            psi = self.mav.yaw()
+            self._target = (x + self.advance_m * math.cos(psi),
+                            y + self.advance_m * math.sin(psi))
+            self.mav.enable_avoidance(True, hold_alt=self.alt)
+            self.mav.log(
+                f"gate identified and aligned; advancing {self.advance_m:.0f} m "
+                f"through it to ({self._target[0]:.1f}, {self._target[1]:.1f}) "
+                f"at {math.degrees(psi):+.0f} deg, avoidance on")
+
+        if math.hypot(self._target[0] - x, self._target[1] - y) <= self.tol:
+            self.mav.enable_avoidance(False)
+            self.mav.record_corridor_exit()
+            self.feedback_message = f"advanced {self.advance_m:.0f} m past the gate"
+            return py_trees.common.Status.SUCCESS
+
+        if self.mav.avoidance_stuck():
+            reason = (f"GateAdvance: the navigator could not find a way "
+                      f"through the gate after "
+                      f"{math.hypot(x - self._target[0], y - self._target[1]):.1f} m "
+                      f"remaining")
+            self.feedback_message = reason
+            self.mav.abort_reason = reason
+            return py_trees.common.Status.FAILURE
+
+        if self._t > self.timeout_ticks:
+            reason = (f"GateAdvance: {self.advance_m:.0f} m not covered in "
+                      f"{self._t} ticks")
+            self.feedback_message = reason
+            self.mav.abort_reason = reason
+            return py_trees.common.Status.FAILURE
+
+        status = self.router.fly(self.mav, self._target[0], self._target[1],
+                                 self.alt, self.mav.yaw())
+        if status is BLOCKED:
+            return _blocked(self, self.router)
+        self.feedback_message = (
+            f"advancing through the gate, "
+            f"{math.hypot(self._target[0] - x, self._target[1] - y):.1f} m to go")
         return py_trees.common.Status.RUNNING
 
 
@@ -2200,14 +2467,23 @@ def build_root(mav, node, p):
                       dwell_s=p.get('banner_dwell_s', 5.0),
                       min_hit_ratio=p.get('banner_min_hit_ratio', 0.6),
                       hfov_rad=p.get('camera_hfov', 1.0472)),
+        # LOWER ONLY ONCE SQUARED UP. Descending while still off to one side
+        # of the gate put the aircraft low and pointed at the board, and it
+        # drove into it. AlignToBanner now finishes with the aircraft in front
+        # of the banner (yaw to face it, roll to come into line -- never
+        # pitch), so this is a descent in place at the right spot.
         ClimbInPlace("DescendToCorridorAlt", mav, p['corridor_alt']),
         SetCameraPose("CameraForwardForCorridor2", mav, "FORWARD"),
         # Aligning to the banner is not the same as arriving at it: the gate
         # stands off the takeoff axis, and an aligned-but-not-approached
         # aircraft flew straight past it into a corner (audit A5).
-        ApproachBanner(mav, alt=p['corridor_alt'],
-                       clearance_m=p.get('redzone_clearance', 1.5),
-                       hfov_rad=p.get('camera_hfov', 1.0472)),
+        # A MEASURED DISTANCE THROUGH THE GATE, not "until the banner leaves
+        # the frame". The old end condition treated getting close to the board
+        # as having passed it, so the mission entered the delivery-zone stages
+        # while still at the mouth.
+        GateAdvance(mav, advance_m=p.get('gate_advance_m', 10.0),
+                    alt=p['corridor_alt'],
+                    clearance_m=p.get('redzone_clearance', 1.5)),
         Corridor("Corridor", mav, forward=True, alt=p['corridor_alt']),
         # Phase 6: the delivery zone is MEASURED at the corridor mouth, not
         # asserted. Replaces zone_entry + zone_bounds (audit A7, A8).
@@ -2269,9 +2545,9 @@ def build_root(mav, node, p):
                       hfov_rad=p.get('camera_hfov', 1.0472)),
         ClimbInPlace("DescendToReturnCorridor", mav, p['corridor_alt']),
         SetCameraPose("CameraForwardForReturn", mav, "FORWARD"),
-        ApproachBanner(mav, alt=p['corridor_alt'],
-                       clearance_m=p.get('redzone_clearance', 1.5),
-                       hfov_rad=p.get('camera_hfov', 1.0472)),
+        GateAdvance(mav, advance_m=p.get('gate_advance_m', 10.0),
+                    alt=p['corridor_alt'],
+                    clearance_m=p.get('redzone_clearance', 1.5)),
         Corridor("ReturnCorridor", mav, forward=False, alt=p['corridor_alt']),
         GotoHome(mav, p['takeoff_alt'],
                  clearance_m=p.get('redzone_clearance', 1.5)),
@@ -2431,6 +2707,7 @@ def declare_mission_params(node):
     d('banner_dwell_s', 5.0)
     d('banner_min_hit_ratio', 0.6)
     d('qr_hover_s', 5.0)
+    d('gate_advance_m', 10.0)
 
     g = lambda n: node.get_parameter(n).value
     return {
@@ -2458,6 +2735,7 @@ def declare_mission_params(node):
         'banner_dwell_s': float(g('banner_dwell_s')),
         'banner_min_hit_ratio': float(g('banner_min_hit_ratio')),
         'qr_hover_s': float(g('qr_hover_s')),
+        'gate_advance_m': float(g('gate_advance_m')),
     }
 
 

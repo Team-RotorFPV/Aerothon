@@ -45,6 +45,7 @@ Topics
 """
 
 import json
+import time
 import math
 
 import rclpy
@@ -53,7 +54,7 @@ from rclpy.qos import qos_profile_sensor_data
 import cv2
 import numpy as np
 
-from perception_banner.glyphs import reads_as_target
+from perception_banner.word_reader import reads_banner
 from cv_bridge import CvBridge
 from geometry_msgs.msg import PoseStamped, Vector3
 from sensor_msgs.msg import Image
@@ -75,11 +76,37 @@ class BannerNode(Node):
         p('min_area_frac', 0.0)        # 0 = derive it; >0 pins it explicitly
         p('banner_width_m', 2.0)       # competition banner, UNCONFIRMED
         p('banner_height_m', 1.0)
-        p('max_detect_range_m', 25.0)  # beyond this it is not worth aligning to
+        # 25 m was a guess, and it made the floor 1966 px at 1280x720 -- low
+        # enough that a 97x49 sliver of banner clipped at the frame edge
+        # (2134 px, MEASURED in flight) outranked it, and the sweep aligned to
+        # that sliver for twelve consecutive frames. The real banner in the
+        # same run measured 139932 px, a factor of 65 larger.
+        #
+        # The gate has to be identified from the take-off pad before the
+        # aircraft descends to corridor altitude, and in every arena the
+        # randomiser produces it stands within about 8 m of the start. 12 m is
+        # generous for that and puts the floor at 8532 px -- comfortably above
+        # every sliver measured and far below the banner.
+        p('max_detect_range_m', 12.0)  # beyond this it is not worth aligning to
         p('camera_hfov', 1.0472)
         p('area_safety', 0.5)          # accept half the ideal projected area:
                                        # oblique views and partial occlusion
-        p('min_aspect', 1.2); p('max_aspect', 8.0)
+        # MEASURED on the arena's own gate, in flight. The derived board comes
+        # out at aspect 1.10-1.22 across the views the sweep gets, and the old
+        # 1.2 floor sat in the MIDDLE of that spread -- so the real banner was
+        # accepted on roughly one frame in eight and rejected on the rest,
+        # which is exactly the flicker that made a dwell score 8/12 and then
+        # centre on whatever else was green:
+        #
+        #     aspect 1.13 -> REJECTED      aspect 1.10 -> REJECTED (x4)
+        #     aspect 1.22 -> identified
+        #
+        # Sweeping the floor over the captured frames: 1.20 identifies 1 frame
+        # of 16, 1.05 identifies 7, and going lower changes nothing at all --
+        # including adding no false positives, because the board-area floor
+        # and the reading now carry that discrimination. The aspect gate was
+        # doing a job it no longer has to do.
+        p('min_aspect', 0.9); p('max_aspect', 8.0)
         # ---- identity ----
         p('require_identity', True)
         # Lettering is detected RELATIVE to the board it sits on, not against
@@ -96,12 +123,29 @@ class BannerNode(Node):
         p('white_s_max', 110)          # absolute ceiling, likewise
         p('white_v_ratio', 1.08)       # ...but mainly: brighter than the board
         p('white_s_ratio', 0.55)       # ...and much less saturated than it
+        # Lettering DARKER than the board -- the arena's own gate has grey
+        # letters on green. Same saturation test, other side of the board.
+        p('dark_v_ratio', 0.85)        # ...or markedly darker than it
+        p('dark_v_floor', 40)          # but not shadow or black
+        # Lettering must be enclosed by the board. Kernel as a fraction of
+        # the region height: fills letter-sized holes, not a gate opening.
+        p('board_close_frac', 0.10)
+        # Below this surviving fraction the confinement is not describing
+        # a board with lettering in it, so it is not applied.
+        p('board_confine_min', 0.15)
+        # Width/height bounds for something that could be a character.
+        p('letter_min_aspect', 0.15)
+        p('letter_max_aspect', 1.60)
         p('min_white_frac', 0.02)      # white content inside the green region
         p('max_white_frac', 0.60)      # a mostly-white board is not the banner
         p('min_text_letters', 5)     # of AEROTHON's 8, in sequence
         p('min_letter_components', 3)  # separate white blobs in a band
         p('min_component_frac', 0.0015)
         p('min_board_green_frac', 0.25)
+        # How often the OCR confirmation runs. Structure runs every frame.
+        p('ocr_interval_s', 1.0)
+        # How many candidate boards one read may try before giving up.
+        p('ocr_max_regions', 3)
         # The SECOND lettering path. The brightness path above asks whether a
         # pixel is brighter than the BOARD; under a shadow gradient the board's
         # median is set by its sunlit half and the shaded letters fall under
@@ -115,7 +159,15 @@ class BannerNode(Node):
         # How many letters the banner carries. Used to judge which
         # lettering path segmented it most plausibly.
         p('expected_letters', 8)
-        p('stroke_path', True)
+        # OFF by default. Added for shadow robustness and measured to help on
+        # a rendered fixture -- then measured in flight to do net harm: it
+        # accepted a 97x49 sliver of banner at the frame edge as a whole
+        # banner (which the sweep then aligned to for twelve straight frames),
+        # and it fragmented the real banner badly enough that the derived
+        # board came out taller than wide and the aspect gate refused it.
+        # The "inverse" path above is what the shaded/grey-lettered cases
+        # actually needed. Kept switchable rather than deleted.
+        p('stroke_path', False)
         p('stroke_block_frac', 0.25)   # window size as a fraction of ROI height
         p('stroke_offset', 6)          # how far above the local mean to count
 
@@ -126,6 +178,11 @@ class BannerNode(Node):
         self.pub = self.create_publisher(Vector3, '/percep/banner', 10)
         self.pub_detail = self.create_publisher(String, '/percep/banner/detail', 10)
         self.pub_annot = self.create_publisher(Image, '/percep/banner/annotated', 5)
+        self._ocr_t0 = 0.0
+        self._ocr_cache = {"text": "", "text_letters": 0,
+                           "text_confirmed": False, "text_reader": ""}
+        self._read_candidates = []
+        self._ocr_box = None
         self.get_logger().info(
             f"perception_banner up (identity-gated); image_topic={image_topic}")
 
@@ -208,7 +265,31 @@ class BannerNode(Node):
         # which is exactly what it does under a shadow gradient (measured: 3
         # components, 0 letters read). Either path may confirm; the one that
         # actually READS the lettering wins.
-        attempts = [("brightness", self.lettering_mask(roi))]
+        # Candidates, ranked -- never merged. Two questions crossed:
+        #
+        #   light vs dark   is the lettering brighter or darker than the board
+        #                   it sits on? The rendered banner is white on green;
+        #                   the arena's own gate is GREY on green. Both exist.
+        #   close scale     how big is a letter relative to the region it was
+        #                   found in? On a banner filling the frame that is
+        #                   large; on a gate whose bounding box spans posts and
+        #                   gusset it is small. Measured, one fixed fraction
+        #                   cannot serve both: 0.10 reads the gate and 0.22
+        #                   reads the banner, and each fails the other.
+        #
+        # So all four run and _rank picks. That is the same rule that settled
+        # light vs dark, and it costs four cheap threshold passes.
+        # NOTE: a second, wider close scale was tried here so that one
+        # configuration could read both the rendered banner (letters large
+        # relative to their region) and the arena's gate (letters small
+        # relative to a region spanning posts and gusset). Measured, it made
+        # things WORSE than either scale alone -- it reintroduced both the
+        # frame-edge speck and the 0.75 aspect rejection. Reverted rather than
+        # tuned; the single scale below is the configuration that measures
+        # clean on the captured frames.
+        attempts = [(name, self.lettering_mask(roi, dark=dark))
+                    for name, dark in (("brightness", False),
+                                       ("inverse", True))]
         if bool(self._g('stroke_path')):
             attempts.append(("stroke", self.lettering_mask_stroke(roi)))
 
@@ -253,6 +334,7 @@ class BannerNode(Node):
         counts as the banner."""
         x, y, bw, bh = bbox
         bh_frame, bw_frame = frame.shape[:2]
+        roi = frame[y:y + bh, x:x + bw]
 
         n_lab, _, stats, _ = cv2.connectedComponentsWithStats(white, connectivity=8)
         min_area = float(self._g('min_component_frac')) * bw * bh
@@ -269,13 +351,11 @@ class BannerNode(Node):
                     f"only {len(comps)} white component(s); lettering expected",
                     info, bbox)
 
-        # Read the lettering, once, so the result is available both as a
-        # rescue below and as evidence in the detail topic. Confirming only:
-        # it may overturn a rejection, never an acceptance.
-        ocr_ok, ocr_text, ocr_n = self.read_lettering(white, stats, comps)
-        info["text"] = ocr_text
-        info["text_letters"] = ocr_n
-        info["text_confirmed"] = bool(ocr_ok)
+        # The reading happens ONCE PER FRAME, on the winning region, in
+        # on_image() -- not here. Calling an OCR engine per candidate per
+        # lettering path measured 517 ms a frame (1.9 Hz), and the sweep needs
+        # frames at camera rate to accumulate a dwell.
+
 
         band = self._lettering_band(stats, comps, bh)
         if band is None:
@@ -334,7 +414,15 @@ class BannerNode(Node):
 
         return True, "", info, board
 
-    def read_lettering(self, white, stats, comps):
+    def read_lettering(self, white, stats, comps):   # noqa: D401  (unused)
+        """DEPRECATED -- superseded by word_reader.reads_banner().
+
+        Kept briefly so the shape of what it did stays visible next to what
+        replaced it: it segmented the lettering into blobs and classified each
+        against a 5x7 template. That is why a fragmenting board produced
+        eighteen 'letters', and why the operator saw '??N?E??????N?' presented
+        as a reading.
+        """
         """(confirmed, text, matched) from the white blobs already segmented.
 
         Left-to-right over the components gate 3 found, resampled to the 5x7
@@ -401,7 +489,7 @@ class BannerNode(Node):
         mask = cv2.bitwise_and(mask, cv2.bitwise_not(board))
         return cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
 
-    def lettering_mask(self, roi):
+    def lettering_mask(self, roi, dark=False, close_frac=None):
         """Pixels that are lettering ON THIS BOARD, judged against the board.
 
         The letters are whatever is markedly brighter and markedly less
@@ -427,12 +515,70 @@ class BannerNode(Node):
         else:
             v_min = float(self._g('white_v_min'))
             s_max = float(self._g('white_s_max'))
+            v_board = 255.0            # no board reference: bright path only
 
-        mask = cv2.inRange(hsv, np.array([0, 0, int(v_min)]),
-                           np.array([179, int(s_max), 255]))
+        # CONTRAST, in either direction -- not "brighter".
+        #
+        # MEASURED on the arena's own gate (seed 1001, captured in flight):
+        # the lettering is GREY, BGR (132,132,132), on a green board at
+        # HSV V=184. The letters are DARKER than the board. The old rule
+        # demanded v >= max(90, 184*1.08) = 199, which those letters can never
+        # reach, so the real banner was unreadable from every angle and every
+        # range -- and the stroke path added beside it failed identically,
+        # because it too only ever looked for locally BRIGHTER pixels.
+        #
+        # What is actually invariant is that the lettering is much LESS
+        # SATURATED than the board it sits on, and clearly separated from it in
+        # value. Which side of the board it falls on is a property of the
+        # paint, not of the alphabet.
+        # Two SEPARATE candidate masks, never a union. Unioning them lets the
+        # darker side contribute shadow fragments to a board whose lettering
+        # the bright side already reads perfectly -- measured: it turned a
+        # clean "AEROTHON" on the rendered fixture into twelve unreadable
+        # glyphs. They compete in identity() and the better one wins.
+        if dark:
+            v_dark = v_board * float(self._g('dark_v_ratio'))
+            mask = cv2.inRange(
+                hsv, np.array([0, 0, int(self._g('dark_v_floor'))]),
+                np.array([179, int(s_max), int(max(1, v_dark))]))
+        else:
+            mask = cv2.inRange(hsv, np.array([0, 0, int(v_min)]),
+                               np.array([179, int(s_max), 255]))
         # Anything the green mask claims is board is not lettering, whatever
         # its brightness -- a specular highlight on green is not a letter.
         mask = cv2.bitwise_and(mask, cv2.bitwise_not(board))
+
+        # Lettering has to be ON the board, not merely inside its BOUNDING
+        # BOX. The arena's banner is a GATE: two posts, a lettered panel and a
+        # gusset, standing open in the middle. Its bounding box therefore
+        # contains a large area of grey corridor wall, and the wall is the
+        # same grey as the lettering -- unsaturated, mid-value. Reading it as
+        # lettering is what produced fifteen glyphs of noise and a "board"
+        # taller than it was wide (aspect 0.75), which the aspect gate then
+        # correctly refused.
+        #
+        # Letters are holes in the green panel; the gate opening is a hole
+        # too, but a hundred times larger. Closing the green mask with a
+        # kernel scaled to the region fills the letters and leaves the opening
+        # open, which separates the two without knowing anything about this
+        # particular gate.
+        cf = (float(self._g('board_close_frac')) if close_frac is None
+              else float(close_frac))
+        k = int(max(3, roi.shape[0] * cf)) | 1
+        solid = cv2.morphologyEx(board, cv2.MORPH_CLOSE,
+                                 np.ones((k, k), np.uint8))
+        confined = cv2.bitwise_and(mask, solid)
+        # A GUARD, not a filter. On a board that fills its own region -- the
+        # rendered banner, and every synthetic fixture -- the closed green
+        # already contains the lettering, so this changes nothing. On a gate
+        # standing open in front of a grey wall it removes the wall. But if it
+        # would remove nearly EVERYTHING, the region is not a board with holes
+        # in it and the constraint does not apply; keeping the confined mask
+        # there would reject boards that the unconstrained mask reads fine.
+        kept = float(np.count_nonzero(confined))
+        total = float(np.count_nonzero(mask))
+        if total > 0 and kept / total >= float(self._g('board_confine_min')):
+            mask = confined
         return cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
 
     def _lettering_band(self, stats, comps, roi_h):
@@ -446,9 +592,22 @@ class BannerNode(Node):
         boxes = [(stats[i, cv2.CC_STAT_LEFT], stats[i, cv2.CC_STAT_TOP],
                   stats[i, cv2.CC_STAT_WIDTH], stats[i, cv2.CC_STAT_HEIGHT])
                  for i in comps]
-        # Ignore long thin runs: the banner's own white frame is one of these
-        # and would otherwise masquerade as a row of letters.
-        boxes = [b for b in boxes if b[2] <= 0.6 * roi_h * 6 and b[3] > 1]
+        boxes = [b for b in boxes if b[3] > 1]
+        # A LETTER HAS A SHAPE. Measured on the arena's own gate, the mask
+        # returns the eight letters at 24-49 px wide by 84-120 tall (aspect
+        # 0.28-0.42) mixed in with two structural pieces:
+        #
+        #     x=0   w= 29  h=443   the post edge      aspect 0.07
+        #     x=57  w=359  h=186   the panel interior aspect 1.93
+        #
+        # Those two dragged the band's vertical extent across the whole gate,
+        # which made the derived board 440x587 -- taller than wide -- and the
+        # aspect gate refused the real banner on every frame. Nothing here
+        # knows about this gate: a character is simply neither a hairline nor
+        # a slab.
+        lo = float(self._g('letter_min_aspect'))
+        hi = float(self._g('letter_max_aspect'))
+        boxes = [b for b in boxes if lo <= (b[2] / float(b[3])) <= hi]
 
         best = None
         for bx, by, bw_, bh_ in boxes:
@@ -479,6 +638,8 @@ class BannerNode(Node):
         h, w = frame.shape[:2]
         out = Vector3(x=0.0, y=0.0, z=0.0)
         detail = {"identified": False, "reason": "", "candidates": 0}
+        # Per FRAME, not per node: the regions worth reading move.
+        self._read_candidates = []
 
         mask = self.green_mask(frame)
         cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -559,6 +720,15 @@ class BannerNode(Node):
                         (board[0], max(0, board[1] - 8)),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, colour, 2)
 
+            # Collect every derived BOARD as something the reader could look
+            # at. Not the raw green blob: for the rendered banner the biggest
+            # blob is 1249x472 of gate and corridor and tesseract reads
+            # nothing from it, while the 1078x300 board beside it reads
+            # AEROTHON. And not merely the largest board either, for the same
+            # reason -- the gate blob's board is the larger of the two.
+            self._read_candidates.append(
+                (int(board[0]), int(board[1]), int(board[2]), int(board[3])))
+
             if ok and best is None:
                 # NOTE: first-accepted wins, in whatever order contours come
                 # out. That is suspected of being wrong -- watched live, the
@@ -572,6 +742,78 @@ class BannerNode(Node):
             elif not ok and not detail["reason"]:
                 detail["reason"] = reason
                 detail.update(info)
+
+        # ---- ONE reading per frame, rate-limited ---- #
+        #
+        # Structure runs at camera rate and decides; the reading confirms. A
+        # fresh OCR pass per green candidate per lettering path measured
+        # 517 ms a frame (1.9 Hz) and starved the sweep of the frames its
+        # dwell is counted from. Once a second costs about 25 ms amortised and
+        # still confirms long before a five-second dwell completes.
+        if best is not None:
+            read_boxes = [tuple(best[:4])]
+        else:
+            # Biggest first, after dropping shapes that cannot be a board.
+            #
+            # Widest-first was tried and put a 1130x12 sliver (aspect 94) and
+            # a 344x60 offcut ahead of the real 1078x300 banner, so the reader
+            # spent its budget on degenerate strips and never saw it. The
+            # bounds here are deliberately loose and independent of the
+            # identity gate's own aspect range -- this only decides what to
+            # SPEND A READ ON, and the reading still judges.
+            plausible = [b for b in self._read_candidates
+                         if b[3] >= 20 and 0.8 <= b[2] / float(max(1, b[3])) <= 12.0]
+            read_boxes = sorted(plausible, key=lambda b: -(b[2] * b[3]))
+        read_boxes = read_boxes[:int(self._g('ocr_max_regions'))]
+        read_box = read_boxes[0] if read_boxes else None
+
+        # A cached reading describes the region it came from. When the
+        # aircraft yaws to the next sweep heading that region jumps, and
+        # carrying the text across would attribute one heading's banner to
+        # another -- the exact class of error this rewrite exists to remove.
+        if read_box is not None and self._ocr_box is not None:
+            px, py, pw, ph = self._ocr_box
+            jump = math.hypot(read_box[0] - px, read_box[1] - py)
+            if (jump > 0.5 * max(pw, ph)
+                    or read_box[2] * read_box[3] < 0.4 * pw * ph):
+                self._ocr_cache = {"text": "", "text_letters": 0,
+                                   "text_confirmed": False, "text_reader": ""}
+                self._ocr_t0 = 0.0
+
+        now = time.monotonic()
+        if (read_box is not None
+                and now - self._ocr_t0 >= float(self._g('ocr_interval_s'))):
+            self._ocr_box = tuple(read_box)
+            self._ocr_t0 = now
+            for rx, ry, rw, rh in read_boxes:
+                sub = frame[ry:ry + rh, rx:rx + rw]
+                if not sub.size:
+                    continue
+                ok_txt, txt, reader, nletters = reads_banner(
+                    sub, min_letters=int(self._g('min_text_letters')),
+                    board_mask=self.green_mask(sub))
+                self._ocr_cache = {"text": txt, "text_letters": int(nletters),
+                                   "text_confirmed": bool(ok_txt),
+                                   "text_reader": reader}
+                self._ocr_box = (rx, ry, rw, rh)
+                if ok_txt:
+                    break
+
+        # TEXT RESCUE, at the level the reading now happens.
+        #
+        # It used to live inside the per-candidate check, which could see the
+        # reading because the reading was taken there. Moving OCR to once per
+        # frame (for speed) silently removed the rescue: the structural gates
+        # rejected a board, the engine read AEROTHON off it a moment later,
+        # and nothing connected the two.
+        #
+        # Still one-directional -- it can only turn a NO into a YES, so the
+        # worst case is exactly the structural verdict.
+        if (best is None and self._ocr_cache.get("text_confirmed")
+                and self._ocr_box is not None):
+            rx, ry, rw, rh = self._ocr_box
+            best = (rx, ry, rw, rh, {"rescued_by_text": True})
+            detail["rescued_by_text"] = True
 
         if best is not None:
             x, y, bw, bh, info = best
@@ -591,6 +833,11 @@ class BannerNode(Node):
             # from "nothing green in frame": they are very different for an
             # operator watching the panel.
             out.z = 0.5
+
+        # LAST, so nothing can clobber it. Applied earlier, the per-candidate
+        # info's own (empty) text fields silently overwrote it: the OCR ran
+        # correctly every frame and its answer never reached the topic.
+        detail.update(self._ocr_cache)
 
         self.pub.publish(out)
         self.pub_detail.publish(String(data=json.dumps(detail)))
