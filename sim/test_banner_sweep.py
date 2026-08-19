@@ -941,3 +941,42 @@ class SquareOnBeforeAdvancingTests(unittest.TestCase):
                     abs(math.atan2(math.sin(d - seen[0]),
                                    math.cos(d - seen[0]))), 0.3,
                     f"orbit reversed direction: {seen}")
+
+    def test_a_PEAKED_orbit_counts_as_square(self):
+        """MEASURED on the arena's gate: orbiting took the board from 0.97 to
+        1.91 and plateaued -- the derived box includes the posts and never
+        reads as slender as a bare banner. A fixed bar of 2.00 was unreachable,
+        so the aircraft orbited all fourteen steps and refused, having been in
+        front of the gate since step eight.
+
+        A hill climb that keeps turning round is standing on the summit."""
+        class Plateau(SquareOnBeforeAdvancingTests.Oblique):
+            def __init__(self):
+                super().__init__(steps_to_square=99, ceiling=1.9, start=0.97)
+                self.dir_flips = 0
+
+            def goto(self, x, y, z, yaw=0.0):
+                if (x, y) != self._pos[:2]:
+                    self.steps += 1
+                    # climbs, then wobbles below the peak like the real board
+                    self.aspect = (min(1.9, self.aspect * 1.3)
+                                   if self.steps < 5 else 1.3)
+                self._pos = (x, y, z)
+                SweepMav.goto(self, x, y, z, yaw)
+
+            def reached(self, x, y, z, tol=0.6):
+                return math.dist(self._pos, (x, y, z)) < max(tol, 0.75)
+
+        mav = Plateau()
+        stage = self._stage(mav, min_square_aspect=99.0)   # bar unreachable
+        status = run(stage, mav, self.clock, ticks=6000)
+        self.assertIs(status, py_trees.common.Status.SUCCESS,
+                      "refused a board it had already come square to")
+
+    def test_a_peak_on_an_EDGE_ON_board_is_not_accepted(self):
+        """Turning round twice in front of something that never looked like a
+        banner is not evidence of anything."""
+        mav = self.Oblique(steps_to_square=0, ceiling=1.0, start=1.0)
+        stage = self._stage(mav, min_square_aspect=99.0)
+        status = run(stage, mav, self.clock, ticks=6000)
+        self.assertIs(status, py_trees.common.Status.FAILURE)

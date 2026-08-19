@@ -269,8 +269,8 @@ class AlignToBanner(py_trees.behaviour.Behaviour):
                  max_corrections=8, min_fallback_hits=4,
                  fallback_margin=0.5, strafe_step_m=1.5, max_strafes=6,
                  stall_before_strafe=2, square_gain=1.08,
-                 min_square_aspect=2.0, max_strafes_square=14,
-                 orbit_arrive_tol=0.7):
+                 min_square_aspect=1.75, max_strafes_square=14,
+                 orbit_arrive_tol=0.7, peak_min_aspect=1.4):
         super().__init__("AlignToBanner")
         self.mav = mav
         self.tol = tol
@@ -313,9 +313,13 @@ class AlignToBanner(py_trees.behaviour.Behaviour):
         self._orbit_dir = 1.0
         self._last_orbit_aspect = None
         self.orbit_arrive_tol = float(orbit_arrive_tol)
+        # Below this the board is not banner-shaped from any vantage and a
+        # peak is not evidence of anything.
+        self.peak_min_aspect = float(peak_min_aspect)
         self._awaiting_move = False
         self._orbit_seeded = False
         self._side_hint = 0.0
+        self._reversals = 0
         self.clock = clock or time.monotonic
         self.n_steps = max(1, int(round(2 * math.pi / self.step_rad)))
         self.sweep_offsets = self._zigzag_offsets(self.step_rad, self.n_steps)
@@ -375,6 +379,7 @@ class AlignToBanner(py_trees.behaviour.Behaviour):
         self._awaiting_move = False
         self._orbit_seeded = False
         self._side_hint = 0.0
+        self._reversals = 0
         self._t = 0
 
     def initialise(self):
@@ -569,6 +574,7 @@ class AlignToBanner(py_trees.behaviour.Behaviour):
             self._orbit_seeded = True
         if self._last_orbit_aspect is not None and aspect < self._last_orbit_aspect:
             self._orbit_dir = -self._orbit_dir
+            self._reversals += 1
             self.mav.log(f"AlignToBanner: board narrowed "
                          f"({self._last_orbit_aspect:.2f} -> {aspect:.2f}); "
                          f"orbiting {self._orbit_name()} instead")
@@ -804,7 +810,35 @@ class AlignToBanner(py_trees.behaviour.Behaviour):
             # that the board is edge-on. Refusing to finish on a measurement
             # that was never taken would strand the aircraft on any build
             # where perception does not publish it.
-            square = aspect <= 0.0 or aspect >= self.min_square_aspect
+            # SQUARE ENOUGH, two ways.
+            #
+            # An absolute bar, and the peak of the hill climb. MEASURED on the
+            # arena's gate: orbiting took the board from 0.97 to 1.91 and it
+            # plateaued there, because the derived box includes the posts and
+            # never reads as slender as a bare banner. A fixed bar of 2.00 was
+            # my guess and it is simply unreachable on this gate -- the
+            # aircraft orbited all fourteen steps and refused, having been in
+            # front of it since step 8.
+            #
+            # The reversals ARE the answer: a hill climb that keeps turning
+            # round is a hill climb standing on the summit. Two reversals with
+            # a plausibly banner-shaped board is as square as the geometry
+            # allows, and waiting for more is waiting for something that will
+            # not come.
+            # ONE reversal is already the summit: the board widened, then
+            # narrowed, so the best vantage is behind us. Requiring two never
+            # fired on a real plateau, where the aspect simply sits flat and
+            # no second narrowing ever happens.
+            peaked = (self._reversals >= 1
+                      and self._best_aspect >= self.peak_min_aspect)
+            square = (aspect <= 0.0 or aspect >= self.min_square_aspect
+                      or peaked)
+            if peaked and aspect < self.min_square_aspect:
+                self.mav.log(
+                    f"AlignToBanner: orbit peaked at board aspect "
+                    f"{self._best_aspect:.2f} after {self._reversals} "
+                    f"reversals; as square to the banner as this geometry "
+                    f"allows")
             widening = aspect > self._best_aspect * self.square_gain
             if not square and self._strafes < self.max_strafes:
                 self._best_aspect = max(self._best_aspect, aspect)
