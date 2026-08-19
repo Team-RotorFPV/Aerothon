@@ -268,7 +268,8 @@ class AlignToBanner(py_trees.behaviour.Behaviour):
                  hfov_rad=1.0472, align_gain=0.8, align_dwell_s=1.0,
                  max_corrections=8, min_fallback_hits=4,
                  fallback_margin=0.5, strafe_step_m=1.5, max_strafes=6,
-                 stall_before_strafe=2, square_gain=1.08):
+                 stall_before_strafe=2, square_gain=1.08,
+                 min_square_aspect=2.0, max_strafes_square=14):
         super().__init__("AlignToBanner")
         self.mav = mav
         self.tol = tol
@@ -304,6 +305,12 @@ class AlignToBanner(py_trees.behaviour.Behaviour):
         # How much the board must still be widening for another orbit step to
         # be worth taking. Below this it is as square as it is going to get.
         self.square_gain = float(square_gain)
+        # A banner is a WIDE board. Until the camera sees it that way, the
+        # aircraft is not in front of it and must not advance at it.
+        self.min_square_aspect = float(min_square_aspect)
+        self.max_strafes = max(int(max_strafes), int(max_strafes_square))
+        self._orbit_dir = 1.0
+        self._last_orbit_aspect = None
         self.clock = clock or time.monotonic
         self.n_steps = max(1, int(round(2 * math.pi / self.step_rad)))
         self.sweep_offsets = self._zigzag_offsets(self.step_rad, self.n_steps)
@@ -358,6 +365,8 @@ class AlignToBanner(py_trees.behaviour.Behaviour):
         self._stalled = 0
         self._last_bearing = None
         self._best_aspect = 0.0
+        self._orbit_dir = 1.0
+        self._last_orbit_aspect = None
         self._t = 0
 
     def initialise(self):
@@ -524,7 +533,33 @@ class AlignToBanner(py_trees.behaviour.Behaviour):
         except Exception:                    # noqa: BLE001
             return 0.0
 
+    def _orbit_name(self):
+        return "port" if self._orbit_dir > 0 else "starboard"
+
+    def _orbit(self, aspect):
+        """One step around the board, in a CONSISTENT direction.
+
+        The direction used to come from the sign of the bearing -- but once
+        the banner is centred the bearing is about zero and its sign flips
+        frame to frame, so the aircraft rolled left, then right, then left,
+        going nowhere. Watched live, exactly that.
+
+        An orbit needs a direction it keeps. This one holds its heading, steps
+        sideways, and only reverses when a step made the board NARROWER, which
+        means it went the wrong way round.
+        """
+        if self._last_orbit_aspect is not None and aspect < self._last_orbit_aspect:
+            self._orbit_dir = -self._orbit_dir
+            self.mav.log(f"AlignToBanner: board narrowed "
+                         f"({self._last_orbit_aspect:.2f} -> {aspect:.2f}); "
+                         f"orbiting {self._orbit_name()} instead")
+        self._last_orbit_aspect = aspect
+        return self._strafe_dir(self._orbit_dir)
+
     def _strafe(self, bearing):
+        return self._strafe_dir(-1.0 if bearing > 0 else 1.0)
+
+    def _strafe_dir(self, side):
         """Step sideways, holding heading, to bring the banner in front.
 
         Perpendicular to the current heading, toward the side the banner is
@@ -538,7 +573,6 @@ class AlignToBanner(py_trees.behaviour.Behaviour):
         x, y, z = self._anchor
         psi = self._align_target
         # Starboard in ENU is psi - 90 degrees; port is psi + 90.
-        side = -1.0 if bearing > 0 else 1.0
         ang = psi + side * (math.pi / 2.0)
         step = self.strafe_step_m
         self._anchor = (x + step * math.cos(ang), y + step * math.sin(ang), z)
@@ -554,13 +588,12 @@ class AlignToBanner(py_trees.behaviour.Behaviour):
         self._align_settled = True          # heading unchanged; only position
         self._align_t0 = self.clock()
         self.mav.log(
-            f"AlignToBanner: yaw stopped closing on the banner "
-            f"(bearing {bearing:+.2f}); strafing {step:.1f} m "
+            f"AlignToBanner: stepping {step:.1f} m "
             f"{'starboard' if side < 0 else 'port'} to bring it in front "
             f"({self._strafes}/{self.max_strafes})")
         if self._strafes > self.max_strafes:
             reason = (f"AlignToBanner: {self._strafes} sideways steps did not "
-                      f"bring the banner in front (bearing {bearing:+.2f})")
+                      f"bring the banner in front")
             self.feedback_message = reason
             self.mav.abort_reason = reason
             self.mav.log(reason, warn=True)
@@ -586,6 +619,8 @@ class AlignToBanner(py_trees.behaviour.Behaviour):
             self._stalled = 0
             self._last_bearing = None
             self._best_aspect = 0.0
+            self._orbit_dir = 1.0
+            self._last_orbit_aspect = None
             self._stable = 0
             self._last_seen = self.clock()
             self._enter(self.CENTRE)
@@ -704,29 +739,43 @@ class AlignToBanner(py_trees.behaviour.Behaviour):
             # while the aspect is still growing. Never pitch: closing the
             # distance is what the advance is for, afterwards.
             aspect = self._aspect()
-            # The FIRST reading is the baseline, not an improvement on zero.
-            # Without this the aircraft always took one orbit step, including
-            # when it was already square to the board.
             if self._best_aspect <= 0.0:
                 self._best_aspect = aspect
-            # ONE EXPLORATORY STEP, always.
+
+            # THE CONFIRMING CHECK.
             #
-            # The aspect only changes once the aircraft has moved, so a rule
-            # of "orbit while it is improving" never takes a first step and
-            # the aircraft declares itself square wherever it happens to be
-            # standing. Probe once, then keep going only while the board is
-            # still widening. Being square is a thing you find out by looking,
-            # not by assuming.
-            probing = self._strafes == 0
+            # "Stopped widening" is satisfied by a board that never widened at
+            # all. Watched live, the aircraft sat at aspect 0.99 -- edge on,
+            # where a banner reads about 3.6 -- decided that was as square as
+            # it would get, and pitched into the board.
+            #
+            # So there is an absolute bar as well as a relative one: the board
+            # must actually look like a banner before the aircraft is allowed
+            # to call itself in front of it. The bar comes from the configured
+            # banner proportions, not from a number chosen to fit one arena.
+            # An aspect of zero means the detector did not report one, not
+            # that the board is edge-on. Refusing to finish on a measurement
+            # that was never taken would strand the aircraft on any build
+            # where perception does not publish it.
+            square = aspect <= 0.0 or aspect >= self.min_square_aspect
             widening = aspect > self._best_aspect * self.square_gain
-            if ((probing or widening) and aspect > 0.0
-                    and self._strafes < self.max_strafes):
+            if not square and self._strafes < self.max_strafes:
                 self._best_aspect = max(self._best_aspect, aspect)
                 self.mav.log(
-                    f"AlignToBanner: centred but not square "
-                    f"(board aspect {aspect:.2f}, best {self._best_aspect:.2f})"
-                    f"; orbiting to come in front of it")
-                return self._strafe(bearing if bearing else 0.01)
+                    f"AlignToBanner: centred but not in front "
+                    f"(board aspect {aspect:.2f}, need {self.min_square_aspect:.2f}"
+                    f"); orbiting {self._orbit_name()} "
+                    f"({self._strafes + 1}/{self.max_strafes})")
+                return self._orbit(aspect)
+            if not square:
+                reason = (f"AlignToBanner: never came in front of the banner "
+                          f"after {self._strafes} sideways steps (board aspect "
+                          f"{aspect:.2f}, needed {self.min_square_aspect:.2f}); "
+                          f"refusing to advance at a board seen edge-on")
+                self.feedback_message = reason
+                self.mav.abort_reason = reason
+                self.mav.log(reason, warn=True)
+                return py_trees.common.Status.FAILURE
             self._best_aspect = max(self._best_aspect, aspect)
             self._stable += 1
             if self._stable >= self.stable_frames:

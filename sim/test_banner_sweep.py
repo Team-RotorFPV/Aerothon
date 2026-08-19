@@ -871,12 +871,16 @@ class SquareOnBeforeAdvancingTests(unittest.TestCase):
             self.assertIs(stage.update(), py_trees.common.Status.RUNNING)
             self.clock.advance(0.1)
 
-    def test_it_orbits_until_the_board_stops_widening(self):
-        mav = self.Oblique(steps_to_square=3)
+    def test_it_orbits_until_the_board_looks_like_a_BANNER(self):
+        """Not "until it stops widening" -- a board that never widens at all
+        satisfies that, which is how the aircraft sat at aspect 0.99 (edge on)
+        and advanced into the gate."""
+        mav = self.Oblique(steps_to_square=3, ceiling=3.6)
         stage = self._stage(mav)
         status = run(stage, mav, self.clock, ticks=3000)
         self.assertIs(status, py_trees.common.Status.SUCCESS)
-        self.assertGreaterEqual(mav.steps, 3, "did not orbit to come square")
+        self.assertGreaterEqual(mav.steps, 2, "did not orbit to come square")
+        self.assertGreaterEqual(mav.aspect, 2.0, "finished before it was square")
 
     def test_the_orbit_never_closes_the_DISTANCE(self):
         """"while it maintains some distance" -- the advance is a separate
@@ -894,10 +898,40 @@ class SquareOnBeforeAdvancingTests(unittest.TestCase):
                                    msg="moved along the heading, not across it")
 
     def test_a_banner_already_square_finishes_without_orbiting(self):
-        mav = self.Oblique(steps_to_square=0, ceiling=1.1, start=1.1)
+        mav = self.Oblique(steps_to_square=0, ceiling=3.6, start=3.6)
         stage = self._stage(mav)
         status = run(stage, mav, self.clock, ticks=3000)
         self.assertIs(status, py_trees.common.Status.SUCCESS)
-        # One probe step is expected and correct: the aircraft cannot know it
-        # is square without moving once and seeing the board not widen.
-        self.assertLessEqual(mav.steps, 1, "kept orbiting when already square")
+        self.assertEqual(mav.steps, 0, "orbited when already in front of it")
+
+    def test_a_board_that_never_comes_square_REFUSES_to_advance(self):
+        """The failure the operator watched: edge-on at 0.99, and it pitched
+        in anyway. Refusing is the only safe answer -- advancing at a board
+        seen edge-on drives into it."""
+        mav = self.Oblique(steps_to_square=0, ceiling=1.0, start=1.0)
+        stage = self._stage(mav)
+        status = run(stage, mav, self.clock, ticks=6000)
+        self.assertIs(status, py_trees.common.Status.FAILURE)
+        self.assertIn("in front", mav.abort_reason)
+
+    def test_the_orbit_keeps_ONE_direction(self):
+        """Direction used to come from the sign of the bearing, which flips
+        about zero once the banner is centred -- so the aircraft rolled left,
+        right, left, going nowhere. Watched live."""
+        mav = self.Oblique(steps_to_square=3, ceiling=3.6)
+        stage = self._stage(mav)
+        seen = []
+        for _ in range(3000):
+            if stage.update() is not py_trees.common.Status.RUNNING:
+                break
+            self.clock.advance(0.1)
+            if len(mav.gotos) >= 2:
+                a, b = mav.gotos[-2], mav.gotos[-1]
+                if (a[0], a[1]) != (b[0], b[1]):
+                    seen.append(math.atan2(b[1] - a[1], b[0] - a[0]))
+        if len(seen) >= 2:
+            for d in seen[1:]:
+                self.assertLess(
+                    abs(math.atan2(math.sin(d - seen[0]),
+                                   math.cos(d - seen[0]))), 0.3,
+                    f"orbit reversed direction: {seen}")
