@@ -810,3 +810,94 @@ class StrafeWhenYawStallsTests(unittest.TestCase):
         run(stage, mav, self.clock, ticks=3000)
         moved = [g for g in mav.gotos if g[:2] != (0.0, 0.0)]
         self.assertEqual(moved, [], "strafed when yaw was working")
+
+
+class SquareOnBeforeAdvancingTests(unittest.TestCase):
+    """Centred is not in front. The waypoint may only be set from square-on.
+
+    THE OPERATOR'S REPORT: "rn it is just flying out of the world ... it should
+    only set the waypoint 10 metres ahead of it when it is completely in front
+    of the banner while it maintains some distance".
+
+    Facing the gate from off to one side and then committing to a waypoint
+    through it drives at the board rather than through the opening. A board is
+    widest seen face-on, so its apparent aspect answers "am I in front of it"
+    directly -- and orbiting (sideways step, then yaw back on to it) walks an
+    arc around it at constant range without ever closing the distance.
+    """
+
+    def setUp(self):
+        self.clock = Clock()
+
+    class Oblique(SweepMav):
+        """Centred immediately, but only square after a few orbit steps."""
+
+        def __init__(self, steps_to_square=3, ceiling=3.6, start=1.1):
+            super().__init__(banner_at=0.0, banner_arc=math.radians(30.0))
+            self.aspect = start
+            self.steps = 0
+            self.steps_to_square = steps_to_square
+            self.ceiling = ceiling
+
+        def goto(self, x, y, z, yaw=0.0):
+            if (x, y) != self._pos[:2]:
+                self.steps += 1
+                if self.steps <= self.steps_to_square:
+                    self.aspect = min(self.ceiling, self.aspect * 1.35)
+            self._pos = (x, y, z)
+            super().goto(x, y, z, yaw)
+
+        def banner_identified(self):
+            return True
+
+        def banner_bearing(self):
+            return 0.0
+
+        def banner_aspect(self):
+            return self.aspect
+
+    def _stage(self, mav, **kw):
+        kw.setdefault("clock", self.clock)
+        kw.setdefault("dwell_s", 0.4)
+        kw.setdefault("align_dwell_s", 0.2)
+        stage = AlignToBanner(mav, **kw)
+        stage.initialise()
+        return stage
+
+    def test_a_centred_but_OBLIQUE_banner_does_not_finish_alignment(self):
+        mav = self.Oblique()
+        stage = self._stage(mav)
+        for _ in range(6):
+            self.assertIs(stage.update(), py_trees.common.Status.RUNNING)
+            self.clock.advance(0.1)
+
+    def test_it_orbits_until_the_board_stops_widening(self):
+        mav = self.Oblique(steps_to_square=3)
+        stage = self._stage(mav)
+        status = run(stage, mav, self.clock, ticks=3000)
+        self.assertIs(status, py_trees.common.Status.SUCCESS)
+        self.assertGreaterEqual(mav.steps, 3, "did not orbit to come square")
+
+    def test_the_orbit_never_closes_the_DISTANCE(self):
+        """"while it maintains some distance" -- the advance is a separate
+        stage and comes afterwards. Every step here is perpendicular to the
+        heading, so range to the board is preserved."""
+        mav = self.Oblique()
+        stage = self._stage(mav)
+        run(stage, mav, self.clock, ticks=3000)
+        for a, b in zip(mav.gotos, mav.gotos[1:]):
+            if (a[0], a[1]) == (b[0], b[1]):
+                continue
+            step = math.atan2(b[1] - a[1], b[0] - a[0])
+            off = abs(math.atan2(math.sin(step - a[3]), math.cos(step - a[3])))
+            self.assertAlmostEqual(off, math.pi / 2, places=1,
+                                   msg="moved along the heading, not across it")
+
+    def test_a_banner_already_square_finishes_without_orbiting(self):
+        mav = self.Oblique(steps_to_square=0, ceiling=1.1, start=1.1)
+        stage = self._stage(mav)
+        status = run(stage, mav, self.clock, ticks=3000)
+        self.assertIs(status, py_trees.common.Status.SUCCESS)
+        # One probe step is expected and correct: the aircraft cannot know it
+        # is square without moving once and seeing the board not widen.
+        self.assertLessEqual(mav.steps, 1, "kept orbiting when already square")

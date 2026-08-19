@@ -268,7 +268,7 @@ class AlignToBanner(py_trees.behaviour.Behaviour):
                  hfov_rad=1.0472, align_gain=0.8, align_dwell_s=1.0,
                  max_corrections=8, min_fallback_hits=4,
                  fallback_margin=0.5, strafe_step_m=1.5, max_strafes=6,
-                 stall_before_strafe=2):
+                 stall_before_strafe=2, square_gain=1.08):
         super().__init__("AlignToBanner")
         self.mav = mav
         self.tol = tol
@@ -301,6 +301,9 @@ class AlignToBanner(py_trees.behaviour.Behaviour):
         self.strafe_step_m = float(strafe_step_m)
         self.max_strafes = int(max_strafes)
         self.stall_before_strafe = int(stall_before_strafe)
+        # How much the board must still be widening for another orbit step to
+        # be worth taking. Below this it is as square as it is going to get.
+        self.square_gain = float(square_gain)
         self.clock = clock or time.monotonic
         self.n_steps = max(1, int(round(2 * math.pi / self.step_rad)))
         self.sweep_offsets = self._zigzag_offsets(self.step_rad, self.n_steps)
@@ -354,6 +357,7 @@ class AlignToBanner(py_trees.behaviour.Behaviour):
         self._strafes = 0
         self._stalled = 0
         self._last_bearing = None
+        self._best_aspect = 0.0
         self._t = 0
 
     def initialise(self):
@@ -513,6 +517,13 @@ class AlignToBanner(py_trees.behaviour.Behaviour):
             return None                      # two candidates: too ambiguous
         return best
 
+    def _aspect(self):
+        fn = getattr(self.mav, "banner_aspect", None)
+        try:
+            return float(fn()) if callable(fn) else 0.0
+        except Exception:                    # noqa: BLE001
+            return 0.0
+
     def _strafe(self, bearing):
         """Step sideways, holding heading, to bring the banner in front.
 
@@ -574,6 +585,7 @@ class AlignToBanner(py_trees.behaviour.Behaviour):
             self._strafes = 0
             self._stalled = 0
             self._last_bearing = None
+            self._best_aspect = 0.0
             self._stable = 0
             self._last_seen = self.clock()
             self._enter(self.CENTRE)
@@ -678,9 +690,48 @@ class AlignToBanner(py_trees.behaviour.Behaviour):
         # Settled. Anything measured from here is measured from a still
         # aircraft, which is the only kind of bearing worth acting on.
         if abs(bearing) <= self.tol:
+            # CENTRED IS NOT IN FRONT.
+            #
+            # Facing the banner from off to one side and then committing to a
+            # waypoint through the gate drives at the board, not through the
+            # opening -- watched live, the aircraft set a 10 m target while
+            # still to one side and flew out of the arena.
+            #
+            # A board is widest seen face-on and compresses off-axis, so its
+            # apparent aspect says directly whether the aircraft is on the
+            # perpendicular. Keep orbiting -- sideways step, then yaw back on
+            # to it, which walks an arc around the board at constant range --
+            # while the aspect is still growing. Never pitch: closing the
+            # distance is what the advance is for, afterwards.
+            aspect = self._aspect()
+            # The FIRST reading is the baseline, not an improvement on zero.
+            # Without this the aircraft always took one orbit step, including
+            # when it was already square to the board.
+            if self._best_aspect <= 0.0:
+                self._best_aspect = aspect
+            # ONE EXPLORATORY STEP, always.
+            #
+            # The aspect only changes once the aircraft has moved, so a rule
+            # of "orbit while it is improving" never takes a first step and
+            # the aircraft declares itself square wherever it happens to be
+            # standing. Probe once, then keep going only while the board is
+            # still widening. Being square is a thing you find out by looking,
+            # not by assuming.
+            probing = self._strafes == 0
+            widening = aspect > self._best_aspect * self.square_gain
+            if ((probing or widening) and aspect > 0.0
+                    and self._strafes < self.max_strafes):
+                self._best_aspect = max(self._best_aspect, aspect)
+                self.mav.log(
+                    f"AlignToBanner: centred but not square "
+                    f"(board aspect {aspect:.2f}, best {self._best_aspect:.2f})"
+                    f"; orbiting to come in front of it")
+                return self._strafe(bearing if bearing else 0.01)
+            self._best_aspect = max(self._best_aspect, aspect)
             self._stable += 1
             if self._stable >= self.stable_frames:
-                self.feedback_message = f"aligned, bearing={bearing:+.3f}"
+                self.feedback_message = (f"square to the banner, bearing="
+                                         f"{bearing:+.3f} aspect={aspect:.2f}")
                 return py_trees.common.Status.SUCCESS
             self.feedback_message = (f"holding alignment "
                                      f"{self._stable}/{self.stable_frames}")

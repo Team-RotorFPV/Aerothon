@@ -83,6 +83,8 @@ class Mav:
         self.banner = Vector3()
         self.banner_reject_reason = ""
         self.banner_reject_counts = {}
+        self.banner_board_aspect = 0.0
+        self.banner_board_area = 0.0
         self.abort_requested = False
         self.abort_reason = ""
         # Once an abort fires it must STAY fired. The guard condition is
@@ -282,11 +284,27 @@ class Mav:
             d = json.loads(m.data)
         except (ValueError, TypeError):
             return
+        # How SQUARE the aircraft is to the board.
+        #
+        # A banner is widest seen face-on and compresses as you move off its
+        # perpendicular. So the apparent aspect is a direct, measured answer
+        # to "am I in front of it yet" -- which is the question that has to be
+        # answered before committing to a waypoint through the gate. Watched
+        # live, the aircraft set a 10 m waypoint while still off to one side
+        # and flew away from the arena.
+        if d.get('identified'):
+            self.banner_board_aspect = float(d.get('board_aspect') or 0.0)
+            self.banner_board_area = float(d.get('board_area_px') or 0.0)
+
         reason = (d.get('reason') or '').strip()
         if reason:
             self.banner_reject_reason = reason
             self.banner_reject_counts[reason] = \
                 self.banner_reject_counts.get(reason, 0) + 1
+
+    def banner_aspect(self):
+        """Apparent width/height of the board. Peaks when square to it."""
+        return float(getattr(self, "banner_board_aspect", 0.0))
 
     def banner_rejection_summary(self, top=3):
         """The commonest reasons candidates were rejected, most frequent first.
