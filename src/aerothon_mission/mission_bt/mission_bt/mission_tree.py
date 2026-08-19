@@ -269,7 +269,8 @@ class AlignToBanner(py_trees.behaviour.Behaviour):
                  max_corrections=8, min_fallback_hits=4,
                  fallback_margin=0.5, strafe_step_m=1.5, max_strafes=6,
                  stall_before_strafe=2, square_gain=1.08,
-                 min_square_aspect=2.0, max_strafes_square=14):
+                 min_square_aspect=2.0, max_strafes_square=14,
+                 orbit_arrive_tol=0.7):
         super().__init__("AlignToBanner")
         self.mav = mav
         self.tol = tol
@@ -311,6 +312,10 @@ class AlignToBanner(py_trees.behaviour.Behaviour):
         self.max_strafes = max(int(max_strafes), int(max_strafes_square))
         self._orbit_dir = 1.0
         self._last_orbit_aspect = None
+        self.orbit_arrive_tol = float(orbit_arrive_tol)
+        self._awaiting_move = False
+        self._orbit_seeded = False
+        self._side_hint = 0.0
         self.clock = clock or time.monotonic
         self.n_steps = max(1, int(round(2 * math.pi / self.step_rad)))
         self.sweep_offsets = self._zigzag_offsets(self.step_rad, self.n_steps)
@@ -367,6 +372,9 @@ class AlignToBanner(py_trees.behaviour.Behaviour):
         self._best_aspect = 0.0
         self._orbit_dir = 1.0
         self._last_orbit_aspect = None
+        self._awaiting_move = False
+        self._orbit_seeded = False
+        self._side_hint = 0.0
         self._t = 0
 
     def initialise(self):
@@ -536,7 +544,7 @@ class AlignToBanner(py_trees.behaviour.Behaviour):
     def _orbit_name(self):
         return "port" if self._orbit_dir > 0 else "starboard"
 
-    def _orbit(self, aspect):
+    def _orbit(self, aspect, side_hint=None):
         """One step around the board, in a CONSISTENT direction.
 
         The direction used to come from the sign of the bearing -- but once
@@ -548,6 +556,17 @@ class AlignToBanner(py_trees.behaviour.Behaviour):
         sideways, and only reverses when a step made the board NARROWER, which
         means it went the wrong way round.
         """
+        # ORBIT TOWARD THE BANNER, not away from it.
+        #
+        # The direction defaulted to port whatever the banner was doing, so
+        # with the gate off to starboard the aircraft circled away from it and
+        # lost sight of it completely -- watched live. Circling toward the
+        # side the board is on keeps it in frame while the aircraft comes
+        # round to its face.
+        if self._orbit_seeded is False:
+            if side_hint:
+                self._orbit_dir = side_hint
+            self._orbit_seeded = True
         if self._last_orbit_aspect is not None and aspect < self._last_orbit_aspect:
             self._orbit_dir = -self._orbit_dir
             self.mav.log(f"AlignToBanner: board narrowed "
@@ -579,6 +598,12 @@ class AlignToBanner(py_trees.behaviour.Behaviour):
         self._strafes += 1
         self._stalled = 0
         self._last_bearing = None
+        # WAIT FOR THE AIRCRAFT TO GET THERE before believing the next
+        # measurement. Watched live, three orbit steps in a row reported an
+        # identical board aspect of 0.97 -- the stage moved its target and
+        # re-read the view in the same breath, so it was measuring the old
+        # position every time and spending orbit steps standing still.
+        self._awaiting_move = True
         # A strafe changes the geometry the yaw budget was being spent
         # against, so the budget starts again from the new position. Without
         # this the correction count ran out (8) long before the strafe count
@@ -621,6 +646,9 @@ class AlignToBanner(py_trees.behaviour.Behaviour):
             self._best_aspect = 0.0
             self._orbit_dir = 1.0
             self._last_orbit_aspect = None
+            self._awaiting_move = False
+            self._orbit_seeded = False
+            self._side_hint = 0.0
             self._stable = 0
             self._last_seen = self.clock()
             self._enter(self.CENTRE)
@@ -703,7 +731,26 @@ class AlignToBanner(py_trees.behaviour.Behaviour):
 
         self._last_seen = self.clock()
         bearing = self.mav.banner_bearing()
+        if abs(bearing) > self.tol:
+            # Starboard is -1 in the strafe convention; a board right of frame
+            # centre is a board to starboard.
+            self._side_hint = -1.0 if bearing > 0 else 1.0
         self._hold(self._align_target)
+
+        if self._awaiting_move:
+            x, y, z = self.mav.pos()
+            ax, ay, az = self._anchor
+            if self.mav.reached(ax, ay, az, self.orbit_arrive_tol):
+                self._awaiting_move = False
+                self._align_t0 = self.clock()
+            elif self.clock() - self._align_t0 > self.settle_timeout_s:
+                self._awaiting_move = False   # measure from wherever it got to
+                self._align_t0 = self.clock()
+            else:
+                self.feedback_message = (
+                    f"orbiting: {math.hypot(ax - x, ay - y):.1f} m to the next "
+                    f"vantage point")
+                return py_trees.common.Status.RUNNING
 
         if not self._align_settled:
             err = abs(self._wrap(psi - self._align_target))
@@ -766,7 +813,7 @@ class AlignToBanner(py_trees.behaviour.Behaviour):
                     f"(board aspect {aspect:.2f}, need {self.min_square_aspect:.2f}"
                     f"); orbiting {self._orbit_name()} "
                     f"({self._strafes + 1}/{self.max_strafes})")
-                return self._orbit(aspect)
+                return self._orbit(aspect, side_hint=self._side_hint)
             if not square:
                 reason = (f"AlignToBanner: never came in front of the banner "
                           f"after {self._strafes} sideways steps (board aspect "

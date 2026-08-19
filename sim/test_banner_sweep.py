@@ -728,8 +728,11 @@ class StrafeWhenYawStallsTests(unittest.TestCase):
                 self.strafed += 1
                 if self.yields:
                     self._fixed *= 0.45      # coming into line with it
-            self._pos = (x, y, z)
+            self._pos = (x, y, z)            # arrives at the commanded point
             super().goto(x, y, z, yaw)
+
+        def reached(self, x, y, z, tol=0.6):
+            return math.dist(self._pos, (x, y, z)) < max(tol, 0.75)
 
         def banner_identified(self):
             return True
@@ -846,6 +849,9 @@ class SquareOnBeforeAdvancingTests(unittest.TestCase):
                     self.aspect = min(self.ceiling, self.aspect * 1.35)
             self._pos = (x, y, z)
             super().goto(x, y, z, yaw)
+
+        def reached(self, x, y, z, tol=0.6):
+            return math.dist(self._pos, (x, y, z)) < max(tol, 0.75)
 
         def banner_identified(self):
             return True
