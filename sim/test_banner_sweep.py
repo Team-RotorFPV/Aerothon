@@ -1092,6 +1092,37 @@ class SquareOnWithTheLidarTests(unittest.TestCase):
         self.assertLess(mav.pos()[2], 4.0 - GateMav.LIDAR_OFFSET_M,
                         "never got the scan plane below the top of the gate")
 
+    def test_the_camera_is_POINTED_FORWARD_on_the_way_down(self):
+        """MEASURED, and it is the root cause of run 16 rather than the
+        altitude everyone blamed.
+
+        The BANNER pose looks 20 degrees below the horizon because from 5 m a
+        gate a few metres ahead sits under a level camera. Once the aircraft
+        has descended to gate height that same pose puts the board out of the
+        TOP of the frame -- the detector went from 10/10 frames at 5.0 m to
+        refusing almost every frame at 3.0 m, and the stage was left with a
+        working lidar and no idea which sector to search.
+
+        Taken with the camera FORWARD, every cell of a nine-point grid from
+        2.5 to 3.5 m altitude and 3.5 to 6.9 m standoff identifies at 100%.
+        The band was never narrow; the pointing was wrong.
+        """
+        mav = GateMav(gate=(5.0, 0.0), face_rad=math.pi,
+                      start=(0.0, 0.0, 5.0), gate_top_m=4.0)
+        self._fly(mav, ticks=6000)
+        self.assertIn("FORWARD", mav.camera_poses,
+                      "descended to gate height with the camera still "
+                      "pitched for a search from 5 m")
+
+    def test_the_camera_is_left_alone_when_no_descent_was_needed(self):
+        """A stage that re-points the camera it was handed, unprompted, is a
+        stage that will fight the leaf that pointed it."""
+        mav = GateMav(gate=(5.0, 0.0), face_rad=math.pi,
+                      start=(0.0, 0.0, 3.0), gate_top_m=4.0)
+        self._fly(mav)
+        self.assertEqual(mav.camera_poses, [],
+                         "re-pointed the camera without descending")
+
     def test_the_descent_stops_at_the_floor_and_then_FAILS_CLOSED(self):
         """The ladder is not a licence to fly into the ground looking for a
         surface that is not there."""

@@ -85,6 +85,7 @@ class FakeMav:
         self.surface = None
         self.surface_calls = []
         self.square_on = []
+        self.camera_poses = []
 
     # ---- stage interface ---- #
     def goto(self, *a, **k):
@@ -136,6 +137,9 @@ class FakeMav:
 
     def publish_square_on(self, payload):
         self.square_on.append(payload)
+
+    def set_camera_pose(self, pose):
+        self.camera_poses.append(pose)
 
     def avoidance_stuck(self):
         return self.stuck
