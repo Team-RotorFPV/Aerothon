@@ -1,0 +1,51 @@
+# vcstool manifest for the AeroTHON 2026 Mission 2 workspace.
+# Usage:  vcs import src < aerothon.repos
+#
+# Your own packages live in their own repos (fill in the URLs once created).
+# Third-party deps that aren't apt-installable are pinned here.
+
+repositories:
+  # ---- Team packages (create these repos, then set the url/version) ----
+  aerothon_mission:
+    type: git
+    url: git@github.com:team-rotor-fpv/aerothon_mission.git   # TODO
+    version: main
+    # contains: mission_bringup, mission_bt, uav_description
+  aerothon_perception:
+    type: git
+    url: git@github.com:team-rotor-fpv/aerothon_perception.git  # TODO
+    version: main
+    # contains: perception_qr, perception_banner, perception_redzone
+  aerothon_avoidance:
+    type: git
+    url: git@github.com:team-rotor-fpv/aerothon_avoidance.git  # TODO
+    version: main
+    # contains: avoidance (costmap config + velocity_controller)
+  aerothon_gcs:
+    type: git
+    url: git@github.com:team-rotor-fpv/aerothon_gcs.git        # TODO
+    version: main
+    # contains: gcs_aggregator, command node, tauri app, readiness node
+  aerothon_sim:
+    type: git
+    url: git@github.com:team-rotor-fpv/aerothon_sim.git        # TODO
+    version: main
+    # contains: sim_gazebo (worlds, models, sim launch)
+
+  # ---- Third-party (pin the Jazzy/Harmonic-compatible refs) ----
+  ardupilot_gz:
+    type: git
+    url: https://github.com/ArduPilot/ardupilot_gz.git
+    version: main            # official ROS 2 bringup; pin a tested commit before flight
+  ardupilot_gazebo:
+    type: git
+    url: https://github.com/ArduPilot/ardupilot_gazebo.git
+    version: ros2            # camera/gimbal model used by iris.launch.py
+  ardupilot_sitl_models:
+    type: git
+    url: https://github.com/ArduPilot/SITL_Models.git
+    version: main
+  rplidar_ros:
+    type: git
+    url: https://github.com/Slamtec/rplidar_ros.git
+    version: ros2            # C1-capable ros2 branch

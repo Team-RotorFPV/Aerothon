@@ -1,0 +1,64 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="aerothon_iris">
+  <!-- RViz representation of the same official ArduPilot Iris used in Gazebo. -->
+  <material name="carbon"><color rgba="0.06 0.07 0.08 1"/></material>
+  <material name="black"><color rgba="0.015 0.018 0.022 1"/></material>
+  <material name="logitech"><color rgba="0.08 0.09 0.10 1"/></material>
+  <material name="lens"><color rgba="0.03 0.30 0.52 1"/></material>
+  <material name="rplidar_blue"><color rgba="0.05 0.48 0.76 1"/></material>
+  <material name="rplidar_white"><color rgba="0.96 0.97 0.98 1"/></material>
+  <material name="orange"><color rgba="1.0 0.42 0.03 1"/></material>
+
+  <link name="base_link">
+    <visual>
+      <geometry><mesh filename="package://ardupilot_gazebo/models/iris_with_standoffs/meshes/iris.dae"/></geometry>
+      <material name="carbon"/>
+    </visual>
+    <collision><geometry><cylinder radius="0.30" length="0.12"/></geometry></collision>
+    <inertial><mass value="1.5"/><inertia ixx="0.029" ixy="0" ixz="0" iyy="0.029" iyz="0" izz="0.055"/></inertial>
+  </link>
+
+  <xacro:macro name="iris_rotor" params="name x y mesh">
+    <joint name="${name}_fixed" type="fixed"><parent link="base_link"/><child link="${name}"/><origin xyz="${x} ${y} 0.023"/></joint>
+    <link name="${name}"><visual><geometry><mesh filename="package://ardupilot_gazebo/models/iris_with_standoffs/meshes/${mesh}"/></geometry></visual></link>
+  </xacro:macro>
+  <xacro:iris_rotor name="rotor_0" x="0.13" y="-0.22" mesh="iris_prop_ccw.dae"/>
+  <xacro:iris_rotor name="rotor_1" x="-0.13" y="0.20" mesh="iris_prop_ccw.dae"/>
+  <xacro:iris_rotor name="rotor_2" x="0.13" y="0.22" mesh="iris_prop_cw.dae"/>
+  <xacro:iris_rotor name="rotor_3" x="-0.13" y="-0.20" mesh="iris_prop_cw.dae"/>
+
+  <!-- RPLIDAR C1: top-centre, with a 360-degree unobstructed scan plane. -->
+  <joint name="rplidar_c1_mount" type="fixed"><parent link="base_link"/><child link="base_scan"/><origin xyz="0 0 0.19"/></joint>
+  <link name="base_scan">
+    <visual><origin xyz="0 0 0.018"/><geometry><cylinder radius="0.060" length="0.036"/></geometry><material name="rplidar_white"/></visual>
+    <visual><origin xyz="0 0 0.037"/><geometry><cylinder radius="0.050" length="0.008"/></geometry><material name="rplidar_blue"/></visual>
+    <visual><origin xyz="0 0 0.043"/><geometry><cylinder radius="0.044" length="0.018"/></geometry><material name="black"/></visual>
+    <collision><origin xyz="0 0 0.022"/><geometry><cylinder radius="0.060" length="0.050"/></geometry></collision>
+  </link>
+
+  <!-- Front webcam on one pitch servo: 0 rad forward, -1.5708 downward. -->
+  <joint name="webcam_servo_mount" type="fixed"><parent link="base_link"/><child link="webcam_servo_base"/><origin xyz="0.145 0 0.035"/></joint>
+  <link name="webcam_servo_base">
+    <visual><geometry><box size="0.050 0.075 0.055"/></geometry><material name="black"/></visual>
+  </link>
+  <joint name="webcam_pitch_joint" type="revolute">
+    <parent link="webcam_servo_base"/><child link="webcam_link"/>
+    <!-- Keep in sync with scripts/materialize_vehicle_model.py: lower limit is
+         -1.65 rad so a -90 deg NADIR command is not sitting on the hard stop. -->
+    <!-- Axis is -Y so that a negative angle pitches the camera DOWN, matching
+         goal.md Q18 and MAVLink DO_MOUNT_CONTROL. See the note in
+         scripts/materialize_vehicle_model.py: with +Y, "-90 deg NADIR" aimed
+         the camera at the sky. Keep the two files in sync. -->
+    <origin xyz="0.045 0 0"/><axis xyz="0 -1 0"/><limit lower="-1.65" upper="0.523599" effort="2" velocity="2"/>
+  </joint>
+  <link name="webcam_link">
+    <visual><origin xyz="0.040 0 0"/><geometry><box size="0.080 0.125 0.045"/></geometry><material name="logitech"/></visual>
+    <visual><origin xyz="0.087 0 0" rpy="0 1.570796 0"/><geometry><cylinder radius="0.012" length="0.010"/></geometry><material name="lens"/></visual>
+    <collision><origin xyz="0.040 0 0"/><geometry><box size="0.080 0.125 0.045"/></geometry></collision>
+  </link>
+  <joint name="camera_optical_joint" type="fixed"><parent link="webcam_link"/><child link="camera_optical_frame"/><origin xyz="0.093 0 0" rpy="-1.570796 0 -1.570796"/></joint>
+  <link name="camera_optical_frame"/>
+
+  <joint name="winch_joint" type="fixed"><parent link="base_link"/><child link="winch_link"/><origin xyz="0 0 -0.10"/></joint>
+  <link name="winch_link"><visual><geometry><cylinder radius="0.03" length="0.05"/></geometry><material name="orange"/></visual></link>
+</robot>

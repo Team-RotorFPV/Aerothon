@@ -1,0 +1,288 @@
+<?xml version="1.0"?>
+<sdf version="1.9">
+  <!--
+    AeroTHON 2026 Track 1, Flight Mission 2 (rulebook Figure 3).
+
+    Metres, ENU coordinates:
+      takeoff / start QR: x < 2
+      two parallel corridors: x = 2 .. 12, each 3.5 m wide
+      delivery zone: x = 12 .. 52, y = -15 .. 15 (40 x 30 m)
+
+    The outbound green corridor is intentionally clear. Static obstacles are
+    present only in the orange return corridor, matching Figure 3.
+  -->
+  <world name="mission2">
+    <physics name="1ms" type="ignored">
+      <max_step_size>0.001</max_step_size>
+      <real_time_factor>1.0</real_time_factor>
+    </physics>
+
+    <plugin filename="gz-sim-physics-system" name="gz::sim::systems::Physics"/>
+    <plugin filename="gz-sim-user-commands-system" name="gz::sim::systems::UserCommands"/>
+    <plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster"/>
+    <plugin filename="gz-sim-sensors-system" name="gz::sim::systems::Sensors">
+      <render_engine>ogre2</render_engine>
+    </plugin>
+    <!-- Official ArduPilot Gazebo sensor systems. These are independent of
+         the rendering Sensors system and are required by the Iris JSON FDM. -->
+    <plugin filename="gz-sim-air-pressure-system" name="gz::sim::systems::AirPressure"/>
+    <plugin filename="gz-sim-air-speed-system" name="gz::sim::systems::AirSpeed"/>
+    <plugin filename="gz-sim-altimeter-system" name="gz::sim::systems::Altimeter"/>
+    <plugin filename="gz-sim-imu-system" name="gz::sim::systems::Imu"/>
+    <plugin filename="gz-sim-magnetometer-system" name="gz::sim::systems::Magnetometer"/>
+    <plugin filename="gz-sim-navsat-system" name="gz::sim::systems::NavSat"/>
+
+    <scene>
+      <ambient>0.72 0.72 0.72 1</ambient>
+      <background>0.72 0.82 0.93 1</background>
+      <shadows>true</shadows>
+      <grid>false</grid>
+    </scene>
+    <spherical_coordinates>
+      <surface_model>EARTH_WGS84</surface_model>
+      <world_frame_orientation>ENU</world_frame_orientation>
+      <latitude_deg>12.9716</latitude_deg>
+      <longitude_deg>79.1594</longitude_deg>
+      <elevation>0</elevation>
+      <heading_deg>0</heading_deg>
+    </spherical_coordinates>
+
+    <light name="sun" type="directional">
+      <cast_shadows>true</cast_shadows>
+      <pose>0 0 30 0 0 0</pose>
+      <diffuse>0.95 0.92 0.86 1</diffuse>
+      <specular>0.25 0.25 0.25 1</specular>
+      <attenuation><range>1000</range><constant>0.9</constant><linear>0.01</linear><quadratic>0.001</quadratic></attenuation>
+      <direction>-0.4 0.2 -0.9</direction>
+    </light>
+
+    <!-- Official ArduPilot SITL Iris dynamics with the competition hardware:
+         fixed top RPLidar C1 and front Logitech webcam on one pitch servo. -->
+    <include>
+      <uri>model://aerothon_iris_c1_webcam</uri>
+      <name>aerothon_iris</name>
+      <pose>-2 2 0.25 0 0 0</pose>
+    </include>
+
+    <!-- Neutral competition ground outside the marked course. -->
+    <model name="site_ground">
+      <static>true</static>
+      <link name="ground">
+        <collision name="collision">
+          <geometry><box><size>72 44 0.10</size></box></geometry>
+          <pose>22 0 -0.05 0 0 0</pose>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>72 44 0.10</size></box></geometry>
+          <pose>22 0 -0.05 0 0 0</pose>
+          <material><ambient>0.36 0.38 0.40 1</ambient><diffuse>0.42 0.44 0.46 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Blue takeoff / landing zone shown at the left of Figure 3. -->
+    <model name="takeoff_landing_zone">
+      <static>true</static>
+      <link name="pad">
+        <collision name="collision"><geometry><box><size>5 8 0.08</size></box></geometry></collision>
+        <visual name="visual">
+          <geometry><box><size>5 8 0.08</size></box></geometry>
+          <material><ambient>0.10 0.42 0.72 1</ambient><diffuse>0.12 0.50 0.82 1</diffuse></material>
+        </visual>
+      </link>
+      <pose>-1 0 0.04 0 0 0</pose>
+    </model>
+
+    <!-- Rulebook start QR: scanned at 5 m after moving approximately 1 m. -->
+    <model name="start_qr_target_a">
+      <static>true</static>
+      <link name="marker">
+        @QR_START_VISUALS@
+      </link>
+      <pose>-1 2.0 0.09 0 0 0</pose>
+    </model>
+
+    <!-- 10 m x 3.5 m clear forward corridor. -->
+    <model name="forward_corridor_green">
+      <static>true</static>
+      <link name="floor">
+        <collision name="collision"><geometry><box><size>10 3.5 0.08</size></box></geometry></collision>
+        <visual name="visual">
+          <geometry><box><size>10 3.5 0.08</size></box></geometry>
+          <material><ambient>0.02 0.58 0.23 1</ambient><diffuse>0.02 0.68 0.28 1</diffuse></material>
+        </visual>
+      </link>
+      <pose>7 2.0 0.04 0 0 0</pose>
+    </model>
+
+    <!-- 10 m x 3.5 m orange return corridor. -->
+    <model name="return_corridor_orange">
+      <static>true</static>
+      <link name="floor">
+        <collision name="collision"><geometry><box><size>10 3.5 0.08</size></box></geometry></collision>
+        <visual name="visual">
+          <geometry><box><size>10 3.5 0.08</size></box></geometry>
+          <material><ambient>0.92 0.35 0.04 1</ambient><diffuse>1.0 0.42 0.05 1</diffuse></material>
+        </visual>
+      </link>
+      <pose>7 -2.0 0.04 0 0 0</pose>
+    </model>
+
+    <!-- Corridor walls extend above the 3 m navigation altitude so C1 sees them. -->
+    <model name="corridor_walls">
+      <static>true</static>
+      <link name="walls">
+        <collision name="forward_outer_collision"><pose>0 3.80 1.8 0 0 0</pose><geometry><box><size>10.2 0.10 3.6</size></box></geometry></collision>
+        <visual name="forward_outer"><pose>0 3.80 1.8 0 0 0</pose><geometry><box><size>10.2 0.10 3.6</size></box></geometry><material><ambient>0.82 0.86 0.90 1</ambient><diffuse>0.90 0.93 0.96 1</diffuse></material></visual>
+        <collision name="forward_inner_collision"><pose>0 0.20 1.8 0 0 0</pose><geometry><box><size>10.2 0.10 3.6</size></box></geometry></collision>
+        <visual name="forward_inner"><pose>0 0.20 1.8 0 0 0</pose><geometry><box><size>10.2 0.10 3.6</size></box></geometry><material><ambient>0.82 0.86 0.90 1</ambient><diffuse>0.90 0.93 0.96 1</diffuse></material></visual>
+        <collision name="return_inner_collision"><pose>0 -0.20 1.8 0 0 0</pose><geometry><box><size>10.2 0.10 3.6</size></box></geometry></collision>
+        <visual name="return_inner"><pose>0 -0.20 1.8 0 0 0</pose><geometry><box><size>10.2 0.10 3.6</size></box></geometry><material><ambient>0.82 0.86 0.90 1</ambient><diffuse>0.90 0.93 0.96 1</diffuse></material></visual>
+        <collision name="return_outer_collision"><pose>0 -3.80 1.8 0 0 0</pose><geometry><box><size>10.2 0.10 3.6</size></box></geometry></collision>
+        <visual name="return_outer"><pose>0 -3.80 1.8 0 0 0</pose><geometry><box><size>10.2 0.10 3.6</size></box></geometry><material><ambient>0.82 0.86 0.90 1</ambient><diffuse>0.90 0.93 0.96 1</diffuse></material></visual>
+      </link>
+      <pose>7 0 0 0 0 0</pose>
+    </model>
+
+    <!-- Four alternating black static obstacles, return lane only. -->
+    <model name="return_static_obstacles">
+      <static>true</static>
+      <link name="obstacles">
+        <collision name="o1c"><pose>-3.6 -0.95 1.7 0 0 0</pose><geometry><box><size>0.35 1.45 3.4</size></box></geometry></collision>
+        <visual name="o1"><pose>-3.6 -0.95 1.7 0 0 0</pose><geometry><box><size>0.35 1.45 3.4</size></box></geometry><material><ambient>0.015 0.015 0.018 1</ambient><diffuse>0.025 0.025 0.030 1</diffuse></material></visual>
+        <collision name="o2c"><pose>-1.2 -3.05 1.7 0 0 0</pose><geometry><box><size>0.35 1.45 3.4</size></box></geometry></collision>
+        <visual name="o2"><pose>-1.2 -3.05 1.7 0 0 0</pose><geometry><box><size>0.35 1.45 3.4</size></box></geometry><material><ambient>0.015 0.015 0.018 1</ambient><diffuse>0.025 0.025 0.030 1</diffuse></material></visual>
+        <collision name="o3c"><pose>1.2 -0.95 1.7 0 0 0</pose><geometry><box><size>0.35 1.45 3.4</size></box></geometry></collision>
+        <visual name="o3"><pose>1.2 -0.95 1.7 0 0 0</pose><geometry><box><size>0.35 1.45 3.4</size></box></geometry><material><ambient>0.015 0.015 0.018 1</ambient><diffuse>0.025 0.025 0.030 1</diffuse></material></visual>
+        <collision name="o4c"><pose>3.6 -3.05 1.7 0 0 0</pose><geometry><box><size>0.35 1.45 3.4</size></box></geometry></collision>
+        <visual name="o4"><pose>3.6 -3.05 1.7 0 0 0</pose><geometry><box><size>0.35 1.45 3.4</size></box></geometry><material><ambient>0.015 0.015 0.018 1</ambient><diffuse>0.025 0.025 0.030 1</diffuse></material></visual>
+      </link>
+      <pose>7 0 0 0 0 0</pose>
+    </model>
+
+    <!-- Green DECOYS: things that are green and banner-shaped but are not the
+         banner. perception_banner currently accepts any green rectangle, so
+         without these a "reject non-banners" test cannot fail. -->
+    <model name="green_decoy_field">
+      <static>true</static>
+      <link name="decoys">
+        @GREEN_DECOY_VISUALS@
+      </link>
+      <pose>8.0 -14.0 0 0 0 0</pose>
+    </model>
+
+    <model name="green_decoy_zone">
+      <static>true</static>
+      <link name="decoys">
+        @GREEN_DECOY_VISUALS@
+      </link>
+      <pose>34.0 9.0 0 0 0 1.2</pose>
+    </model>
+
+    <!-- Green AeroTHON banner gates: outbound entrance and return entrance. -->
+    <model name="forward_aerothon_banner">
+      <static>true</static>
+      <link name="gate">
+        <collision name="left_post_collision"><pose>0 -1.92 2 0 0 0</pose><geometry><box><size>0.18 0.18 4</size></box></geometry></collision>
+        <collision name="right_post_collision"><pose>0 1.92 2 0 0 0</pose><geometry><box><size>0.18 0.18 4</size></box></geometry></collision>
+        <visual name="left_post"><pose>0 -1.92 2 0 0 0</pose><geometry><box><size>0.18 0.18 4</size></box></geometry><material><ambient>0.01 0.48 0.18 1</ambient><diffuse>0.01 0.62 0.24 1</diffuse></material></visual>
+        <visual name="right_post"><pose>0 1.92 2 0 0 0</pose><geometry><box><size>0.18 0.18 4</size></box></geometry><material><ambient>0.01 0.48 0.18 1</ambient><diffuse>0.01 0.62 0.24 1</diffuse></material></visual>
+        @AEROTHON_BANNER_GEOMETRY@
+      </link>
+      <pose>2 2.0 0 0 0 0</pose>
+    </model>
+    <model name="return_aerothon_banner">
+      <static>true</static>
+      <link name="gate">
+        <collision name="left_post_collision"><pose>0 -1.92 2 0 0 0</pose><geometry><box><size>0.18 0.18 4</size></box></geometry></collision>
+        <collision name="right_post_collision"><pose>0 1.92 2 0 0 0</pose><geometry><box><size>0.18 0.18 4</size></box></geometry></collision>
+        <visual name="left_post"><pose>0 -1.92 2 0 0 0</pose><geometry><box><size>0.18 0.18 4</size></box></geometry><material><ambient>0.01 0.48 0.18 1</ambient><diffuse>0.01 0.62 0.24 1</diffuse></material></visual>
+        <visual name="right_post"><pose>0 1.92 2 0 0 0</pose><geometry><box><size>0.18 0.18 4</size></box></geometry><material><ambient>0.01 0.48 0.18 1</ambient><diffuse>0.01 0.62 0.24 1</diffuse></material></visual>
+        @AEROTHON_BANNER_GEOMETRY@
+      </link>
+      <pose>12 -2.0 0 0 0 0</pose>
+    </model>
+
+    <!-- 40 x 30 m delivery field. -->
+    <model name="delivery_zone_40x30">
+      <static>true</static>
+      <link name="field">
+        <collision name="collision"><geometry><box><size>40 30 0.08</size></box></geometry></collision>
+        <visual name="visual"><geometry><box><size>40 30 0.08</size></box></geometry><material><ambient>0.42 0.67 0.31 1</ambient><diffuse>0.50 0.76 0.38 1</diffuse></material></visual>
+      </link>
+      <pose>32 0 0.04 0 0 0</pose>
+    </model>
+
+    <!-- White geofence boundary, visible in Gazebo and camera imagery. -->
+    <model name="delivery_geofence_boundary">
+      <static>true</static>
+      <link name="lines">
+        <visual name="north"><pose>0 15 0.07 0 0 0</pose><geometry><box><size>40.2 0.20 0.06</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse></material></visual>
+        <visual name="south"><pose>0 -15 0.07 0 0 0</pose><geometry><box><size>40.2 0.20 0.06</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse></material></visual>
+        <visual name="west"><pose>-20 0 0.07 0 0 0</pose><geometry><box><size>0.20 30.2 0.06</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse></material></visual>
+        <visual name="east"><pose>20 0 0.07 0 0 0</pose><geometry><box><size>0.20 30.2 0.06</size></box></geometry><material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse></material></visual>
+      </link>
+      <pose>32 0 0 0 0 0</pose>
+    </model>
+
+    <!-- Rulebook Figure 3 candidate target layout (five genuine QR codes). -->
+    <model name="delivery_qr_target_a">
+      <static>true</static><link name="marker">@QR_TARGET_A_VISUALS@</link><pose>21 10 0.10 0 0 0</pose>
+    </model>
+    <model name="delivery_qr_target_b">
+      <static>true</static><link name="marker">@QR_TARGET_B_VISUALS@</link><pose>47 10 0.10 0 0 0</pose>
+    </model>
+    <model name="delivery_qr_target_c">
+      <static>true</static><link name="marker">@QR_TARGET_C_VISUALS@</link><pose>23 1 0.10 0 0 0</pose>
+    </model>
+    <model name="delivery_qr_target_d">
+      <static>true</static><link name="marker">@QR_TARGET_D_VISUALS@</link><pose>33 -10 0.10 0 0 0</pose>
+    </model>
+    <model name="delivery_qr_target_e">
+      <static>true</static><link name="marker">@QR_TARGET_E_VISUALS@</link><pose>45 -6 0.10 0 0 0</pose>
+    </model>
+
+    <!-- Restricted red zones. Figure 3 is illustrative and the rulebook text
+         explicitly requires avoiding designated red zones within the delivery
+         area, so three separated patches exercise detection and replanning. -->
+    <model name="restricted_red_zone_main">
+      <static>true</static>
+      <link name="zone">
+        <collision name="collision"><geometry><box><size>10 7 0.10</size></box></geometry></collision>
+        <visual name="base"><geometry><box><size>10 7 0.10</size></box></geometry><material><ambient>0.78 0.01 0.01 1</ambient><diffuse>0.95 0.02 0.02 1</diffuse></material></visual>
+        @RED_ZONE_MAIN_VISUALS@
+      </link>
+      <pose>38 5 0.10 0 0 0</pose>
+    </model>
+    <model name="restricted_red_zone_northwest">
+      <static>true</static>
+      <link name="zone">
+        <collision name="collision"><geometry><box><size>6 4 0.10</size></box></geometry></collision>
+        <visual name="base"><geometry><box><size>6 4 0.10</size></box></geometry><material><ambient>0.78 0.01 0.01 1</ambient><diffuse>0.95 0.02 0.02 1</diffuse></material></visual>
+        @RED_ZONE_NW_VISUALS@
+      </link>
+      <pose>29 10 0.10 0 0 0</pose>
+    </model>
+    <model name="restricted_red_zone_south">
+      <static>true</static>
+      <link name="zone">
+        <collision name="collision"><geometry><box><size>7 4 0.10</size></box></geometry></collision>
+        <visual name="base"><geometry><box><size>7 4 0.10</size></box></geometry><material><ambient>0.78 0.01 0.01 1</ambient><diffuse>0.95 0.02 0.02 1</diffuse></material></visual>
+        @RED_ZONE_SOUTH_VISUALS@
+      </link>
+      <pose>40 -11 0.10 0 0 0</pose>
+    </model>
+
+    <gui fullscreen="false">
+      <plugin filename="MinimalScene" name="3D View">
+        <gz-gui><title>Mission 2 Arena</title><property type="bool" key="showTitleBar">false</property><property type="string" key="state">docked</property></gz-gui>
+        <engine>ogre2</engine><scene>scene</scene><ambient_light>0.72 0.72 0.72</ambient_light><background_color>0.72 0.82 0.93</background_color>
+        <camera_pose>-7 -15 16 0 0.66 0.72</camera_pose>
+      </plugin>
+      <plugin filename="GzSceneManager" name="Scene Manager"/>
+      <plugin filename="InteractiveViewControl" name="Interactive View Control"/>
+      <plugin filename="WorldControl" name="World control"><gz-gui><property type="bool" key="showTitleBar">false</property><property type="bool" key="resizable">false</property><property type="double" key="height">72</property><property type="double" key="width">121</property><property type="string" key="state">floating</property><anchors target="3D View"><line own="left" target="left"/><line own="bottom" target="bottom"/></anchors></gz-gui><play_pause>true</play_pause><step>true</step><start_paused>false</start_paused></plugin>
+      <plugin filename="WorldStats" name="World stats"><gz-gui><property type="bool" key="showTitleBar">false</property><property type="bool" key="resizable">false</property><property type="double" key="height">110</property><property type="double" key="width">290</property><property type="string" key="state">floating</property><anchors target="3D View"><line own="right" target="right"/><line own="bottom" target="bottom"/></anchors></gz-gui><sim_time>true</sim_time><real_time>true</real_time><real_time_factor>true</real_time_factor><iterations>true</iterations></plugin>
+    </gui>
+  </world>
+</sdf>

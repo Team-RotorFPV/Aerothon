@@ -1,0 +1,6 @@
+qr_start.png: AEROTHON2026:M2:TARGET_A
+qr_target_a.png: AEROTHON2026:M2:TARGET_A
+qr_target_b.png: AEROTHON2026:M2:TARGET_B
+qr_target_c.png: AEROTHON2026:M2:TARGET_C
+qr_target_d.png: AEROTHON2026:M2:TARGET_D
+qr_target_e.png: AEROTHON2026:M2:TARGET_E

@@ -1,0 +1,38 @@
+# ROS 2 / colcon build artifacts
+build/
+install/
+log/
+logs/
+
+# Rust build output
+target/
+**/src-tauri/target/
+
+# Node
+node_modules/
+dist/
+
+# Simulator / flight artifacts
+eeprom.bin
+mav.tlog
+mav.tlog.raw
+mav.parm
+*.tlog
+*.tlog.raw
+dumpcore.sh_*.out
+dumpstack.sh_*.out
+core.*
+
+# Evidence / large telemetry captures
+evidence/
+*.mcap
+*.bag
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Misc
+*.log
+.DS_Store

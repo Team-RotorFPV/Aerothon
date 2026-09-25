@@ -1,0 +1,48 @@
+# docker-compose for the AeroTHON Mission 2 stack.
+#   docker compose build
+#   xhost +local:docker
+#   docker compose up sim      # SITL + Gazebo + MAVROS
+#   docker compose up ros      # perception / avoidance / mission nodes
+#   docker compose up gcs_backend
+#
+# Notes:
+#  - X11 GUI forwarding via DISPLAY + /tmp/.X11-unix.
+#  - GPU passthrough: uncomment the `deploy` block on NVIDIA dev boxes
+#    (needs nvidia-container-toolkit). The Pi 5 uses CPU rendering.
+#  - The workspace is mounted so you edit on the host, build in-container.
+
+x-common: &common
+  build: .
+  environment:
+    - DISPLAY=${DISPLAY}
+    - QT_X11_NO_MITSHM=1
+    - ROS_LOCALHOST_ONLY=1        # keep DDS off the network
+  volumes:
+    - ../:/aerothon_ws/src/aerothon:rw
+    - /tmp/.X11-unix:/tmp/.X11-unix:rw
+  network_mode: host
+  # deploy:                       # <-- uncomment for NVIDIA GPU
+  #   resources:
+  #     reservations:
+  #       devices: [{driver: nvidia, count: 1, capabilities: [gpu]}]
+
+services:
+  sim:
+    <<: *common
+    command: >
+      bash -lc "source /opt/ros/jazzy/setup.bash &&
+                ros2 launch sim_gazebo mission2_world.launch.py"
+
+  ros:
+    <<: *common
+    command: >
+      bash -lc "source /opt/ros/jazzy/setup.bash &&
+                source install/setup.bash &&
+                ros2 launch mission_bringup mission2.launch.py use_sim:=true"
+
+  gcs_backend:
+    <<: *common
+    command: >
+      bash -lc "source /opt/ros/jazzy/setup.bash &&
+                source install/setup.bash &&
+                ros2 run gcs_aggregator aggregator"
