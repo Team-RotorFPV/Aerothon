@@ -15,7 +15,6 @@ Phase 0 fail-closed rails live here:
 
 import json
 import math
-import rclpy
 from rclpy.node import Node
 from rclpy.qos import (QoSProfile, QoSDurabilityPolicy, QoSHistoryPolicy,
                        qos_profile_sensor_data)
@@ -24,9 +23,15 @@ from sensor_msgs.msg import BatteryState, LaserScan
 from std_msgs.msg import Bool, Float32, String
 from mavros_msgs.msg import HomePosition, State, WaypointList
 from mavros_msgs.srv import WaypointPush as _WaypointPush
-from mavros_msgs.srv import CommandBool, SetMode, CommandTOL
+from mavros_msgs.srv import (CommandBool, CommandLong, ParamSetV2, SetMode,
+                             CommandTOL)
+from rcl_interfaces.msg import ParameterType, ParameterValue
 
-from mission_bt.scan_geometry import fit_surface, no_surface as _no_surface
+from mission_bt.delivery_zone import (boundary_to_local_zone, inset_zone,
+                                      parse_boundary, parse_polygon,
+                                      polygon_to_local)
+from mission_bt.scan_geometry import (fit_surface, gate_opening,
+                                      no_surface as _no_surface)
 
 
 # Modes the aircraft may legitimately enter under our own command. A change
@@ -51,6 +56,7 @@ class Mav:
     def __init__(self, node: Node):
         self.node = node
         self.state = State()
+        self._fcu_state = State()          # last state reported over a live link
         self.battery = BatteryState()
         self.pose = PoseStamped()
         self.qr_decoded = ""
@@ -87,6 +93,7 @@ class Mav:
         self.banner_reject_counts = {}
         self.banner_board_aspect = 0.0
         self.banner_board_area = 0.0
+        self.banner_green = None       # largest green region in view, if any
         self.abort_requested = False
         self.abort_reason = ""
         # Once an abort fires it must STAY fired. The guard condition is
@@ -153,6 +160,12 @@ class Mav:
                                  self._on_banner_detail, qos)
         node.create_subscription(String, '/percep/redzone/detail',
                                  self._on_redzone, qos)
+        # The payload as the camera sees it (perception_redzone payload_node):
+        # what WinchDrop confirms a drop with.
+        self.payload_det = {"visible": False}
+        self.payload_det_t = None
+        node.create_subscription(String, '/percep/payload',
+                                 self._on_payload, qos)
         # THE LIDAR, finally reaching the mission tree.
         #
         # /scan has been live and bridged since Phase 0, and the only things
@@ -178,6 +191,20 @@ class Mav:
         self.home = None
         node.create_subscription(HomePosition, '/mavros/home_position/home',
                                  self._on_home, qos)
+        self.delivery_zone_global = None
+        self.delivery_zone_local = None
+        self.delivery_zone_reason = "delivery-zone boundary is missing"
+        node.create_subscription(String, '/mission/delivery_zone',
+                                 self._on_delivery_zone, _latched_qos())
+        # RULEBOOK, Mission 2 Operation: "Coordinates for the geo-fence
+        # boundary will be provided. Teams must program these into the ground
+        # station software to ensure the UAS stays within the designated
+        # area." Supplied, not inferred: a polygon of 3+ WGS84 vertices.
+        self.geofence_global = None
+        self.geofence_local = None
+        self.geofence_reason = "arena geofence boundary is missing"
+        node.create_subscription(String, '/mission/geofence',
+                                 self._on_geofence, _latched_qos())
         # Geofence: pushed, then READ BACK. An unverified fence is worse than
         # none because it is believed (goal.md Q13/Q24).
         self.fence_readback = None
@@ -185,6 +212,10 @@ class Mav:
                                  self._on_fence_readback, _latched_qos(depth=1))
         self.cli_fence_push = node.create_client(_WaypointPush,
                                                  '/mavros/geofence/push')
+        # MAVROS2 serves /mavros/param/set as ParamSetV2. A ParamSet (v1)
+        # client on the same name never matches, so service_is_ready() stays
+        # False forever -- which is how FENCE_ENABLE was never once set.
+        self.cli_param_set = node.create_client(ParamSetV2, '/mavros/param/set')
 
         self.pub_sp = node.create_publisher(PoseStamped, '/mavros/setpoint_position/local', qos)
         self.pub_enable = node.create_publisher(Bool, '/avoidance/enable', qos)
@@ -201,6 +232,8 @@ class Mav:
         # zone_entry / zone_bounds / corridor_return_entry constants (audit
         # A7, A8, A9): everything here is measured during this mission.
         self.corridor_exit_pose = None      # (x, y, z, yaw) where walls fell away
+        self.gate_heading = None            # yaw squared on the outbound gate
+        self.outbound_banner_xy = None      # where that gate's board stands
         self.observed_zone = None           # (x0, x1, y0, y1) from the lidar
         # Red ground the camera has mapped, as local-frame rectangles. The
         # search planner routes lanes around these and the geofence encodes
@@ -227,6 +260,8 @@ class Mav:
         self.cli_mode = node.create_client(SetMode, '/mavros/set_mode')
         self.cli_takeoff = node.create_client(CommandTOL, '/mavros/cmd/takeoff')
         self.cli_land = node.create_client(CommandTOL, '/mavros/cmd/land')
+        self.cli_command = node.create_client(CommandLong, '/mavros/cmd/command')
+        self.speed_cmd = None               # last ground speed requested, m/s
 
         node.create_timer(0.1, self._stream)   # 10 Hz setpoint stream
 
@@ -249,6 +284,60 @@ class Mav:
 
     def _on_home(self, m):
         self.home = m
+        self._resolve_delivery_zone()
+        self._resolve_geofence()
+
+    def _on_geofence(self, m):
+        vertices, why = parse_polygon(m.data, what="geofence")
+        self.geofence_global = vertices
+        self.geofence_local = None
+        self.geofence_reason = why
+        self._resolve_geofence()
+
+    def _resolve_geofence(self):
+        if self.geofence_global is None or self.home is None:
+            return
+        pts, why = polygon_to_local(
+            self.geofence_global,
+            float(self.home.geo.latitude), float(self.home.geo.longitude))
+        self.geofence_local = pts
+        self.geofence_reason = why or "geofence polygon resolved in local ENU"
+        if pts is not None:
+            xs = [p[0] for p in pts]
+            ys = [p[1] for p in pts]
+            self.node.get_logger().info(
+                f"Arena geofence loaded: {len(pts)} vertices, "
+                f"x {min(xs):.1f}..{max(xs):.1f}, y {min(ys):.1f}..{max(ys):.1f}")
+
+    def _on_delivery_zone(self, m):
+        vertices, why = parse_boundary(m.data)
+        self.delivery_zone_global = vertices
+        self.delivery_zone_local = None
+        self.delivery_zone_reason = why
+        self._resolve_delivery_zone()
+
+    def _resolve_delivery_zone(self):
+        if self.delivery_zone_global is None or self.home is None:
+            return
+        zone, why = boundary_to_local_zone(
+            self.delivery_zone_global,
+            float(self.home.geo.latitude), float(self.home.geo.longitude))
+        self.delivery_zone_local = zone
+        self.delivery_zone_reason = why or "four-corner boundary resolved in local ENU"
+        if zone is not None:
+            self.node.get_logger().info(
+                "Delivery-zone boundary loaded: "
+                f"x {zone[0]:.1f}..{zone[1]:.1f}, "
+                f"y {zone[2]:.1f}..{zone[3]:.1f}")
+
+    def delivery_search_zone(self, clearance_m):
+        if self.delivery_zone_local is None:
+            return None
+        try:
+            return inset_zone(self.delivery_zone_local, clearance_m)
+        except ValueError as exc:
+            self.delivery_zone_reason = str(exc)
+            return None
 
     def home_local_xy(self):
         """Home in the LOCAL frame.
@@ -312,6 +401,17 @@ class Mav:
             self.banner_board_aspect = float(d.get('board_aspect') or 0.0)
             self.banner_board_area = float(d.get('board_area_px') or 0.0)
 
+        # Where the biggest green thing in view is, identified or not: the
+        # lead an edge-on banner leaves (see banner_orbit.green_fix).
+        if d.get('green_px'):
+            self.banner_green = {
+                "px": d['green_px'], "area": float(d.get('green_area_px') or 0.0),
+                "bearing": float(d.get('green_bearing') or 0.0),
+                "wh": d.get('image_wh') or [1280, 720],
+                "t": self.node.get_clock().now().nanoseconds * 1e-9}
+        else:
+            self.banner_green = None
+
         reason = (d.get('reason') or '').strip()
         if reason:
             self.banner_reject_reason = reason
@@ -373,6 +473,28 @@ class Mav:
                            range_max=float(scan.range_max),
                            expected_range_m=expected_range_m, **kw)
 
+    def opening_ahead(self, bearing_rad, half_width_rad, need_clear_m=10.0,
+                      stale_s=1.0, **kw):
+        """Is there a way THROUGH at this height, or is the board here?
+
+        The second lidar question, and the one that decides whether the
+        aircraft may fly forward. Squaring up happens at board height, because
+        that is the only height at which the board's angle can be measured;
+        flying through has to happen below it. Same seam, same refusal shape.
+        """
+        age = self.scan_age_s()
+        if self._scan is None or age is None or age > float(stale_s):
+            return {"open": False, "clusters": 0, "gap_m": 0.0,
+                    "gate_m": None, "clear_m": 0.0,
+                    "reason": ("no usable lidar scan; refusing to call a gate "
+                               "open on a measurement that was never taken")}
+        scan = self._scan
+        return gate_opening(scan.angle_min, scan.angle_increment, scan.ranges,
+                            bearing_rad, half_width_rad,
+                            need_clear_m=need_clear_m,
+                            range_min=float(scan.range_min),
+                            range_max=float(scan.range_max), **kw)
+
     def publish_square_on(self, payload):
         """Report the squareness measurement to the GCS while it converges.
 
@@ -390,18 +512,6 @@ class Mav:
         Phase 4 any green rectangle produced 1.0 and the GCS said ALIGNED.
         """
         return self.banner.z >= 1.0
-
-    def banner_elevation(self):
-        """Where the banner sits VERTICALLY in frame, [-1, 1], -1 = top edge.
-
-        perception_banner has always published this as `banner.y` and nothing
-        read it. It is the signal that distinguishes the two ways of losing
-        the banner during an approach: flying UNDER a gate pushes it out of
-        the top of the frame, while drifting off it loses it sideways or in
-        the middle. Those are success and failure respectively, and
-        ApproachBanner could not tell them apart.
-        """
-        return self.banner.y if self.banner_identified() else 0.0
 
     def banner_bearing(self):
         """Normalised horizontal offset, [-1,1], negative = banner to the left."""
@@ -424,6 +534,11 @@ class Mav:
             self.mission_complete = False
             self._attitude_violations = 0
             self.clear_airborne_floor()
+            # This mission's corridor, not the last one's.
+            self.corridor_exit_pose = None
+            self.gate_heading = None
+            self.outbound_banner_xy = None
+            self.delivery_confirmed = None     # set by WinchDrop's camera check
             self.node.get_logger().info("Mission 2 start received from GCS")
 
     def _on_pose(self, m):
@@ -436,8 +551,18 @@ class Mav:
             self._attitude_violations = 0
 
     def _on_state(self, m):
-        prev = self.state
+        prev = self.state if self.state.connected else self._fcu_state
         self.state = m
+        # A disarm is only a disarm when the FCU says so. On heartbeat loss
+        # MAVROS publishes connected=False with every other field defaulted,
+        # armed=False included; reading that as a disarm ended arena 1001
+        # (batch E) as "external disarm" while the aircraft hovered armed in
+        # GUIDED. A lost link is the abort guard's business. So compare
+        # against the last state the FCU actually reported, which also
+        # catches a disarm that happened during the outage once it returns.
+        self._fcu_state = prev if not m.connected else m
+        if not m.connected:
+            return
         # Only an active mission can be interrupted; a disarmed idle aircraft
         # changing mode on the bench is not an event.
         if not self.mission_started:
@@ -550,6 +675,7 @@ class Mav:
             # rulebook marks; leaving it only in a sentence means the panel
             # can show it but cannot compare, threshold or chart it.
             "delivery_offset_m": getattr(self, "delivery_offset_m", None),
+            "delivery_confirmed": getattr(self, "delivery_confirmed", None),
             "landing_precision": getattr(self, "landing_precision", None),
             "t": self.node.get_clock().now().nanoseconds / 1e9,
         })
@@ -749,7 +875,10 @@ class Mav:
             self.avoid_detail = {}
 
     def corridor_exited(self):
-        return bool(self.avoid_detail.get("corridor_exited"))
+        # OBSERVING retains the last traversal's exit flag. It cannot end a
+        # new traversal before the navigator has even taken control.
+        return (self.avoid_detail.get("state") == "CRUISE"
+                and bool(self.avoid_detail.get("corridor_exited")))
 
     def avoidance_stuck(self):
         return self.avoid_detail.get("state") == "STUCK"
@@ -812,6 +941,24 @@ class Mav:
             self.corridor_exit_pose = (x, y, z, self.yaw())
         return self.corridor_exit_pose
 
+    def record_gate_heading(self, yaw):
+        """Latch the heading squared on the outbound gate: the corridor axis.
+
+        Measured with the lidar to within the square-on tolerance, which the
+        yaw at the exit is not -- the navigator weaves down the lane. First
+        write wins, like the exit: the return gate must not overwrite it.
+        """
+        if self.gate_heading is None:
+            self.gate_heading = float(yaw)
+        return self.gate_heading
+
+    def record_outbound_banner(self, x, y):
+        """Latch where the OUTBOUND banner is (first write wins), so the
+        search for the return banner can tell the two boards apart."""
+        if getattr(self, "outbound_banner_xy", None) is None:
+            self.outbound_banner_xy = (float(x), float(y))
+        return self.outbound_banner_xy
+
     def _on_fence_readback(self, m):
         self.fence_readback = list(m.waypoints)
 
@@ -830,6 +977,59 @@ class Mav:
         req.waypoints = items
         self.fence_readback = None
         return self.cli_fence_push.call_async(req)
+
+    def set_param(self, name, value):
+        """Set one FC parameter through MAVROS. Returns the future or None.
+
+        A Python int goes as an integer parameter, anything else as a double
+        (FENCE_TYPE is int8 on the FC, FENCE_ALT_MAX a float). force_set
+        sends it even before MAVROS has finished pulling the parameter list,
+        which at a low real-time factor takes minutes.
+        """
+        if not self.cli_param_set.service_is_ready():
+            return None
+        req = ParamSetV2.Request()
+        req.force_set = True
+        req.param_id = str(name)
+        if isinstance(value, bool) or isinstance(value, int):
+            req.value = ParameterValue(type=ParameterType.PARAMETER_INTEGER,
+                                       integer_value=int(value))
+        else:
+            req.value = ParameterValue(type=ParameterType.PARAMETER_DOUBLE,
+                                       double_value=float(value))
+        return self.cli_param_set.call_async(req)
+
+    def set_speed(self, ground_mps):
+        """Cap horizontal speed for position setpoints (MAV_CMD_DO_CHANGE_SPEED).
+
+        GUIDED position targets fly at WPNAV_SPEED unless told otherwise. The
+        search needs a lower one: red ground has to be SEEN, confirmed over
+        several frames and routed round before the airframe arrives at it.
+        Returns the future, or None when the command service is not up.
+        """
+        if not self.cli_command.service_is_ready():
+            return None
+        req = CommandLong.Request()
+        req.command = 178                   # MAV_CMD_DO_CHANGE_SPEED
+        req.param1 = 1.0                    # ground speed
+        req.param2 = float(ground_mps)
+        req.param3 = -1.0                   # throttle unchanged
+        self.speed_cmd = float(ground_mps)
+        return self.cli_command.call_async(req)
+
+    def _on_payload(self, m):
+        try:
+            self.payload_det = json.loads(m.data)
+        except (ValueError, TypeError):
+            return
+        self.payload_det_t = self.node.get_clock().now().nanoseconds * 1e-9
+
+    def payload_seen(self, max_age_s=1.5):
+        """The latest payload detection if it is fresh, else None."""
+        if self.payload_det_t is None:
+            return None
+        age = self.node.get_clock().now().nanoseconds * 1e-9 - self.payload_det_t
+        return self.payload_det if age <= max_age_s else None
 
     def _on_redzone(self, m):
         """Georeferenced red zones, replacing a positionless Bool (Phase 7)."""

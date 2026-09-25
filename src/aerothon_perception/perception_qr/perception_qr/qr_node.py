@@ -41,13 +41,11 @@ Topics
 """
 
 import json
-import math
 
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 import cv2
-import numpy as np
 from cv_bridge import CvBridge
 from geometry_msgs.msg import PoseStamped, Vector3
 from sensor_msgs.msg import CameraInfo, Image
@@ -176,6 +174,9 @@ class QrNode(Node):
             ok, infos, points = False, [], None
 
         require = bool(self.get_parameter('require_plausible').value)
+        # The annotated copy is for a GCS debug view; nobody subscribed, no
+        # drawing and no 2.7 MB conversion.
+        annotate = self.pub_annot.get_subscription_count() > 0
 
         # Where things are, in IMAGE coordinates, so one overlay stream can
         # draw every detector's findings on the live camera frame without
@@ -193,17 +194,19 @@ class QrNode(Node):
                 if not good and require:
                     rejected.append({"payload": info[:32], "px": round(marker_px, 1),
                                      "why": why})
-                    cv2.polylines(frame, [quad_i], True, (0, 0, 255), 2)
-                    cv2.putText(frame, "IMPLAUSIBLE", tuple(quad_i[0]),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+                    if annotate:
+                        cv2.polylines(frame, [quad_i], True, (0, 0, 255), 2)
+                        cv2.putText(frame, "IMPLAUSIBLE", tuple(quad_i[0]),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
                     boxes.append({"quad": quad_i.tolist(),
                                   "label": "IMPLAUSIBLE", "ok": False})
                     continue
 
-                colour = (0, 255, 0) if is_match else (0, 180, 255)
-                cv2.polylines(frame, [quad_i], True, colour, 2)
-                cv2.putText(frame, info[:24], tuple(quad_i[0]),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, colour, 2)
+                if annotate:
+                    colour = (0, 255, 0) if is_match else (0, 180, 255)
+                    cv2.polylines(frame, [quad_i], True, colour, 2)
+                    cv2.putText(frame, info[:24], tuple(quad_i[0]),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, colour, 2)
                 boxes.append({"quad": quad_i.tolist(), "label": info[:24],
                               "ok": bool(is_match)})
 
@@ -239,10 +242,11 @@ class QrNode(Node):
             "boxes": boxes,
         })))
 
-        try:
-            self.pub_annot.publish(self.bridge.cv2_to_imgmsg(frame, encoding='bgr8'))
-        except Exception:  # noqa: BLE001
-            pass
+        if annotate:
+            try:
+                self.pub_annot.publish(self.bridge.cv2_to_imgmsg(frame, encoding='bgr8'))
+            except Exception:  # noqa: BLE001
+                pass
 
 
 def main():

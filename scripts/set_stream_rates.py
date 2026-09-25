@@ -48,12 +48,13 @@ DESIRED = {
     2:    4.0,   # SYSTEM_TIME
     27:  10.0,   # RAW_IMU
     65:   5.0,   # RC_CHANNELS         - RC / failsafe state
+    193:  2.0,   # EKF_STATUS_REPORT   - EKF health (Q27 interlock)
 }
 
 MESSAGE_NAMES = {
     30: "ATTITUDE", 32: "LOCAL_POSITION_NED", 33: "GLOBAL_POSITION_INT",
     24: "GPS_RAW_INT", 74: "VFR_HUD", 1: "SYS_STATUS", 2: "SYSTEM_TIME",
-    27: "RAW_IMU", 65: "RC_CHANNELS",
+    27: "RAW_IMU", 65: "RC_CHANNELS", 193: "EKF_STATUS_REPORT",
 }
 
 

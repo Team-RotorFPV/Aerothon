@@ -167,6 +167,10 @@ class Overlay(Node):
         return frame
 
     def _on_image(self, msg):
+        # The GCS subscribes only while an operator is watching; compositing
+        # a frame nobody receives cost ~6 ms of CPU per camera frame.
+        if not self.pub.get_subscription_count():
+            return
         try:
             frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
         except Exception:  # noqa: BLE001

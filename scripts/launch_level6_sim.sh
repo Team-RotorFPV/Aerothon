@@ -276,17 +276,20 @@ fi
 # MAVProxy additionally hardcodes a second --out to 127.0.0.1:14551, which is
 # what Mission Planner connects to for SITL. The router therefore keeps its own
 # GCS ports clear of both.
-FCU_IN_PORT="${AEROTHON_FCU_IN_PORT:-14550}"
+# 14560 is SITL SERIAL1, given to the router by sim_full.launch.py.
+# 14550 is MAVProxy's --out and is deliberately NOT used: streams
+# requested through MAVProxy are reset to its 4 Hz default.
+FCU_IN_PORT="${AEROTHON_FCU_IN_PORT:-14560}"
 ROUTER_GCS_PORT="${AEROTHON_ROUTER_GCS_PORT:-14552}"
 
-echo "[1/4] Starting MAVLink Router (FCU in ${FCU_IN_PORT}; MAVROS 14555; GCS -> ${MP_HOST}:${MP_PORT})..."
+echo "[1/5] Starting MAVLink Router (FCU in ${FCU_IN_PORT}; MAVROS 14555; GCS -> ${MP_HOST}:${MP_PORT})..."
 python3 "$SCRIPT_DIR/mav_router.py" --fcu-in "$FCU_IN_PORT" --mavros-port 14555 \
     --gcs-port "$ROUTER_GCS_PORT" --gcs-host "$MP_HOST" --gcs-out-port "$MP_PORT" &
 PIDS+=($!)
 sleep 1
 
 # 4. Start GCS Web Server
-echo "[2/4] Starting built three-tab GCS on http://localhost:8899..."
+echo "[2/5] Starting built three-tab GCS on http://localhost:8899..."
 python3 -m http.server 8899 -d "$WORKSPACE_ROOT/src/aerothon_gcs/tauri_app/dist" >/dev/null 2>&1 &
 PIDS+=($!)
 
@@ -303,12 +306,27 @@ echo "   -> Web GCS URL: http://localhost:8899/"
 echo "   -> Live Video : http://localhost:8080/stream?topic=/percep/qr/annotated"
 echo "======================================================================"
 
-# Open the GCS automatically alongside Gazebo and RViz. Brave needs X11
-# compatibility on this Wayland / Intel setup because its Vulkan surface path
-# is not available. Set AEROTHON_OPEN_GCS=0 for headless launches.
+# Open the GCS automatically alongside Gazebo and RViz.
+#
+# Under WSL, Brave has no working Vulkan surface path, so it needs to be forced
+# onto XWayland with GPU rendering off or it never paints. Those two flags were
+# applied unconditionally, and on a NATIVE Wayland session they cause the very
+# failure they were added to prevent: --ozone-platform=x11 pushes a Wayland-
+# native browser through XWayland and --disable-gpu takes away the compositing
+# path it then needs, giving a window that opens, loads the page and renders
+# nothing. The GCS was serving correctly the whole time -- the same URL in any
+# other browser showed live telemetry -- so the blank window read as a broken
+# frontend rather than a browser flag.
+#
+# Gate them the way the Gazebo GUI renderer above is gated: WSL only.
+# Set AEROTHON_OPEN_GCS=0 for headless launches.
 if [[ "${AEROTHON_OPEN_GCS:-1}" == "1" ]]; then
+    GCS_BROWSER_FLAGS=()
+    if [[ -n "${WSL_DISTRO_NAME:-}" ]]; then
+        GCS_BROWSER_FLAGS=(--ozone-platform=x11 --disable-gpu)
+    fi
     if command -v brave-browser >/dev/null 2>&1; then
-        brave-browser --ozone-platform=x11 --disable-gpu \
+        brave-browser "${GCS_BROWSER_FLAGS[@]}" \
             --new-window http://127.0.0.1:8899/ >/dev/null 2>&1 &
     elif command -v xdg-open >/dev/null 2>&1; then
         xdg-open http://127.0.0.1:8899/ >/dev/null 2>&1 &
@@ -353,10 +371,65 @@ export GZ_SIM_RESOURCE_PATH="$VEHICLE_MODELS_DIR:${GZ_SIM_RESOURCE_PATH:-}"
 python3 "$SCRIPT_DIR/materialize_world.py" \
     --source "$WORKSPACE_ROOT/src/aerothon_sim/sim_gazebo/worlds/mission2.sdf" \
     --assets "$WORKSPACE_ROOT/src/aerothon_sim/sim_gazebo/materials" \
-    --output "$WORLD_RUNTIME"
+    --output "$WORLD_RUNTIME" \
+    --layout-out /tmp/aerothon_arena_layout.json
 
-echo "[3/4] Starting Gazebo server and waiting for the Mission 2 world..."
-gz sim -s -r --headless-rendering -v 3 "$WORLD_RUNTIME" &
+# The organiser inputs for THIS arena. A randomised arena moves the delivery
+# field, and publishing the shipped arena's boundary for it sent the search
+# to the wrong place. An explicit AEROTHON_DELIVERY_ZONE / AEROTHON_GEOFENCE
+# still wins, so a boundary can be supplied by hand.
+if [[ -z "${AEROTHON_DELIVERY_ZONE:-}" || -z "${AEROTHON_GEOFENCE:-}" ]]; then
+    eval "$(python3 - <<'PY'
+import json
+d = json.load(open("/tmp/aerothon_arena_layout.json"))
+z = d["delivery_zone_rect"]; f = d["geofence_rect"]
+print("LAYOUT_ZONE=%s" % ",".join("%.3f" % v for v in z))
+if d.get("geofence_poly"):     # a user-built arena's polygon (x,y;x,y;...)
+    print("LAYOUT_FENCE='%s'" % ";".join("%.3f,%.3f" % (x, y)
+                                        for x, y in d["geofence_poly"]))
+else:
+    print("LAYOUT_FENCE=%s" % ",".join("%.3f" % v for v in f))
+PY
+)"
+    export AEROTHON_DELIVERY_ZONE="${AEROTHON_DELIVERY_ZONE:-$LAYOUT_ZONE}"
+    export AEROTHON_GEOFENCE="${AEROTHON_GEOFENCE:-$LAYOUT_FENCE}"
+fi
+echo "[SIM] delivery zone cx,cy,w,h = $AEROTHON_DELIVERY_ZONE | geofence x0,x1,y0,y1 = $AEROTHON_GEOFENCE"
+
+echo "[3/5] Starting Gazebo server and waiting for the Mission 2 world..."
+# Render the sensors on the GPU rather than on the CPU.
+#
+# glxinfo in this WSL reports "llvmpipe (LLVM 20.1.2)", so every gpu_lidar ray
+# and every camera frame was being rasterised in software. The 720-sample
+# lidar then delivered 2.3 Hz against its configured 10 -- under the 8 Hz Q27
+# requires -- and the camera detectors ran at 0.1 Hz, so the interlock refused
+# to arm for a reason that is nowhere in the code.
+#
+# GALLIUM_DRIVER=d3d12 selects the real adapter; verified on this machine as
+# "D3D12 (Intel(R) UHD Graphics)". The GUI branch below already did this and
+# the server was deliberately left on default Mesa, which is what put sensor
+# rendering on llvmpipe while the window got the GPU.
+#
+# MEASURED, and it is a trade rather than a win, which is why it is OFF by
+# default. With the GUI up on this machine:
+#
+#   llvmpipe (software)      lidar 2.3 Hz   camera detectors 0.1 Hz
+#   D3D12 (Intel UHD iGPU)   lidar 1.0 Hz   camera detectors 0.4 Hz
+#
+# The camera got 4x faster and the lidar 2.3x slower. The 720-sample gpu_lidar
+# is many small render passes, where D3D12 translation overhead on a weak iGPU
+# costs more than it saves; the single large camera frame benefits. Neither
+# setting reaches the 8 Hz Q27 needs while the GUI is up -- only
+# AEROTHON_HEADLESS=1 does.
+#
+# Set AEROTHON_SERVER_GPU=1 to opt in (worth it if the camera is what matters).
+SERVER_ENV=()
+if [[ "${AEROTHON_SERVER_GPU:-0}" == "1" && -n "${WSL_DISTRO_NAME:-}" && -e /dev/dxg ]]; then
+    SERVER_ENV=("GALLIUM_DRIVER=${GALLIUM_DRIVER:-d3d12}"
+                "LD_LIBRARY_PATH=/usr/lib/wsl/lib:${LD_LIBRARY_PATH:-}")
+    echo "[OK] gz-server sensor rendering on the GPU (GALLIUM_DRIVER=d3d12)."
+fi
+env "${SERVER_ENV[@]}" gz sim -s -r --headless-rendering -v 3 "$WORLD_RUNTIME" &
 PIDS+=($!)
 
 WORLD_READY=false
@@ -385,13 +458,39 @@ if [[ "${AEROTHON_HEADLESS:-0}" == "1" ]]; then
     RVIZ_ARG="false"
 else
     echo "[OK] Gazebo Mission 2 world is ready. Opening GUI..."
-    gz sim -g &
+    GUI_ENV=()
+    GUI_ENGINE="${AEROTHON_GUI_RENDER_ENGINE:-ogre2}"
+    if [[ -n "${WSL_DISTRO_NAME:-}" && -e /dev/dxg ]]; then
+        # WSL's default Mesa selection may fall back to llvmpipe. OGRE2 on
+        # D3D12 also left Qt waiting on its render thread in the watched run.
+        # Use the verified GUI renderer; server sensor rendering stays OGRE2.
+        GUI_ENV=("GALLIUM_DRIVER=${GALLIUM_DRIVER:-d3d12}")
+        GUI_ENGINE="${AEROTHON_GUI_RENDER_ENGINE:-ogre}"
+    fi
+    env "${GUI_ENV[@]}" gz sim -g --render-engine-gui "$GUI_ENGINE" &
     PIDS+=($!)
     RVIZ_ARG="true"
 fi
 
+# 5b. Play the organiser and supply the delivery-zone boundary.
+#
+# The mission and gcs_readiness both require a four-corner boundary before
+# `/mission_ready` can go true, and nothing in the simulator supplied one, so
+# every simulated run stopped at not-ready with "delivery-zone boundary is
+# missing" and could not arm. This publishes the shipped arena's field, latched,
+# once the FCU home position exists.
+#
+# For a randomised arena, pass that seed's zone centre:
+#   AEROTHON_DELIVERY_ZONE="cx,cy,40,30" ./scripts/launch_level6_sim.sh
+# Set AEROTHON_SUPPLY_DELIVERY_ZONE=0 to drive the boundary from the GCS instead.
+if [[ "${AEROTHON_SUPPLY_DELIVERY_ZONE:-1}" == "1" ]] && command -v ros2 >/dev/null 2>&1; then
+    echo "[4/5] Supplying the delivery-zone boundary (${AEROTHON_DELIVERY_ZONE:-32,0,40,30})..."
+    python3 "$SCRIPT_DIR/publish_delivery_zone.py" &
+    PIDS+=($!)
+fi
+
 # 6. Launch Full Simulation Stack (SITL + ROS 2 + SLAM + RViz)
-echo "[3/4] Launching Gazebo Harmonic + ROS 2 Stack + slam_toolbox + RViz 2..."
+echo "[5/5] Launching Gazebo Harmonic + ROS 2 Stack + slam_toolbox + RViz 2..."
 if command -v ros2 >/dev/null 2>&1; then
     ros2 launch sim_gazebo sim_full.launch.py \
         fcu_url:=udp://127.0.0.1:14555@127.0.0.1:14556 rviz:="$RVIZ_ARG" slam:=true \

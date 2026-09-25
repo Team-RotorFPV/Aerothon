@@ -14,15 +14,18 @@ import math
 import time
 import threading
 
+import numpy as np
+
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data, QoSProfile
+from rclpy.qos import (qos_profile_sensor_data, QoSProfile,
+                       QoSDurabilityPolicy, QoSHistoryPolicy)
 from mavros_msgs.msg import State, EstimatorStatus, WaypointList
 from mavros_msgs.srv import CommandBool, SetMode, CommandTOL
 from sensor_msgs.msg import BatteryState, NavSatFix, LaserScan
 from geometry_msgs.msg import PoseStamped, Vector3, TwistStamped
 from nav_msgs.msg import OccupancyGrid
-from std_msgs.msg import String, Bool, Float32, Float64, UInt32
+from std_msgs.msg import String, Bool, Float64, UInt32
 
 import websockets
 
@@ -42,6 +45,21 @@ def _euler_deg(q):
 SCHEMA_VERSION = 1
 WS_HOST, WS_PORT = "0.0.0.0", 8765
 TELEM_HZ = 10.0
+
+
+def max_pool_grid(data, w, h, step):
+    """(ow, oh, cells): an occupancy grid max-pooled in step x step blocks.
+
+    Max, so an obstacle cell survives the downsampling; -1 (unknown) only
+    where a block holds nothing else. Blocks at the right and bottom edges
+    are truncated, not padded with anything that could win. Vectorised: the
+    per-cell Python loop it replaced cost ~0.1 s a second on a Pi-sized CPU
+    for a 400 x 400 map.
+    """
+    ow, oh = (w + step - 1) // step, (h + step - 1) // step
+    g = np.full((oh * step, ow * step), -1, dtype=np.int16)
+    g[:h, :w] = np.asarray(data, dtype=np.int16).reshape(h, w)
+    return ow, oh, g.reshape(oh, step, ow, step).max(axis=(1, 3)).ravel().tolist()
 
 
 class Aggregator(Node):
@@ -99,6 +117,10 @@ class Aggregator(Node):
         self.pub_target = self.create_publisher(String, "/mission/target", q)
         self.pub_winch = self.create_publisher(String, "/winch/cmd", q)
         self.pub_gimbal_pitch = self.create_publisher(Float64, "/gimbal/cmd_pitch", q)
+        zone_qos = QoSProfile(depth=1, history=QoSHistoryPolicy.KEEP_LAST,
+                              durability=QoSDurabilityPolicy.TRANSIENT_LOCAL)
+        self.pub_delivery_zone = self.create_publisher(
+            String, "/mission/delivery_zone", zone_qos)
 
         self.cli_arm = self.create_client(CommandBool, "/mavros/cmd/arming")
         self.cli_mode = self.create_client(SetMode, "/mavros/set_mode")
@@ -466,6 +488,8 @@ class Aggregator(Node):
 
     def _on_map(self, m):
         """Forward the REAL slam_toolbox occupancy grid (throttled + downsampled)."""
+        if not self._ws_clients:
+            return                  # nobody to forward it to
         now = time.time()
         if now - self._last_map < 1.0:
             return
@@ -474,25 +498,7 @@ class Aggregator(Node):
         if not w or not h:
             return
         step = max(1, max(w, h) // 120)          # cap output ~120 cells/side
-        ow, oh = (w + step - 1) // step, (h + step - 1) // step
-        out = [-1] * (ow * oh)
-        for r in range(0, h, step):
-            orow = (r // step) * ow
-            for c in range(0, w, step):
-                best = -1                         # max-pool so obstacles survive
-                for dr in range(step):
-                    rr = r + dr
-                    if rr >= h:
-                        break
-                    rb = rr * w
-                    for dc in range(step):
-                        cc = c + dc
-                        if cc >= w:
-                            break
-                        v = data[rb + cc]
-                        if v > best:
-                            best = v
-                out[orow + c // step] = int(best)
+        ow, oh, out = max_pool_grid(data, w, h, step)
         grid = {"res": round(m.info.resolution * step, 3), "w": ow, "h": oh,
                 "ox": round(m.info.origin.position.x, 3),
                 "oy": round(m.info.origin.position.y, 3), "data": out}
@@ -503,6 +509,8 @@ class Aggregator(Node):
         return json.dumps({"v": SCHEMA_VERSION, "kind": kind, "t": time.time(), "data": data})
 
     def _publish_snapshot(self):
+        if not self._ws_clients:
+            return                  # no GCS connected: nothing to serialise for
         # Refresh staleness on every snapshot so a field that stops updating
         # is visibly stale rather than frozen at its last confident value.
         self.state["safety"]["stale"] = self._staleness()
@@ -585,6 +593,23 @@ class Aggregator(Node):
                 self.pub_start.publish(Bool(data=True))
             elif cmd == "set_target":
                 self.pub_target.publish(String(data=args.get("target", "")))
+            elif cmd == "set_delivery_zone":
+                vertices = args.get("vertices")
+                if not isinstance(vertices, list) or len(vertices) != 4:
+                    return "rejected", "delivery-zone boundary needs four vertices"
+                clean = []
+                for point in vertices:
+                    try:
+                        lat, lon = float(point["lat"]), float(point["lon"])
+                    except (KeyError, TypeError, ValueError):
+                        return "rejected", "every boundary vertex needs numeric lat and lon"
+                    if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
+                        return "rejected", "boundary vertex is outside WGS84 bounds"
+                    clean.append({"lat": lat, "lon": lon})
+                if len({(p["lat"], p["lon"]) for p in clean}) != 4:
+                    return "rejected", "delivery-zone boundary needs four distinct vertices"
+                payload = json.dumps({"vertices": clean}, separators=(",", ":"))
+                self.pub_delivery_zone.publish(String(data=payload))
             else:
                 return "rejected", "unknown cmd"
             return "accepted", ""

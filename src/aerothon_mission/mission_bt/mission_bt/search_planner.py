@@ -118,7 +118,7 @@ def lane_spacing(altitude_m, hfov_rad, overlap=0.30):
     return ground_width(altitude_m, hfov_rad) * (1.0 - overlap)
 
 
-def plan_lawnmower(zone, spacing, altitude_m):
+def plan_lawnmower(zone, spacing, altitude_m, axis="x"):
     """Boustrophedon waypoints covering `zone` = (x0, x1, y0, y1).
 
     Lanes run along x and step in y. The first and last lanes are inset by half
@@ -129,6 +129,12 @@ def plan_lawnmower(zone, spacing, altitude_m):
     x0, x1, y0, y1 = zone
     if spacing <= 0:
         raise ValueError("spacing must be positive")
+    if axis not in ("x", "y"):
+        raise ValueError("axis must be 'x' or 'y'")
+    if axis == "y":
+        transposed = plan_lawnmower((y0, y1, x0, x1), spacing,
+                                    altitude_m, axis="x")
+        return [(y, x, z) for x, y, z in transposed]
 
     span = y1 - y0
     n_lanes = max(1, int(math.ceil(span / spacing)))
@@ -147,7 +153,8 @@ def plan_lawnmower(zone, spacing, altitude_m):
     return waypoints
 
 
-def coverage_fraction(zone, spacing, altitude_m, hfov_rad, samples=200):
+def coverage_fraction(zone, spacing, altitude_m, hfov_rad, samples=200,
+                      axis="x"):
     """Fraction of the zone within half a swath of some lane.
 
     A coverage PROOF rather than an assertion that the lanes look about right:
@@ -156,7 +163,12 @@ def coverage_fraction(zone, spacing, altitude_m, hfov_rad, samples=200):
     """
     x0, x1, y0, y1 = zone
     half_swath = ground_width(altitude_m, hfov_rad) / 2.0
-    lanes = [wp[1] for wp in plan_lawnmower(zone, spacing, altitude_m)[::2]]
+    if axis == "y":
+        return coverage_fraction((zone[2], zone[3], zone[0], zone[1]),
+                                 spacing, altitude_m, hfov_rad, samples,
+                                 axis="x")
+    lanes = [wp[1] for wp in plan_lawnmower(
+        zone, spacing, altitude_m, axis=axis)[::2]]
     if not lanes:
         return 0.0
     covered = 0
@@ -169,12 +181,19 @@ def coverage_fraction(zone, spacing, altitude_m, hfov_rad, samples=200):
 
 def plan_search(zone, image_width_px, hfov_rad, marker_m, modules,
                 px_per_module_floor=5.3, min_marker_px=25.0,
-                overlap=0.30, max_altitude=None):
+                overlap=0.30, max_altitude=None, axis="x",
+                swath_fov_rad=None):
     """Full search plan: sweep altitude, decode altitude, lanes, coverage.
 
     Returns a dict. `decode_alt` is where the aircraft must descend to over a
     candidate; `sweep_alt` is where it looks for candidates.
+
+    `swath_fov_rad` is the field of view ACROSS the lanes, when that is not
+    the horizontal one: a sweep flown crabbed, with the image's long axis
+    along the lane for look-ahead, sweeps with the vertical FOV. Decode and
+    detect altitudes still come from the image width and `hfov_rad`.
     """
+    swath_fov = hfov_rad if swath_fov_rad is None else float(swath_fov_rad)
     decode_alt = max_decode_altitude(image_width_px, hfov_rad, marker_m,
                                      modules, px_per_module_floor)
     detect_alt = max_detect_altitude(image_width_px, hfov_rad, marker_m,
@@ -196,17 +215,22 @@ def plan_search(zone, image_width_px, hfov_rad, marker_m, modules,
     # correctly reports False because no further descent is needed.
     if max_altitude is not None:
         sweep_alt = min(sweep_alt, max_altitude)
-    spacing = lane_spacing(sweep_alt, hfov_rad, overlap)
-    waypoints = plan_lawnmower(zone, spacing, sweep_alt)
+    spacing = lane_spacing(sweep_alt, swath_fov, overlap)
+    if axis == "auto":
+        axis = "x" if zone[1] - zone[0] >= zone[3] - zone[2] else "y"
+    waypoints = plan_lawnmower(zone, spacing, sweep_alt, axis=axis)
     return {
         "sweep_alt_m": sweep_alt,
         "decode_alt_m": decode_alt,
         "detect_alt_m": detect_alt,
         "lane_spacing_m": spacing,
-        "swath_m": ground_width(sweep_alt, hfov_rad),
+        "swath_m": ground_width(sweep_alt, swath_fov),
+        "swath_fov_rad": swath_fov,
         "waypoints": waypoints,
         "n_lanes": len(waypoints) // 2,
-        "coverage": coverage_fraction(zone, spacing, sweep_alt, hfov_rad),
+        "coverage": coverage_fraction(zone, spacing, sweep_alt, swath_fov,
+                                      axis=axis),
+        "lane_axis": axis,
         "descend_to_decode": sweep_alt > decode_alt + 1e-9,
     }
 
@@ -214,85 +238,6 @@ def plan_search(zone, image_width_px, hfov_rad, marker_m, modules,
 # --------------------------------------------------------------------------- #
 # Observed zone extent (geometry audit A7, A8)
 # --------------------------------------------------------------------------- #
-
-def zone_from_observation(entry_xy, heading_rad, open_depth_m, open_width_m,
-                          margin_m=1.0):
-    """Delivery-zone bounds inferred from what the aircraft can see.
-
-    `zone = (20, 52, -12, 12)` asserted the zone's position and size in advance
-    (audit A8), and `zone_entry` asserted where it began (A7). Both are only
-    true of the arena they were written for.
-
-    On leaving the corridor the aircraft knows where it is, which way it is
-    facing, and — from the lidar — how far the open area extends ahead and how
-    wide it is. That is enough to bound the search region without being told.
-
-    Returned in the same (x0, x1, y0, y1) form the lane planner already takes,
-    so the sweep is unchanged; only the source of the numbers differs.
-
-    `margin_m` insets the bounds so lanes do not run into the boundary the
-    lidar just measured.
-    """
-    ex, ey = entry_xy
-    depth = max(0.0, open_depth_m - margin_m)
-    half_w = max(0.0, open_width_m / 2.0 - margin_m)
-
-    # Axis-aligned bound of the swept-out region, which is what the boustrophedon
-    # planner consumes. A rotated zone is handled by taking the bounding box;
-    # over-covering slightly is safe, under-covering is not.
-    import math as _m
-    c, s_ = _m.cos(heading_rad), _m.sin(heading_rad)
-    corners = []
-    for along in (0.0, depth):
-        for across in (-half_w, half_w):
-            corners.append((ex + along * c - across * s_,
-                            ey + along * s_ + across * c))
-    xs = [p[0] for p in corners]
-    ys = [p[1] for p in corners]
-    return (min(xs), max(xs), min(ys), max(ys))
-
-
-def extend_zone(zone, heading_rad, extra_m):
-    """The zone with its far edge pushed `extra_m` further along `heading_rad`.
-
-    WHY THIS EXISTS
-
-        zone_from_observation() bounds the zone by what the LIDAR can see, and
-        the lidar has a finite range. In the reference arena it reports a depth
-        of 12 m for a delivery zone that is 40 m deep, so the "observed zone"
-        is a 12 m window onto it -- x 16.5..27.9 of a real 12..52.
-
-        That window happened to contain target C, which is the target every
-        live run had been started with. Targets at x 33, 45 and 47, and all
-        three red zones, lie outside it. The sweep would have reported
-        "swept all lanes without matching the target" and the mission would
-        have failed -- correctly, but for a reason nobody had looked at.
-
-        The window is a FRONTIER, not the zone. This pushes it forward.
-
-    Returned as an axis-aligned bound like every other zone here: the union of
-    the window and the window translated along the heading. Over-covering is
-    safe, under-covering is not.
-    """
-    x0, x1, y0, y1 = zone
-    dx = math.cos(heading_rad) * extra_m
-    dy = math.sin(heading_rad) * extra_m
-    return (min(x0, x0 + dx), max(x1, x1 + dx),
-            min(y0, y0 + dy), max(y1, y1 + dy))
-
-
-def frontier_strip(zone, heading_rad, extra_m):
-    """Only the NEW ground `extend_zone` adds -- the window translated forward.
-
-    Sweeping the extended zone from scratch would re-fly ground already
-    covered. This is the strip beyond the current frontier, so each expansion
-    costs one strip rather than the whole search so far.
-    """
-    x0, x1, y0, y1 = zone
-    dx = math.cos(heading_rad) * extra_m
-    dy = math.sin(heading_rad) * extra_m
-    return (x0 + dx, x1 + dx, y0 + dy, y1 + dy)
-
 
 def grow_zone(zone, direction_rad, step_m):
     """(grown_zone, new_band) after pushing `zone` out by `step_m`.
@@ -343,11 +288,6 @@ def zone_is_plausible(zone, min_side_m=5.0, max_side_m=120.0):
 # Exclusion zones (Phase 7)
 # --------------------------------------------------------------------------- #
 
-def _overlap(a0, a1, b0, b1):
-    """Length of the overlap between two intervals (0 if disjoint)."""
-    return max(0.0, min(a1, b1) - max(a0, b0))
-
-
 def clip_lane(x0, x1, y, clearance_m, exclusions):
     """A lane split into the segments the AIRCRAFT may actually fly.
 
@@ -367,10 +307,15 @@ def clip_lane(x0, x1, y, clearance_m, exclusions):
     indefensible whether or not the fence catches it.
     """
     blocked = []
-    for ex0, ex1, ey0, ey1 in exclusions:
-        if _overlap(y - clearance_m, y + clearance_m, ey0, ey1) <= 0.0:
-            continue                      # not under this lane's swath
-        a, b = max(x0, ex0), min(x1, ex1)
+    # Use the same merged, inflated obstacles as route_leg. Cutting only at
+    # the painted edge produces endpoints that the router must refuse, so
+    # the search silently skips the reachable part of each clipped lane.
+    for ex0, ex1, ey0, ey1 in routing_obstacles(exclusions, clearance_m):
+        if not ey0 <= y <= ey1:
+            continue
+        # Leave room beyond the inclusive forbidden boundary, just as the
+        # router's corner waypoints do.
+        a, b = max(x0, ex0 - 0.25), min(x1, ex1 + 0.25)
         if b > a:
             blocked.append((a, b))
 
@@ -398,7 +343,7 @@ def clip_lane(x0, x1, y, clearance_m, exclusions):
 
 def plan_lawnmower_excluding(zone, spacing, altitude_m, hfov_rad,
                              exclusions=(), min_segment_m=1.0,
-                             clearance_m=1.0):
+                             clearance_m=1.0, axis="x"):
     """Boustrophedon waypoints that never route the AIRCRAFT over an exclusion.
 
     Same lane geometry as plan_lawnmower(); each lane is then cut where the
@@ -406,8 +351,20 @@ def plan_lawnmower_excluding(zone, spacing, altitude_m, hfov_rad,
     than `min_segment_m` are dropped because flying a 30 cm segment costs more
     in settling time than the coverage is worth.
     """
+    if axis == "y":
+        swapped_zone = (zone[2], zone[3], zone[0], zone[1])
+        swapped_exclusions = [(ey0, ey1, ex0, ex1)
+                              for ex0, ex1, ey0, ey1 in exclusions]
+        transposed = plan_lawnmower_excluding(
+            swapped_zone, spacing, altitude_m, hfov_rad,
+            exclusions=swapped_exclusions, min_segment_m=min_segment_m,
+            clearance_m=clearance_m, axis="x")
+        return [(y, x, z) for x, y, z in transposed]
+    if axis != "x":
+        raise ValueError("axis must be 'x' or 'y'")
+
     x0, x1, y0, y1 = zone
-    lanes = plan_lawnmower(zone, spacing, altitude_m)
+    lanes = plan_lawnmower(zone, spacing, altitude_m, axis="x")
 
     waypoints = []
     for i in range(0, len(lanes), 2):
@@ -424,7 +381,8 @@ def plan_lawnmower_excluding(zone, spacing, altitude_m, hfov_rad,
 
 
 def coverage_fraction_excluding(zone, spacing, altitude_m, hfov_rad,
-                                exclusions=(), samples=120, clearance_m=1.0):
+                                exclusions=(), samples=120, clearance_m=1.0,
+                                axis="x"):
     """Fraction of the REACHABLE zone the clipped plan still covers.
 
     The denominator excludes red ground: a plan is not at fault for failing to
@@ -432,10 +390,19 @@ def coverage_fraction_excluding(zone, spacing, altitude_m, hfov_rad,
     would fall below 1.0 the moment a red zone existed, and the only way to
     keep it green would be to fly over the red — exactly backwards.
     """
+    if axis == "y":
+        swapped_zone = (zone[2], zone[3], zone[0], zone[1])
+        swapped_exclusions = [(ey0, ey1, ex0, ex1)
+                              for ex0, ex1, ey0, ey1 in exclusions]
+        return coverage_fraction_excluding(
+            swapped_zone, spacing, altitude_m, hfov_rad,
+            exclusions=swapped_exclusions, samples=samples,
+            clearance_m=clearance_m, axis="x")
     x0, x1, y0, y1 = zone
     half_swath = ground_width(altitude_m, hfov_rad) / 2.0
     wps = plan_lawnmower_excluding(zone, spacing, altitude_m, hfov_rad,
-                                   exclusions, clearance_m=clearance_m)
+                                   exclusions, clearance_m=clearance_m,
+                                   axis="x")
     segs = [(wps[i], wps[i + 1]) for i in range(0, len(wps), 2)]
 
     reachable = 0
@@ -464,12 +431,9 @@ def plan_intersects_exclusions(waypoints, clearance_m, exclusions):
     expected to see red ground.
     """
     for i in range(0, len(waypoints) - 1, 2):
-        (ax, ay, _), (bx, _, _) = waypoints[i], waypoints[i + 1]
-        for ex0, ex1, ey0, ey1 in exclusions:
-            if (_overlap(min(ax, bx), max(ax, bx), ex0, ex1) > 0.0
-                    and _overlap(ay - clearance_m, ay + clearance_m,
-                                 ey0, ey1) > 0.0):
-                return True
+        a, b = waypoints[i], waypoints[i + 1]
+        if path_hits_exclusion([a[:2], b[:2]], clearance_m, exclusions):
+            return True
     return False
 
 
@@ -567,53 +531,128 @@ def path_hits_exclusion(points, clearance_m, exclusions):
                for i in range(len(points) - 1))
 
 
-def merge_exclusions(exclusions, gap_m=0.0, max_passes=6):
+def _box_area(b):
+    return max(0.0, b[1] - b[0]) * max(0.0, b[3] - b[2])
+
+
+def _box_overlap(a, b):
+    return (max(0.0, min(a[1], b[1]) - max(a[0], b[0]))
+            * max(0.0, min(a[3], b[3]) - max(a[2], b[2])))
+
+
+def _exact_runs(boxes):
+    """Lossless merges: boxes sharing an extent exactly and touching along it.
+
+    A painted rectangle arrives as a grid of cells; row by row they share a y
+    extent, and the rows then share an x extent, so it comes back as ONE box
+    with not a square metre added.
+    """
+    changed = True
+    while changed:
+        changed = False
+        for lo, hi, klo, khi in ((0, 1, 2, 3), (2, 3, 0, 1)):
+            rows = {}
+            for b in boxes:
+                rows.setdefault((b[klo], b[khi]), []).append(b)
+            out = []
+            for group in rows.values():
+                group.sort(key=lambda b: b[lo])
+                cur = list(group[0])
+                for b in group[1:]:
+                    if b[lo] <= cur[hi]:
+                        cur[hi] = max(cur[hi], b[hi])
+                    else:
+                        out.append(tuple(cur))
+                        cur = list(b)
+                out.append(tuple(cur))
+            if len(out) < len(boxes):
+                changed = True
+            boxes = out
+    return boxes
+
+
+def merge_exclusions(exclusions, gap_m=0.0, max_waste=0.25):
     """Confirmed cells collapsed into the boxes the router steers around.
 
     The georeferencer confirms red ground cell by cell, so a single painted
-    zone arrives as a hundred-odd little rectangles. Routing around each one
-    is both slow and wrong: the aircraft cannot fit through a gap narrower
-    than itself, so cells closer together than `gap_m` become one obstacle.
+    zone arrives as a hundred-odd little rectangles, and routing round each
+    one is slow. They are merged, but NOT blindly into bounding boxes.
 
-    The merge is to a BOUNDING BOX, so an L-shaped zone forbids the notch as
-    well. That over-forbids: some flyable ground is given up. Over-forbidding
-    costs coverage and under-forbidding costs marks, and only one of those is
-    recoverable in the air.
+    WHAT THE BOUNDING-BOX MERGE COST
+
+        Everything within `gap_m` of anything else used to become one
+        bounding box. A custom arena chained three red zones along its
+        delivery zone's northern edge -- each within 3 m of the next -- and
+        the merge made one 25 m box of them that swallowed the strip north of
+        the zones, target pad included. The sweep could never fly there, and
+        the mission failed "without matching the target" with the pad in
+        plain view of a lane it had been forbidden to fly.
+
+    So: exact merges first (`_exact_runs`, no ground added), then a pair of
+    boxes merges into its bounding box only if that adds at most `max_waste`
+    of the result as ground that is not red. A rectangle is still one box;
+    an L, or a chain of separate zones, stays several.
+
+    NOTHING GETS THROUGH A GAP IT COULD NOT BEFORE. Boxes closer than `gap_m`
+    stay separate but overlap once the router inflates them by the clearance
+    (gap_m is twice it), and a leg through the overlap hits one of them.
+    The merge was only ever what kept routing fast.
     """
     boxes = [tuple(float(v) for v in ex) for ex in exclusions if len(ex) == 4]
-    for _ in range(max_passes):
-        n = len(boxes)
-        if n < 2:
+    if len(boxes) < 2:
+        return boxes
+    boxes = _exact_runs(boxes)
+    half = gap_m / 2.0
+    # (box, estimated red area inside it). The estimate subtracts the whole
+    # overlap of two boxes, which can only UNDER-count red, i.e. over-count
+    # waste: it errs toward keeping boxes apart, never toward forbidding more.
+    items = [(b, _box_area(b)) for b in boxes]
+    while len(items) > 1:
+        best = None
+        for i in range(len(items)):
+            a, ra = items[i]
+            ai = _inflate(a, half)
+            for j in range(i + 1, len(items)):
+                b, rb = items[j]
+                bi = _inflate(b, half)
+                if not (min(ai[1], bi[1]) >= max(ai[0], bi[0])
+                        and min(ai[3], bi[3]) >= max(ai[2], bi[2])):
+                    continue
+                box = (min(a[0], b[0]), max(a[1], b[1]),
+                       min(a[2], b[2]), max(a[3], b[3]))
+                red = max(ra, rb, ra + rb - _box_overlap(a, b))
+                area = _box_area(box)
+                waste = 1.0 - red / area if area > 0 else 0.0
+                if waste <= max_waste and (best is None or waste < best[0]):
+                    best = (waste, i, j, box, min(red, area))
+        if best is None:
             break
-        parent = list(range(n))
+        _, i, j, box, red = best
+        items = [it for k, it in enumerate(items) if k not in (i, j)]
+        items.append((box, red))
+    return [b for b, _ in items]
 
-        def find(i):
-            while parent[i] != i:
-                parent[i] = parent[parent[i]]
-                i = parent[i]
-            return i
 
-        half = gap_m / 2.0
-        for i in range(n):
-            ax0, ax1, ay0, ay1 = _inflate(boxes[i], half)
-            for j in range(i + 1, n):
-                bx0, bx1, by0, by1 = _inflate(boxes[j], half)
-                if (min(ax1, bx1) >= max(ax0, bx0)
-                        and min(ay1, by1) >= max(ay0, by0)):
-                    ri, rj = find(i), find(j)
-                    if ri != rj:
-                        parent[ri] = rj
+_OBSTACLE_CACHE = {}
 
-        groups = {}
-        for i, box in enumerate(boxes):
-            groups.setdefault(find(i), []).append(box)
-        merged = [(min(b[0] for b in g), max(b[1] for b in g),
-                   min(b[2] for b in g), max(b[3] for b in g))
-                  for g in groups.values()]
-        if len(merged) == len(boxes):
-            return merged
-        boxes = merged
-    return boxes
+
+def routing_obstacles(exclusions, clearance_m):
+    """One obstacle interpretation for sweep endpoints and transit routes.
+
+    Cached on its inputs: every lane clip, route and red-ground check in a
+    tick asks with the same confirmed cells, and they only change when the
+    georeferencer confirms more.
+    """
+    key = (tuple(tuple(float(v) for v in ex) for ex in exclusions),
+           float(clearance_m))
+    hit = _OBSTACLE_CACHE.get(key)
+    if hit is None:
+        hit = [_inflate(b, clearance_m)
+               for b in merge_exclusions(exclusions, 2.0 * clearance_m)]
+        if len(_OBSTACLE_CACHE) > 32:
+            _OBSTACLE_CACHE.clear()
+        _OBSTACLE_CACHE[key] = hit
+    return list(hit)
 
 
 def _dijkstra(nodes, edges, src, dst):
@@ -647,7 +686,7 @@ def _dijkstra(nodes, edges, src, dst):
 
 def route_leg(start, end, clearance_m, exclusions, max_detour_ratio=4.0,
               min_detour_allowance_m=25.0, corner_margin_m=0.25,
-              max_obstacles=16):
+              max_obstacles=16, _depth=0):
     """Waypoints from `start` to `end` that keep the airframe off red ground.
 
     Returns a dict, in the style of plan_search():
@@ -674,11 +713,34 @@ def route_leg(start, end, clearance_m, exclusions, max_detour_ratio=4.0,
 
     # Cells closer together than the airframe are one obstacle: there is no
     # flying between them.
-    blocks = [_inflate(b, clearance_m)
-              for b in merge_exclusions(exclusions, 2.0 * clearance_m)]
+    blocks = routing_obstacles(exclusions, clearance_m)
 
     # A box the aircraft is already inside cannot be routed around, only left.
     # Refusing to move would hold it over the violation it is trying to end.
+    #
+    # LEFT BY THE NEAREST EDGE, not by the straight line to wherever the leg
+    # was going. Dropping the box and flying straight at the destination is
+    # what crossed the main red zone in live run 5: the aircraft entered the
+    # inflated margin of a strip confirmed mid-leg, the box was ignored, and
+    # the leg ran on diagonally through the paint. Step out the shortest way,
+    # then route from there with every box in play.
+    containing = [b for b in blocks if _contains(b, sx, sy)]
+    if containing and _depth < 3:
+        x0, x1, y0, y1 = containing[0]
+        m = corner_margin_m
+        exit_pt = min(((x0 - m, sy), (x1 + m, sy), (sx, y0 - m), (sx, y1 + m)),
+                      key=lambda p: math.hypot(p[0] - sx, p[1] - sy))
+        rest = route_leg(exit_pt, end, clearance_m, exclusions,
+                         max_detour_ratio=max_detour_ratio,
+                         min_detour_allowance_m=min_detour_allowance_m,
+                         corner_margin_m=corner_margin_m,
+                         max_obstacles=max_obstacles, _depth=_depth + 1)
+        if not rest["ok"]:
+            return rest
+        step = math.hypot(exit_pt[0] - sx, exit_pt[1] - sy)
+        return {"ok": True, "waypoints": [exit_pt] + list(rest["waypoints"]),
+                "detoured": True, "length_m": step + rest["length_m"],
+                "reason": ""}
     blocks = [b for b in blocks if not _contains(b, sx, sy)]
     if not blocks:
         return straight

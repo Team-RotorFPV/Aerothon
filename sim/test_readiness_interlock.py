@@ -18,6 +18,8 @@ WHAT WAS WRONG
 import os
 import sys
 import unittest
+import json
+from types import SimpleNamespace
 
 sys.path.insert(0, os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -29,7 +31,40 @@ from gcs_aggregator.readiness import (
     evaluate,
     is_ready,
 )
-from gcs_aggregator.readiness_node import RateMeter
+from gcs_aggregator.readiness_node import RateMeter, Readiness
+
+
+class DeliveryBoundaryReadinessTests(unittest.TestCase):
+    def test_irregular_boundary_does_not_pass_readiness(self):
+        node = Readiness.__new__(Readiness)
+        node.obs = {}
+        node.home = SimpleNamespace(geo=SimpleNamespace(latitude=0.0, longitude=0.0))
+        # Four distinct WGS84 coordinates, but one corner cuts into the field.
+        payload = {"vertices": [
+            {"lat": 0.0, "lon": 0.0},
+            {"lat": 0.0, "lon": 0.0003},
+            {"lat": 0.0003, "lon": 0.0002},
+            {"lat": 0.0003, "lon": 0.0},
+        ]}
+        node._on_delivery_zone(SimpleNamespace(data=json.dumps(payload)))
+        self.assertFalse(node.obs["delivery_zone_valid"])
+        self.assertIn("rectangle", node.obs["delivery_zone_reason"])
+
+    def test_boundary_waits_for_home_and_invalid_replacement_revokes_readiness(self):
+        node = Readiness.__new__(Readiness)
+        node.obs = {}
+        node.home = None
+        payload = {"vertices": [
+            {"lat": lat, "lon": lon} for lat, lon in
+            ((0.0, 0.0), (0.0, 0.0003), (0.0003, 0.0003), (0.0003, 0.0))
+        ]}
+        node._on_delivery_zone(SimpleNamespace(data=json.dumps(payload)))
+        self.assertFalse(node.obs["delivery_zone_valid"])
+        self.assertIn("home", node.obs["delivery_zone_reason"])
+        node._on_home(SimpleNamespace(geo=SimpleNamespace(latitude=0.0, longitude=0.0)))
+        self.assertTrue(node.obs["delivery_zone_valid"])
+        node._on_delivery_zone(SimpleNamespace(data="{}"))
+        self.assertFalse(node.obs["delivery_zone_valid"])
 
 
 def healthy():
@@ -47,6 +82,10 @@ def healthy():
         "detectors": {"qr": 0.2, "banner": 0.3, "redzone": 0.4},
         "winch_fault": "",
         "rc_failsafe": False,
+        "delivery_zone_valid": True,
+        "delivery_zone_reason": "four WGS84 vertices accepted",
+        "geofence_valid": True,
+        "geofence_reason": "geofence polygon resolved",
     }
 
 
@@ -162,6 +201,22 @@ class EachItemBlocksTests(unittest.TestCase):
         items, failing = self.force(rc_failsafe=True)
         self.assertEqual(failing, ["rc_failsafe"])
 
+    def test_missing_delivery_zone_blocks(self):
+        items, failing = self.force(
+            delivery_zone_valid=False,
+            delivery_zone_reason="delivery-zone boundary is missing")
+        self.assertEqual(failing, ["delivery_zone"])
+        self.assertIn("missing", item(items, "delivery_zone")["reason"])
+
+    def test_missing_geofence_blocks(self):
+        """Rulebook: the geofence coordinates will be provided and must be
+        programmed in. No fence, no start."""
+        items, failing = self.force(
+            geofence_valid=False,
+            geofence_reason="arena geofence boundary is missing")
+        self.assertEqual(failing, ["geofence"])
+        self.assertIn("missing", item(items, "geofence")["reason"])
+
 
 class UnknownIsNotOkTests(unittest.TestCase):
     """Every item independently: a missing input must not read as healthy."""
@@ -179,6 +234,8 @@ class UnknownIsNotOkTests(unittest.TestCase):
             "detectors": "detectors",
             "winch_fault": "actuator",
             "rc_failsafe": "rc_failsafe",
+            "delivery_zone_valid": "delivery_zone",
+            "geofence_valid": "geofence",
         }
         for obs_key, item_key in mapping.items():
             obs = healthy()

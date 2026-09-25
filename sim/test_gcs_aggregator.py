@@ -42,6 +42,7 @@ class TestGCSAggregator(unittest.TestCase):
             self.node.pub_abort = MagicMock()
             self.node.pub_target = MagicMock()
             self.node.pub_start = MagicMock()
+            self.node.pub_delivery_zone = MagicMock()
             self.node.state["safety"]["ready"] = True
 
     def test_euler_deg_conversion(self):
@@ -72,6 +73,24 @@ class TestGCSAggregator(unittest.TestCase):
         res, reason = self.node._dispatch("unknown_fly_command", {})
         self.assertEqual(res, "rejected")
         self.assertEqual(reason, "unknown cmd")
+
+    def test_delivery_zone_command_publishes_the_four_global_vertices(self):
+        vertices = [
+            {"lat": -35.3633, "lon": 149.1653},
+            {"lat": -35.3633, "lon": 149.1657},
+            {"lat": -35.3630, "lon": 149.1657},
+            {"lat": -35.3630, "lon": 149.1653},
+        ]
+        result, reason = self.node._dispatch(
+            "set_delivery_zone", {"vertices": vertices})
+        self.assertEqual((result, reason), ("accepted", ""))
+        sent = self.node.pub_delivery_zone.publish.call_args.args[0]
+        self.assertEqual(json.loads(sent.data)["vertices"], vertices)
+
+    def test_delivery_zone_command_rejects_missing_vertices(self):
+        result, reason = self.node._dispatch("set_delivery_zone", {})
+        self.assertEqual(result, "rejected")
+        self.assertIn("four", reason)
 
     def test_battery_telemetry_safety_flag(self):
         """Test battery low voltage correctly updates safety state."""
@@ -372,3 +391,90 @@ class ScanLedgerTests(unittest.TestCase):
         self.node._on_qr_detail(MagicMock(data="{not json"))
         self.node._on_banner_detail(MagicMock(data=""))
         self.assertEqual(self.ledger(), [])
+
+
+class MapForwardingTests(unittest.TestCase):
+    """The SLAM map reaches the GCS exactly as it did, at a fraction of the
+    cost, and costs nothing when no GCS is connected.
+
+    The max-pool was a per-cell Python loop over the whole occupancy grid once
+    a second, run whether or not anyone was listening. It is now numpy; this
+    holds it to the loop it replaced, cell for cell, including the truncated
+    blocks at the right and bottom edges.
+    """
+
+    @staticmethod
+    def reference_pool(data, w, h, step):
+        ow, oh = (w + step - 1) // step, (h + step - 1) // step
+        out = [-1] * (ow * oh)
+        for r in range(0, h, step):
+            orow = (r // step) * ow
+            for c in range(0, w, step):
+                best = -1
+                for dr in range(step):
+                    rr = r + dr
+                    if rr >= h:
+                        break
+                    rb = rr * w
+                    for dc in range(step):
+                        cc = c + dc
+                        if cc >= w:
+                            break
+                        v = data[rb + cc]
+                        if v > best:
+                            best = v
+                out[orow + c // step] = int(best)
+        return ow, oh, out
+
+    def setUp(self):
+        with patch('rclpy.node.Node.__init__', return_value=None), \
+             patch('rclpy.node.Node.create_subscription'), \
+             patch('rclpy.node.Node.create_publisher'), \
+             patch('rclpy.node.Node.create_client'), \
+             patch('rclpy.node.Node.create_timer'), \
+             patch('rclpy.node.Node.declare_parameter'), \
+             patch('rclpy.node.Node.get_parameter',
+                   return_value=MagicMock(value="test-token")), \
+             patch('rclpy.node.Node.get_logger'):
+            from gcs_aggregator.aggregator import Aggregator, max_pool_grid
+            self.node = Aggregator()
+            self.pool = max_pool_grid
+
+    def test_pooling_matches_the_per_cell_loop(self):
+        import array
+        import random
+        rng = random.Random(7)
+        for w, h in ((1, 1), (3, 2), (120, 120), (121, 119), (397, 250),
+                     (250, 397), (480, 480), (7, 300)):
+            step = max(1, max(w, h) // 120)
+            vals = [rng.choice([-1, -1, 0, 0, 0, 100, rng.randint(0, 100)])
+                    for _ in range(w * h)]
+            data = array.array('b', vals)      # what rclpy hands the callback
+            self.assertEqual(self.pool(data, w, h, step),
+                             self.reference_pool(vals, w, h, step), (w, h))
+
+    def test_nothing_is_built_for_a_gcs_that_is_not_there(self):
+        self.node._ws_clients = set()
+        self.node._env = MagicMock(side_effect=AssertionError("serialised"))
+        grid = MagicMock()
+        grid.info.width = grid.info.height = 200
+        grid.data = [0] * 40000
+        self.node._on_map(grid)
+        self.node._publish_snapshot()
+
+    def test_a_connected_gcs_still_gets_both(self):
+        self.node._ws_clients = {object()}
+        sent = []
+        self.node._broadcast = sent.append
+        grid = MagicMock()
+        grid.info.width, grid.info.height = 3, 2
+        grid.info.resolution = 0.05
+        grid.info.origin.position.x = grid.info.origin.position.y = 0.0
+        grid.data = [0, 100, -1, -1, 0, 0]
+        self.node._last_map = 0.0
+        self.node._on_map(grid)
+        self.node._publish_snapshot()
+        kinds = [json.loads(s)["kind"] for s in sent]
+        self.assertEqual(kinds, ["map", "telemetry"])
+        self.assertEqual(json.loads(sent[0])["data"]["data"],
+                         [0, 100, -1, -1, 0, 0])

@@ -1,0 +1,31 @@
+# Competition-representative SITL values for the Q27 readiness interlock.
+#
+# The interlock's thresholds are the real aircraft's: above 15.0 V for the 4S
+# pack, and at least 12 satellites. Stock SITL presents a 3S pack at 12.6 V and
+# a 10-satellite fix, so "Battery voltage" and "GPS satellites" could never go
+# green, is_ready() requires every item, and the GCS "Start Mission 2" button
+# stayed blocked in every simulated run.
+#
+# These are deliberately NOT a relaxation of the interlock. The thresholds stay
+# exactly as goal.md Q27 states them; the simulator is what changes, so that
+# what we test is what we fly.
+SIM_BATT_VOLTAGE 16.8
+SIM_GPS_NUMSATS  18
+
+# Stream rates for SERIAL1, the channel sim_full.launch.py gives the mission
+# router. SET_MESSAGE_INTERVAL from stream_rate_keeper was accepted -- it logs
+# "stream rates applied" -- yet LOCAL_POSITION_NED (POSITION) and
+# EKF_STATUS_REPORT (EXTRA3) never arrived, while GPS_RAW_INT and SYS_STATUS
+# (EXTENDED_STATUS) and RC_CHANNELS did. The groups that worked are the ones
+# whose SR1_* default is non-zero. Set them here so the channel starts at the
+# rates the mission needs instead of depending on a runtime negotiation.
+#
+# On the aircraft the router takes a serial port with its own SRx_ index; the
+# same rates belong there. This file is SITL-only.
+SR1_EXT_STAT  5
+SR1_POSITION  50
+SR1_EXTRA1    50
+SR1_EXTRA2    10
+SR1_EXTRA3    3
+SR1_RC_CHAN   5
+SR1_RAW_SENS  10

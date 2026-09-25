@@ -34,7 +34,7 @@ WHAT IT DOES NOT DO
     scoring a violation on purpose and calling it defence in depth.
 """
 
-from .search_planner import route_leg
+from .search_planner import route_leg, path_hits_exclusion, routing_obstacles
 
 RUNNING = "RUNNING"
 ARRIVED = "ARRIVED"
@@ -116,6 +116,13 @@ class LegRouter:
         while self._i < len(self._wps) - 1:
             wx, wy = self._wps[self._i]
             if mav.reached(wx, wy, z, self.waypoint_tol):
+                # Being near a corner does not mean it is safe to cut it.
+                # Skip the waypoint only when the next commanded segment
+                # still clears the same inflated obstacles used in planning.
+                blocks = routing_obstacles(self._exclusions(mav), self.clearance_m)
+                if path_hits_exclusion(
+                        [mav.pos()[:2], self._wps[self._i + 1]], 0.0, blocks):
+                    break
                 self._i += 1
             else:
                 break

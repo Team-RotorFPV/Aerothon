@@ -96,6 +96,41 @@ class RailTestCase(unittest.TestCase):
         self.published_results = []
         self.mav.pub_sp.publish = self.published_setpoints.append
         self.mav.pub_result.publish = self.published_results.append
+        self.supply_organiser_inputs()
+
+    def supply_organiser_inputs(self):
+        """What the organisers hand over pre-flight, and an FC that accepts it.
+
+        The tree will not arm without a delivery-zone boundary and a
+        verified, enforced arena geofence. These rails are about what happens
+        after arming, so the inputs are supplied and the fence service echoes
+        the upload back intact, as a healthy FC does.
+        """
+        from mavros_msgs.msg import HomePosition
+        home = HomePosition()
+        home.geo.latitude = -35.3632621
+        home.geo.longitude = 149.1652374
+        self.mav.home = home
+        self.mav.delivery_zone_local = (12.0, 52.0, -15.0, 15.0)
+        self.mav.geofence_local = [(-9.5, -21.0), (58.0, -21.0),
+                                   (58.0, 21.0), (-9.5, 21.0)]
+
+        class _Done:
+            def __init__(self, ok=True):
+                self._r = type("R", (), {"success": ok})()
+
+            def done(self):
+                return True
+
+            def result(self):
+                return self._r
+
+        def push(items):
+            self.mav.fence_readback = list(items)
+            return _Done()
+
+        self.mav.push_fence = push
+        self.mav.set_param = lambda name, value: _Done()
 
     def tearDown(self):
         self.node.destroy_node()
@@ -157,6 +192,38 @@ class TestExternalIntervention(RailTestCase):
         self.mav.mission_started = True
         self.mav.state = state_msg(armed=True)
         self.mav._on_state(state_msg(armed=False))
+        self.assertTrue(self.mav.reset_pending())
+        self.assertEqual(self.mav.consume_reset(), "external disarm")
+
+    def test_gate_heading_is_latched_by_the_outbound_gate(self):
+        """The return gate's advance must not overwrite the corridor axis."""
+        self.assertEqual(self.mav.record_gate_heading(0.08), 0.08)
+        self.assertEqual(self.mav.record_gate_heading(3.2), 0.08)
+
+    def test_a_new_start_forgets_the_last_corridor(self):
+        from std_msgs.msg import Bool
+        self.mav.record_gate_heading(0.08)
+        self.mav.corridor_exit_pose = (18.4, 2.95, 3.0, 0.08)
+        self.mav._on_start(Bool(data=True))
+        self.assertIsNone(self.mav.gate_heading)
+        self.assertIsNone(self.mav.corridor_exit_pose)
+
+    def test_lost_link_is_not_an_external_disarm(self):
+        """On heartbeat loss MAVROS publishes connected=False with armed
+        defaulted to False. Arena 1001 (batch E) ended "external disarm" on
+        exactly that while the aircraft hovered armed in GUIDED."""
+        self.mav.mission_started = True
+        self.mav.state = state_msg(armed=True)
+        self.mav._on_state(state_msg(armed=False, mode="", connected=False))
+        self.assertFalse(self.mav.reset_pending())
+        self.mav._on_state(state_msg(armed=True))       # link back, still flying
+        self.assertFalse(self.mav.reset_pending())
+
+    def test_disarm_during_an_outage_is_caught_when_the_link_returns(self):
+        self.mav.mission_started = True
+        self.mav.state = state_msg(armed=True)
+        self.mav._on_state(state_msg(armed=False, mode="", connected=False))
+        self.mav._on_state(state_msg(armed=False))      # FCU: really disarmed
         self.assertTrue(self.mav.reset_pending())
         self.assertEqual(self.mav.consume_reset(), "external disarm")
 

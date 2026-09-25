@@ -11,13 +11,11 @@ Examples:
 import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, TimerAction
+from launch.actions import DeclareLaunchArgument, TimerAction
 from launch.conditions import IfCondition
-from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, Command
+from launch.substitutions import LaunchConfiguration, Command
 from launch_ros.actions import Node
 from launch_ros.descriptions import ParameterValue
-from launch_ros.substitutions import FindPackageShare
 
 
 def generate_launch_description():
@@ -49,9 +47,11 @@ def generate_launch_description():
                               description='Continuously re-assert MAVLink stream '
                                           'rates (SITL/MAVProxy workaround; see '
                                           'VERIFICATION.md 2.2)'),
-        DeclareLaunchArgument('winch_backend', default_value='sim',
-                              description='winch_ctrl backend: sim or mavlink '
-                                          '(MAV_CMD_DO_WINCH)'),
+        DeclareLaunchArgument('winch_backend', default_value='gazebo',
+                              description='winch_ctrl backend: gazebo (the Iris '
+                                          'winch joint and a detachable payload), '
+                                          'sim (sequence only, nothing moves) or '
+                                          'mavlink (MAV_CMD_DO_WINCH)'),
         DeclareLaunchArgument('camera_backend', default_value='sim',
                               description='camera_ctrl backend: sim (Gazebo joint) '
                                           'or mavlink (MAV_CMD_DO_MOUNT_CONTROL)'),
@@ -94,6 +94,13 @@ def generate_launch_description():
 
     redzone = Node(
         package='perception_redzone', executable='redzone_node', output='screen',
+        parameters=[{'image_topic': image_topic, 'use_sim_time': use_sim}],
+    )
+
+    # Is the delivered payload on the ground? WinchDrop confirms every drop
+    # with the camera instead of trusting the winch's own "released" flag.
+    payload = Node(
+        package='perception_redzone', executable='payload_node', output='screen',
         parameters=[{'image_topic': image_topic, 'use_sim_time': use_sim}],
     )
 
@@ -233,7 +240,7 @@ def generate_launch_description():
     )
 
     return LaunchDescription(args + [
-        rsp_node, mavros, qr, banner, redzone, overlay, camera, winch, stream_rates,
+        rsp_node, mavros, qr, banner, redzone, payload, overlay, camera, winch, stream_rates,
         controller, mission, readiness, aggregator, video,
         # The Gazebo odometry bridge needs a few seconds to establish odom TF.
         # Activating slam_toolbox before that point leaves its initial scan

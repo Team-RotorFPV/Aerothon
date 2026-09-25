@@ -32,7 +32,6 @@ from mission_bt.geofence import (
     compare_fences,
     fence_signature,
     global_to_local,
-    inclusion_from_zone,
     local_to_global,
     rect_vertices,
 )
@@ -124,16 +123,6 @@ class FenceBuildTests(unittest.TestCase):
         ys = sorted({round(p[1]) for p in locals_})
         self.assertEqual(xs, [0, 40])
         self.assertEqual(ys, [-10, 10])
-
-    def test_inclusion_is_grown_beyond_the_search_zone(self):
-        """A fence drawn exactly on the zone breaches every time a lane
-        overshoots by 30 cm."""
-        zone = (0.0, 40.0, -10.0, 10.0)
-        inc = inclusion_from_zone(zone, margin_m=5.0)
-        self.assertLess(inc[0], zone[0])
-        self.assertGreater(inc[1], zone[1])
-        self.assertLess(inc[2], zone[2])
-        self.assertGreater(inc[3], zone[3])
 
 
 class ReadBackVerificationTests(unittest.TestCase):

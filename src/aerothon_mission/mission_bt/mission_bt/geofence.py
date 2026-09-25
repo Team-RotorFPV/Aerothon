@@ -82,8 +82,13 @@ def build_fence(inclusion_rect, exclusion_rects, home_lat, home_lon,
     """
     items = []
 
-    def polygon(rect, command):
-        verts = rect_vertices(rect)
+    def polygon(shape, command):
+        # A 4-number tuple is an axis-aligned rect; anything else is already a
+        # vertex list (the organiser's geofence need not be a rectangle).
+        if len(shape) == 4 and all(isinstance(v, (int, float)) for v in shape):
+            verts = rect_vertices(shape)
+        else:
+            verts = [(float(px), float(py)) for px, py in shape]
         for vx, vy in verts:
             lat, lon = local_to_global(vx, vy, home_lat, home_lon)
             w = waypoint_cls()
@@ -146,14 +151,3 @@ def compare_fences(sent, received, home_lat, home_lon, tol_m=0.5):
                            f"({ai[1]:.2f}, {ai[2]:.2f}) m, read back "
                            f"({bi[1]:.2f}, {bi[2]:.2f}) m")
     return True, ""
-
-
-def inclusion_from_zone(zone, margin_m=5.0):
-    """Arena inclusion fence around the observed operating area.
-
-    Grown by `margin_m` because the fence must not fight the mission: a fence
-    drawn exactly on the search zone would breach every time the aircraft
-    overshoots a lane end by 30 cm.
-    """
-    x0, x1, y0, y1 = zone
-    return (x0 - margin_m, x1 + margin_m, y0 - margin_m, y1 + margin_m)

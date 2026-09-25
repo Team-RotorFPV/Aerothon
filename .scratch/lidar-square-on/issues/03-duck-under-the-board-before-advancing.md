@@ -1,6 +1,6 @@
 # Duck under the board before advancing through the gate
 
-Status: ready-for-agent
+Status: claimed
 Parent: ../spec.md
 
 ## What was watched

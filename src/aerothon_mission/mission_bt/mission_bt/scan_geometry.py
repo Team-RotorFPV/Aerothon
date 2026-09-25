@@ -284,3 +284,197 @@ def fit_surface(angle_min, angle_increment, ranges, bearing_rad,
             "residual_m": rms,
             "extent_m": span,
             "reason": ""}
+
+
+def gate_opening(angle_min, angle_increment, ranges, bearing_rad,
+                 half_width_rad, need_clear_m=10.0, range_min=0.05,
+                 range_max=12.0, gap_m=0.35, max_depth_m=0.75,
+                 min_gap_m=1.0, min_cluster_points=2, corridor_m=1.5):
+    """Is there a way THROUGH the gate at this height, or is the board here?
+
+    WHY THIS EXISTS
+
+        Squaring up and passing through are mutually exclusive altitudes, and
+        that is not a tuning accident -- it is the geometry. The lidar can
+        only measure the board's angle where the scan plane intersects the
+        board, which is precisely the height at which the aircraft would fly
+        into it. Measured on the shipped arena, the usable band for squareness
+        was 2.5 to 3.5 m; the board spans 2.805 to 3.955. The band that makes
+        the measurement possible is the band that makes the transit fatal.
+
+        So the aircraft has to find the board's bottom edge and drop below it.
+        The edge is not a number to write down -- the real gate will differ,
+        and the standing constraint is no fixed arena geometry. It is a
+        TRANSITION, and the lidar can see it:
+
+            at board height   one wide continuous face, ~60 returns,
+                              residual under 1 cm
+            below the board   two narrow post clusters, ~11 returns, a hole
+                              between them
+
+        The altitude where the first becomes the second IS the bottom edge.
+
+    Returns:
+
+        open        True when there is a gap to fly through
+        clusters    how many separate returns groups the sector holds
+        gap_m       lateral width of the hole between them
+        gate_m      forward distance to the two surfaces bracketing the hole;
+                    None when no gate-like pair was measured
+        clear_m     how far the flight line is clear, measured down a
+                    corridor `corridor_m` wide -- the width the airframe
+                    actually needs, not the width of the hole
+        reason      why it is not open, empty when it is
+
+    `open` is False both for a solid face and for a gap with something
+    standing in it, and the reason says which. Neither is a thing to fly at.
+    """
+    half = abs(float(half_width_rad))
+    inc = float(angle_increment)
+    lo, hi = float(range_min), float(range_max)
+
+    sector = []
+    for i, r in enumerate(ranges):
+        if r is None:
+            continue
+        r = float(r)
+        if r != r or r in (float("inf"), float("-inf")) or not (lo < r < hi):
+            continue
+        a = angle_min + i * inc
+        if abs(_wrap(a - bearing_rad)) > half:
+            continue
+        sector.append((r * math.cos(a), r * math.sin(a), _wrap(a - bearing_rad)))
+
+    if not sector:
+        # Nothing at all in the sector. That is not a measured opening: it is
+        # the same reading the aircraft gets pointing at open sky, and the
+        # whole point of this check is to distinguish those.
+        return {"open": False, "clusters": 0, "gap_m": 0.0,
+                "gate_m": None, "clear_m": 0.0,
+                "reason": ("no returns in the sector at all, so neither the "
+                           "board nor a way past it has been seen")}
+
+    points = [(x, y) for x, y, _ in sector]
+    groups = [g for g in _clusters(points, gap_m)
+              if len(g) >= min_cluster_points]
+
+    cos_b, sin_b = math.cos(bearing_rad), math.sin(bearing_rad)
+
+    nearest_group = min(
+        groups,
+        key=lambda g: min(math.hypot(x, y) for x, y in g),
+        default=None)
+    nearest = (min(math.hypot(x, y) for x, y in nearest_group)
+               if nearest_group else min(math.hypot(x, y) for x, y in points))
+
+    # A wide nearest face is the board even when deeper corridor walls are
+    # visible around its edges. Run 20 counted all of those deeper groups and
+    # reported an impossible 8.2 m "gate" whose real posts are 3.8 m apart.
+    nearest_span = (_extent(nearest_group)
+                    if nearest_group and len(nearest_group) > 1 else 0.0)
+
+    def _lat(p):
+        return -p[0] * sin_b + p[1] * cos_b
+
+    def _fwd(p):
+        return p[0] * cos_b + p[1] * sin_b
+
+    def _crosses_line(g):
+        # ACROSS the flight line, not ALONG it. Where the corridor walls start
+        # at the posts, each post and its wall return as ONE long group, over
+        # a metre in extent, and the old span test called that "the board" at
+        # every height down to the floor. A board spans the line the aircraft
+        # means to fly; a wall runs beside it.
+        #
+        # AND AT ITS OWN FRONT. In the return lane the first slalom block
+        # touches the outer wall, which starts at the gate post: post, wall
+        # and block come back as one group whose inner end reaches the flight
+        # line 1.2 m BEHIND the post. That is an obstacle past the gate, and
+        # the clearance check below deals with it; a board crosses the line at
+        # the depth of its posts (seed 1002, return lap).
+        front = min(_fwd(p) for p in g)
+        near = [_lat(p) for p in g if _fwd(p) <= front + float(max_depth_m)]
+        return bool(near) and min(near) <= float(corridor_m) / 2.0 and \
+            max(near) >= -float(corridor_m) / 2.0
+
+    if nearest_group is not None and nearest_span >= float(min_gap_m) \
+            and _crosses_line(nearest_group):
+        return {"open": False, "clusters": 1, "gap_m": 0.0,
+                "gate_m": None, "clear_m": 0.0,
+                "reason": (f"one continuous surface {nearest_span:.1f} m across at "
+                           f"{nearest:.1f} m; this is the board, not the way "
+                           f"under it")}
+
+    # The posts are the nearest same-depth pair bracketing the camera bearing.
+    # "Outermost groups" is wrong once the corridor walls appear through the
+    # gate. They are wider and deeper than the posts, so they inflate both the
+    # measured gap and the supposed gate range.
+    # Each group is judged by its NEAREST point -- the post, or the end of a
+    # wall -- not its centroid. A post that runs on into its corridor wall has
+    # a centroid metres deeper than the post itself, which both broke the
+    # same-depth pairing and inflated the gate distance.
+    def _front(g):
+        p = min(g, key=_fwd)
+        return _fwd(p), _lat(p), p
+
+    pairs = []
+    for i, a in enumerate(groups):
+        af, al, ap = _front(a)
+        for b in groups[i + 1:]:
+            bf, bl, bp = _front(b)
+            if af <= 0.0 or bf <= 0.0 or al * bl >= 0.0:
+                continue
+            if abs(af - bf) > float(max_depth_m):
+                continue
+            pairs.append((0.5 * (af + bf), a, b, ap, bp))
+
+    if not pairs:
+        blocking = [g for g in groups if _crosses_line(g)]
+        what = ("one continuous surface" if blocking or len(groups) <= 1
+                else f"{len(groups)} surface(s) beside the line, no pair")
+        return {"open": False, "clusters": 1 if blocking else len(groups),
+                "gap_m": 0.0, "gate_m": None, "clear_m": 0.0,
+                "reason": (f"{what} {nearest_span:.1f} m across at "
+                           f"{nearest:.1f} m; this is the board, not the way "
+                           f"under it")}
+
+    gate, a, b, ap, bp = min(pairs, key=lambda item: item[0])
+    gap = math.hypot(bp[0] - ap[0], bp[1] - ap[1])
+
+    # Distance to the gate itself, separate from how far the centreline stays
+    # clear behind it. The return corridor puts its first slalom obstacle only
+    # a short distance beyond the banner. Without both measurements, the
+    # caller has to choose between declaring the whole 10 m open and losing
+    # the board-to-post transition altogether.
+    # IS THE PATH THE AIRCRAFT INTENDS TO FLY CLEAR?
+    #
+    # Asked directly, of the flight line, rather than inferred from which
+    # cluster is which. An earlier version measured between the two clusters
+    # bracketing the sector centre, and an obstacle standing in the mouth of
+    # the gate -- nearer than the posts and dead ahead -- was mistaken for one
+    # of the posts, so the gate read as open with the obstacle beside the
+    # path. A corridor test cannot make that mistake: anything inside the
+    # width the airframe needs, along the direction it means to travel, is in
+    # the way whatever else it might be.
+    ahead = []
+    for x, y, _ in sector:
+        forward = x * cos_b + y * sin_b
+        lateral = -x * sin_b + y * cos_b
+        if forward > 0.0 and abs(lateral) <= float(corridor_m) / 2.0:
+            ahead.append(forward)
+    clear = min(ahead) if ahead else float(range_max)
+
+    if gap < float(min_gap_m):
+        return {"open": False, "clusters": len(groups), "gap_m": gap,
+                "gate_m": gate, "clear_m": clear,
+                "reason": (f"the hole between the two nearest surfaces is "
+                           f"only {gap:.1f} m across; too narrow to fly")}
+    if clear < float(need_clear_m):
+        return {"open": False, "clusters": len(groups), "gap_m": gap,
+                "gate_m": gate, "clear_m": clear,
+                "reason": (f"a {gap:.1f} m hole with something standing "
+                           f"{clear:.1f} m into it, against the "
+                           f"{float(need_clear_m):.0f} m the aircraft means "
+                           f"to fly")}
+    return {"open": True, "clusters": len(groups), "gap_m": gap,
+            "gate_m": gate, "clear_m": clear, "reason": ""}

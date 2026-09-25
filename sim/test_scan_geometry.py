@@ -43,6 +43,7 @@ sys.path.insert(0, os.path.join(
 from mission_bt.scan_geometry import (                        # noqa: E402
     bearing_to_angle,
     fit_surface,
+    gate_opening,
 )
 
 
@@ -397,6 +398,173 @@ class PurityTests(unittest.TestCase):
                   for r in scan_of([wall(5.0, 0.0)])]
         f = fit(ranges)
         self.assertTrue(f["ok"], f["reason"])
+
+
+# --------------------------------------------------------------------------- #
+class GateOpeningTests(unittest.TestCase):
+    """Where the board stops and the way under it begins.
+
+    Squaring up and passing through are mutually exclusive altitudes. The
+    lidar can only measure the board's angle where the scan plane cuts the
+    board, which is exactly the height at which the aircraft would fly into
+    it -- measured on the shipped arena as a 2.5 to 3.5 m usable band against
+    a board spanning 2.805 to 3.955.
+
+    So the aircraft finds the bottom edge and drops below it, and the edge is
+    a TRANSITION rather than a number: one wide face becomes two post
+    clusters with a hole between them.
+    """
+
+    POST_HALF = 1.92
+
+    def _at_board_height(self, distance=5.0, tilt=0.0):
+        """One continuous face: board plus both posts, no hole."""
+        return [wall(distance, tilt, half_length_m=self.POST_HALF)]
+
+    def _below_the_board(self, distance=5.0, tilt=0.0):
+        """Two posts and 3.8 m of nothing between them."""
+        return [post(distance, tilt, -self.POST_HALF),
+                post(distance, tilt, +self.POST_HALF)]
+
+    def _open(self, segments, **kw):
+        kw.setdefault("need_clear_m", 10.0)
+        return gate_opening(ANGLE_MIN, ANGLE_INC, scan_of(segments), 0.0,
+                            math.radians(35.0), **kw)
+
+    def test_at_board_height_there_is_NO_way_through(self):
+        r = self._open(self._at_board_height())
+        self.assertFalse(r["open"])
+        self.assertIn("board", r["reason"])
+
+    # ---- the shipped arena: corridor walls begin AT the posts ---- #
+    def _posts_into_walls(self, distance=3.4, half=1.8, wall_len=10.0):
+        """Below the board where each post runs straight on into its wall.
+
+        Live run, shipped arena: from 2.3 m down to the floor the lidar
+        reported "one continuous surface 1.3 m across at 3.8 m; this is the
+        board" -- that was the post plus the first metre of corridor wall,
+        seen as one group. The board was never there.
+        """
+        segs = [post(distance, 0.0, -half), post(distance, 0.0, +half)]
+        for side in (-half, +half):
+            segs.append(((distance, side), (distance + wall_len, side)))
+        return segs
+
+    def test_posts_that_run_into_walls_are_an_OPEN_gate(self):
+        r = self._open(self._posts_into_walls(), need_clear_m=0.0)
+        self.assertTrue(r["open"], r["reason"])
+        self.assertAlmostEqual(r["gap_m"], 3.6, delta=0.4)
+        self.assertAlmostEqual(r["gate_m"], 3.4, delta=0.3,
+                               msg="gate distance must be the posts, not "
+                                   "the wall centroids")
+
+    def test_the_board_in_front_of_those_walls_is_still_the_board(self):
+        segs = self._posts_into_walls() + [wall(3.4, 0.0, half_length_m=1.9)]
+        r = self._open(segs, need_clear_m=0.0)
+        self.assertFalse(r["open"])
+        self.assertIn("board", r["reason"])
+        self.assertEqual(r["clusters"], 1)
+
+    def test_a_block_joined_to_the_wall_behind_the_gate_is_not_the_board(self):
+        """Seed 1002 return lap: o4 touches the outer wall, which starts at
+        the post, so post + wall + block are ONE group reaching the flight
+        line 1.2 m behind the posts. That is not the board."""
+        segs = self._posts_into_walls(distance=5.2, half=1.8)
+        # Block 1.2 m past the posts, from the -1.8 wall to 0.33 m off the line.
+        segs.append(((6.4, -1.8), (6.4, -0.33)))
+        segs.append(((6.75, -1.8), (6.75, -0.33)))
+        segs.append(((6.4, -0.33), (6.75, -0.33)))
+        r = self._open(segs, need_clear_m=0.0)
+        self.assertTrue(r["open"], r["reason"])
+        self.assertAlmostEqual(r["gate_m"], 5.2, delta=0.3)
+        self.assertLess(r["clear_m"], 7.0, "the block must still limit clearance")
+
+    def test_an_obstacle_on_the_line_between_the_walls_still_blocks(self):
+        segs = self._posts_into_walls() + [
+            ((5.0, -0.5), (5.0, 0.6))]              # 1.1 m block on the line
+        r = self._open(segs, need_clear_m=10.0)
+        self.assertFalse(r["open"])
+        self.assertLess(r["clear_m"], 5.5)
+
+    def test_below_the_board_the_gate_is_OPEN(self):
+        r = self._open(self._below_the_board())
+        self.assertTrue(r["open"], r["reason"])
+        self.assertAlmostEqual(r["gap_m"], 2 * self.POST_HALF, delta=0.4)
+
+    def test_the_transition_is_what_marks_the_bottom_EDGE(self):
+        """The pair of readings the descent is looking for, and the whole
+        reason the edge does not have to be written down anywhere."""
+        above = self._open(self._at_board_height())
+        below = self._open(self._below_the_board())
+        self.assertFalse(above["open"])
+        self.assertTrue(below["open"])
+        self.assertLess(above["clusters"], below["clusters"])
+
+    def test_something_STANDING_IN_the_gate_is_not_an_opening(self):
+        """A gap with an obstruction in it reads as a gap. Flying at it on
+        that basis is how a clear-looking hole becomes a collision."""
+        segs = self._below_the_board() + [
+            wall(2.5, 0.0, half_length_m=0.45)]      # obstacle in the mouth
+        r = self._open(segs, need_clear_m=10.0)
+        self.assertFalse(r["open"])
+        self.assertIn("standing", r["reason"])
+
+    def test_a_DEEPER_corridor_obstacle_does_not_hide_the_gate_posts(self):
+        """Run 20, return lap: the first slalom obstacle stood 7.1 m ahead,
+        behind posts about 5 m ahead. That makes the requested 10 m leg
+        unsafe, but it does not erase the measured board-to-post transition.
+        The caller needs both distances to hand control to the corridor
+        navigator just beyond the board."""
+        segs = self._below_the_board() + [
+            wall(7.1, 0.0, half_length_m=0.45)]
+
+        r = self._open(segs, need_clear_m=10.0)
+
+        self.assertFalse(r["open"])
+        self.assertAlmostEqual(r["gate_m"], 5.0, delta=0.35)
+        self.assertAlmostEqual(r["gap_m"], 2 * self.POST_HALF, delta=0.4)
+        self.assertAlmostEqual(r["clear_m"], 7.1, delta=0.2)
+        self.assertIn("standing", r["reason"])
+
+    def test_DEEPER_side_walls_are_not_mistaken_for_wider_gate_posts(self):
+        """Run 20 reported the post gap growing from 6.5 m to 8.2 m as the
+        aircraft descended. The real posts stay 3.8 m apart. Those larger
+        numbers came from bracketing the deeper corridor walls instead of the
+        nearest pair of post returns."""
+        corridor_walls = [
+            ((5.2, -3.8), (11.0, -3.8)),
+            ((5.2, +3.8), (11.0, +3.8)),
+        ]
+
+        r = self._open(self._below_the_board() + corridor_walls)
+
+        self.assertTrue(r["open"], r["reason"])
+        self.assertAlmostEqual(r["gate_m"], 5.0, delta=0.35)
+        self.assertAlmostEqual(r["gap_m"], 2 * self.POST_HALF, delta=0.4)
+
+    def test_a_gap_too_NARROW_to_fly_is_refused(self):
+        segs = [post(5.0, 0.0, -0.35), post(5.0, 0.0, +0.35)]
+        r = self._open(segs)
+        self.assertFalse(r["open"])
+        self.assertIn("narrow", r["reason"])
+
+    def test_an_EMPTY_sector_is_not_an_opening(self):
+        """The reading from pointing at open sky is identical to the reading
+        from a wide clear gate, so it must not be treated as one."""
+        r = self._open([])
+        self.assertFalse(r["open"])
+        self.assertIn("no returns", r["reason"])
+
+    def test_it_reports_how_far_it_can_see_THROUGH_the_gap(self):
+        r = self._open(self._below_the_board())
+        self.assertGreaterEqual(r["clear_m"], 10.0)
+
+    def test_an_OBLIQUE_gate_still_reads_as_open(self):
+        r = gate_opening(ANGLE_MIN, ANGLE_INC,
+                         scan_of(self._below_the_board(tilt=math.radians(20.0))),
+                         math.radians(20.0), math.radians(35.0),
+                         need_clear_m=10.0)
+        self.assertTrue(r["open"], r["reason"])
 
 
 if __name__ == "__main__":

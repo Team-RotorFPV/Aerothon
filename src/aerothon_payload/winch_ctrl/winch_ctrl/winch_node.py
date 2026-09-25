@@ -13,11 +13,18 @@ WHAT IS AND IS NOT MODELLED
     interlocks are all genuine, and the same node runs against hardware with
     `backend:=mavlink` driving MAV_CMD_DO_WINCH.
 
-    What is NOT modelled is a physical tether in Gazebo — there is no rope
-    constraint or swinging payload mass. In `backend:=sim` the payout is
-    integrated from commanded rate and ground contact is inferred from the
-    aircraft's own altitude. So this proves the SEQUENCE and the INTERLOCKS,
-    not the mechanics. A Gazebo tether is still outstanding work.
+    backend:=sim      payout integrated from the commanded rate, nothing moves.
+                      Proves the SEQUENCE and the INTERLOCKS only.
+    backend:=gazebo   the same integration, plus the payout is sent to the
+                      Iris's winch joint (/winch/gz/payout, bridged) so a real
+                      100 g payload goes down on the hook, and a release sends
+                      /winch/gz/detach so it physically leaves it. Whether it
+                      actually did is for the CAMERA to say (WinchDrop's
+                      confirmation), not for this node's own flag.
+    backend:=mavlink  MAV_CMD_DO_WINCH on the aircraft.
+
+    Ground contact is still inferred from the aircraft's altitude in every
+    backend; the line is a rigid vertical rod in Gazebo, with no swing.
 
 INTERFACE
     sub  /winch/cmd      std_msgs/String   "lower" | "release" | "stow" | "stop"
@@ -49,7 +56,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from geometry_msgs.msg import PoseStamped, TwistStamped
-from std_msgs.msg import String
+from std_msgs.msg import Empty, Float64, String
 
 try:
     from mavros_msgs.srv import CommandLong
@@ -67,7 +74,7 @@ class WinchNode(Node):
     def __init__(self):
         super().__init__("winch_ctrl")
         p = self.declare_parameter
-        p("backend", "sim")                  # sim | mavlink
+        p("backend", "sim")                  # sim | gazebo | mavlink
         p("payout_rate_mps", 0.30)           # line speed
         p("max_payout_m", 6.0)               # spool capacity
         p("ground_clearance_m", 0.25)        # payload considered down within this
@@ -100,10 +107,20 @@ class WinchNode(Node):
         self.cli_cmd = None
         if self.backend == "mavlink" and _HAVE_MAVROS:
             self.cli_cmd = self.create_client(CommandLong, "/mavros/cmd/command")
+        self.pub_gz_payout = self.pub_gz_detach = None
+        self._detach_sends = 0
+        if self.backend == "gazebo":
+            self._enable_gazebo()
 
         self.create_timer(1.0 / float(self.get_parameter("publish_rate_hz").value),
                           self._tick)
         self.get_logger().info(f"winch_ctrl up; backend={self.backend}")
+
+    def _enable_gazebo(self):
+        """The Iris winch joint's payout and the payload's detach (bridged)."""
+        self.backend = "gazebo"
+        self.pub_gz_payout = self.create_publisher(Float64, "/winch/gz/payout", 10)
+        self.pub_gz_detach = self.create_publisher(Empty, "/winch/gz/detach", 10)
 
     # ------------------------------------------------------------------ #
     def _now(self):
@@ -171,6 +188,12 @@ class WinchNode(Node):
         self.get_logger().error(f"winch fault: {reason}")
 
     def _send_backend(self, action):
+        if self.backend == "gazebo":
+            if action == "release":
+                # A bridged Empty can be lost on a busy host; re-send for a
+                # few ticks (detaching an already-detached joint is a no-op).
+                self._detach_sends = 5
+            return
         if self.backend != "mavlink" or self.cli_cmd is None:
             return
         if not self.cli_cmd.service_is_ready():
@@ -250,6 +273,11 @@ class WinchNode(Node):
         dt = max(0.0, now - self._last_tick)
         self._last_tick = now
         self.integrate(dt)
+        if self.pub_gz_payout is not None:
+            self.pub_gz_payout.publish(Float64(data=float(self.payout)))
+            if self._detach_sends > 0:
+                self.pub_gz_detach.publish(Empty())
+                self._detach_sends -= 1
         self.publish_status()
 
     def integrate(self, dt):

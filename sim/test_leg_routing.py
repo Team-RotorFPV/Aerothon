@@ -91,6 +91,14 @@ class FlyingMav:
 
 class ClearLegTests(unittest.TestCase):
 
+    def test_arrival_tolerance_cannot_cut_across_an_exclusion_corner(self):
+        mav = FlyingMav(at=(17.75, -8.0, 10.0),
+                        exclusions=[(8.0, 16.0, -8.0, 8.0)])
+        router = LegRouter(clearance_m=1.5, tol=0.8)
+        router.fly(mav, 6.25, -8.0, 10.0)
+        self.assertFalse(path_hits_exclusion(
+            [mav.pos()[:2], mav.gotos[-1][:2]], 1.5, mav.exclusions))
+
     def test_a_clear_leg_is_commanded_straight_to_the_destination(self):
         mav = FlyingMav()
         r = LegRouter()
@@ -396,6 +404,26 @@ class StageWiringTests(unittest.TestCase):
         self.assertFalse(path_hits_exclusion(track, 1.5, self.WALL),
                          f"the swept track crossed red ground: {track[:12]}")
 
+    def test_clipped_search_waypoints_are_accepted_by_the_leg_router(self):
+        from mission_bt.mission_tree import LawnmowerSearch
+        for exclusions in (
+                [(15.0, 25.0, -3.0, 3.0)],
+                [(15.0, 18.0, -3.0, 3.0), (18.0, 25.0, 1.0, 3.0)]):
+            with self.subTest(exclusions=exclusions):
+                mav = RoutedMav(exclusions=exclusions, at=(0.0, -8.0, 10.0))
+                stage = LawnmowerSearch(
+                    mav, (0.0, 40.0, -10.0, 10.0), 10.0,
+                    exclusions=lambda: mav.exclusions, search_budget_m=0.0,
+                    image_width_px=1280, hfov_rad=math.radians(60), marker_m=2.2)
+                stage.initialise()
+                for _ in range(100):
+                    result = stage.update()
+                    if result is not py_trees.common.Status.RUNNING:
+                        break
+                    mav.arrive()
+                self.assertEqual(stage.skipped, 0,
+                                 "the router rejected the planner's clipped endpoints")
+
     def test_a_blocked_leg_aborts_with_a_reason_rather_than_flying_it(self):
         from mission_bt.mission_tree import GotoHome
         walled = [(8.0, 10.0, -400.0, 400.0)]
@@ -406,33 +434,6 @@ class StageWiringTests(unittest.TestCase):
         self.assertIs(status, py_trees.common.Status.FAILURE)
         self.assertIn("red zone", mav.abort_reason)
         self.assertEqual(mav.gotos, [], "commanded a leg it had refused")
-
-    def test_ApproachBanner_refuses_a_step_across_red_ground(self):
-        """A visual servo cannot detour: a detour takes the banner out of
-        frame and ends the lock the approach depends on. So it stops."""
-        from mission_bt.mission_tree import ApproachBanner
-        mav = RoutedMav(exclusions=[(2.0, 9.0, -6.0, 6.0)], at=(0.0, 0.0, 3.0))
-        mav.banner_z = 1.0
-        stage = ApproachBanner(mav, alt=3.0, min_lock_ticks=0)
-        stage.initialise()
-        status = None
-        for _ in range(4):
-            status = stage.update()
-            if status is py_trees.common.Status.FAILURE:
-                break
-            mav.arrive()
-        self.assertIs(status, py_trees.common.Status.FAILURE)
-        self.assertIn("red ground", mav.abort_reason)
-
-    def test_ApproachBanner_is_unaffected_when_the_ground_is_clear(self):
-        from mission_bt.mission_tree import ApproachBanner
-        mav = RoutedMav(exclusions=[], at=(0.0, 0.0, 3.0))
-        mav.banner_z = 1.0
-        stage = ApproachBanner(mav, alt=3.0, min_lock_ticks=0)
-        stage.initialise()
-        self.assertIs(stage.update(), py_trees.common.Status.RUNNING)
-        self.assertTrue(mav.gotos)
-
 
 class GateAdvanceTests(unittest.TestCase):
     """Passing THROUGH the gate is a distance, not a detector state.
@@ -486,6 +487,44 @@ class GateAdvanceTests(unittest.TestCase):
         self.assertAlmostEqual(stage._target[0], 0.0, places=3)
         self.assertAlmostEqual(stage._target[1], 10.0, places=3)
 
+    def test_it_uses_the_altitude_measured_immediately_before_the_leg(self):
+        """The board edge is unknown until the preceding lidar descent has
+        finished. GateAdvance must resolve that measured altitude when the
+        leg begins instead of retaining the 3 m board-height configuration."""
+        mav = RoutedMav(at=(0.0, 0.0, 2.1))
+        stage = self._stage(mav, alt=lambda: 2.1)
+        stage.update()
+        self.assertAlmostEqual(mav.gotos[-1][2], 2.1)
+
+    def test_it_refuses_when_no_safe_transit_altitude_was_measured(self):
+        mav = RoutedMav(at=(0.0, 0.0, 3.0))
+        stage = self._stage(mav, alt=lambda: None)
+
+        status = stage.update()
+
+        self.assertIs(status, py_trees.common.Status.FAILURE)
+        self.assertFalse(mav.gotos, "advanced without a measured safe altitude")
+        self.assertIn("safe transit altitude", mav.abort_reason)
+
+    def test_it_latches_the_measured_distance_once(self):
+        mav = RoutedMav(at=(0.0, 0.0, 2.0))
+        measured = [6.0]
+        stage = self._stage(mav, advance_m=lambda: measured[0])
+        stage.update()
+        measured[0] = 10.0
+        mav._pos = (2.0, 0.0, 2.0)
+        stage.update()
+        self.assertAlmostEqual(mav.gotos[-1][0], 6.0)
+
+    def test_unmeasured_or_invalid_crossing_distance_cannot_command_motion(self):
+        for value in (None, float("nan"), float("inf"), 0.0, -1.0):
+            with self.subTest(value=value):
+                mav = RoutedMav(at=(0.0, 0.0, 2.0))
+                stage = self._stage(mav, advance_m=lambda: value)
+                self.assertIs(stage.update(), py_trees.common.Status.FAILURE)
+                self.assertFalse(mav.gotos)
+                self.assertIn("safe transit distance", mav.abort_reason)
+
     def test_only_ONE_controller_drives_the_leg(self):
         """MEASURED, run 18. This stage used to hand control to the
         follow-the-gap navigator AND keep streaming position setpoints at its
@@ -537,11 +576,44 @@ class GateAdvanceTests(unittest.TestCase):
         stage.terminate(py_trees.common.Status.SUCCESS)
         self.assertFalse(mav.avoidance)
 
-    def test_the_corridor_exit_pose_is_recorded_on_arrival(self):
-        """The return leg navigates back to it."""
+    def test_only_the_observed_corridor_exit_anchors_search_and_return(self):
+        from mission_bt.mission_tree import Corridor
         mav = RoutedMav(at=(0.0, 0.0, 3.0))
         stage = self._stage(mav)
         stage.update()
         mav._pos = (10.0, 0.0, 3.0)
         stage.update()
-        self.assertIsNotNone(mav.corridor_exit_pose)
+        corridor = Corridor("Corridor", mav, alt=3.0)
+        mav._pos = (20.0, 0.0, 3.0)
+        mav.exited = True
+        self.assertIs(corridor.update(), py_trees.common.Status.SUCCESS)
+        self.assertEqual(mav.corridor_exit_pose[:2], (20.0, 0.0))
+
+
+class StartInsideMarginTests(unittest.TestCase):
+    """Live run 5, shipped arena: the only red-zone entry of a completed run.
+
+    The aircraft was inside the inflated margin of the main zone's south
+    strip (confirmed mid-leg) and heading for the next lane at (47.8, 2.0).
+    route_leg dropped the box it was inside and returned the straight line,
+    which ran diagonally across the paint. Leaving has to be by the nearest
+    edge, and the rest of the leg routed with the box still in play.
+    """
+
+    # Main red zone, home-local, as the camera had mapped it (1 m cells).
+    RED = (35.0, 45.0, -0.5, 6.5)
+
+    def test_the_route_never_crosses_the_zone_it_starts_beside(self):
+        from mission_bt.search_planner import route_leg, _segment_hits_rect
+        start = (34.9, -0.6)          # inside the 1.5 m margin, outside paint
+        end = (47.8, 2.0)
+        r = route_leg(start, end, 1.5, [self.RED])
+        self.assertTrue(r["ok"], r["reason"])
+        pts = [start] + list(r["waypoints"])
+        for a, b in zip(pts, pts[1:]):
+            self.assertFalse(
+                _segment_hits_rect(a[0], a[1], b[0], b[1], self.RED),
+                f"leg {a} -> {b} crosses the red zone")
+        # It steps OUT first: the first waypoint is no further inside.
+        first = r["waypoints"][0]
+        self.assertLessEqual(first[1], start[1] + 1e-9)

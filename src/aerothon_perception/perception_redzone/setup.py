@@ -17,5 +17,6 @@ setup(
     description='HSV red-zone detection.',
     license='MIT',
     entry_points={'console_scripts': [
-        'redzone_node = perception_redzone.redzone_node:main']},
+        'redzone_node = perception_redzone.redzone_node:main',
+        'payload_node = perception_redzone.payload_node:main']},
 )

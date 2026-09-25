@@ -51,7 +51,10 @@ from geometry_msgs.msg import PoseStamped
 from sensor_msgs.msg import CameraInfo, Image
 from std_msgs.msg import Bool, Float32, String
 
-from perception_redzone.georef import GroundGrid, bbox, footprint, ground_point
+from collections import deque
+
+from perception_redzone.georef import (GroundGrid, bbox, footprint,
+                                       ground_point_q)
 
 NOT_VISIBLE = "NOT_VISIBLE"
 CLEAR = "CLEAR"
@@ -74,12 +77,16 @@ class RedZoneNode(Node):
         p('cell_m', 1.0)
         p('confirm_hits', 3)
         p('inflate_m', 1.0)
-        p('samples_per_contour', 24)
 
         self.bridge = CvBridge()
         self.grid = GroundGrid(cell_m=float(self._g('cell_m')),
                                confirm_hits=int(self._g('confirm_hits')))
         self._pose = None
+        # (t, x, y, z, yaw, (w, x, y, z)) on this node's clock. Each frame is
+        # projected with the pose nearest its CAPTURE stamp, not the last pose
+        # to arrive: at 2.5 m/s, and through the sweep's 90 degree turns, the
+        # difference smeared the map by metres.
+        self._poses = deque(maxlen=400)
         self._cam_pitch = None
         self._hfov = float(self._g('camera_hfov'))
 
@@ -118,6 +125,22 @@ class RedZoneNode(Node):
                          1.0 - 2.0 * (q.y ** 2 + q.z ** 2))
         self._pose = (m.pose.position.x, m.pose.position.y,
                       m.pose.position.z, yaw)
+        t = self.get_clock().now().nanoseconds * 1e-9
+        self._poses.append((t,) + self._pose + ((q.w, q.x, q.y, q.z),))
+
+    def pose_at(self, t):
+        """The buffered pose nearest time `t`: (x, y, z, yaw, quat) or None.
+
+        Falls back to the latest pose when the buffer does not bracket `t`
+        closely -- a mismatched clock must degrade to the old behaviour, not
+        to no projection at all.
+        """
+        if not self._poses:
+            return None
+        best = min(self._poses, key=lambda p: abs(p[0] - t))
+        if abs(best[0] - t) > 0.5:
+            best = self._poses[-1]
+        return best[1:]
 
     def on_camera_state(self, m: String):
         try:
@@ -161,22 +184,26 @@ class RedZoneNode(Node):
         mask = cv2.bitwise_or(m1, m2)
         return cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
 
-    def project_contour(self, contour, wh):
-        """Ground points for a contour, skipping rays that miss the ground."""
-        x, y, w, h = cv2.boundingRect(contour)
-        n = max(2, int(self._g('samples_per_contour')) // 4)
-        px, py, pz, yaw = self._pose
-        pts = []
-        for i in range(n + 1):
-            for u, v in ((x + w * i / n, y), (x + w * i / n, y + h),
-                         (x, y + h * i / n), (x + w, y + h * i / n)):
-                g = ground_point(u, v, wh, self._hfov, pz, (px, py), yaw,
-                                 self._cam_pitch)
-                if g is not None:
-                    pts.append(g)
-        return pts
+    def project_polygon(self, contour, wh, pose):
+        """The contour itself as a ground polygon, with full attitude.
 
-    # ------------------------------------------------------------------ #
+        Returns [] if any vertex's ray misses the ground: a partial polygon
+        would be a different shape, not a smaller version of the same one.
+        """
+        px, py, pz, _yaw, quat = pose
+        approx = cv2.approxPolyDP(contour, 2.0, True).reshape(-1, 2)
+        if len(approx) < 3:
+            x, y, w, h = cv2.boundingRect(contour)
+            approx = [(x, y), (x + w, y), (x + w, y + h), (x, y + h)]
+        poly = []
+        for u, v in approx:
+            g = ground_point_q(float(u), float(v), wh, self._hfov, pz,
+                               (px, py), quat, self._cam_pitch)
+            if g is None:
+                return []
+            poly.append(g)
+        return poly
+
     def on_image(self, msg: Image):
         try:
             frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
@@ -199,7 +226,11 @@ class RedZoneNode(Node):
                   "observed": None}
 
         if ok:
-            px, py, pz, yaw = self._pose
+            stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+            pose = self.pose_at(stamp) if stamp > 0.0 else None
+            if pose is None:
+                pose = self._pose + ((1.0, 0.0, 0.0, 0.0),)
+            px, py, pz, yaw, _q = pose
             fp = footprint((w, h), self._hfov, pz, (px, py), yaw,
                            self._cam_pitch)
             detail["observed"] = [round(v, 2) for v in bbox(fp)] if fp else None
@@ -207,27 +238,33 @@ class RedZoneNode(Node):
             # looked at, and there was no red on it.
             detail["status"] = RED if cnts else CLEAR
             detail["reason"] = ""
+            # Fill each blob's ground polygon, then credit every covered cell
+            # ONCE for this frame.
+            frame_cells = set()
             for c in cnts:
-                self.grid.add(self.project_contour(c, (w, h)))
+                frame_cells |= self.grid.polygon_cells(
+                    self.project_polygon(c, (w, h), pose))
+            self.grid.add_cells(frame_cells)
 
         detail["exclusions"] = [[round(v, 2) for v in ex]
                                 for ex in self.grid.exclusions(
                                     inflate_m=float(self._g('inflate_m')))]
         detail["confirmed_area_m2"] = round(self.grid.area_m2(), 1)
 
-        colour = (0, 0, 255) if cnts else (0, 200, 0)
-        cv2.drawContours(frame, cnts, -1, colour, 2)
-        cv2.putText(frame, detail["status"], (10, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, colour, 2)
-
         self.pub.publish(Bool(data=bool(cnts)))
         self.pub_area.publish(Float32(data=frac))
         self.pub_detail.publish(String(data=json.dumps(detail)))
-        try:
-            self.pub_annot.publish(self.bridge.cv2_to_imgmsg(frame,
-                                                             encoding='bgr8'))
-        except Exception:  # noqa: BLE001
-            pass
+        # A GCS debug view: drawn and converted only while someone watches.
+        if self.pub_annot.get_subscription_count():
+            colour = (0, 0, 255) if cnts else (0, 200, 0)
+            cv2.drawContours(frame, cnts, -1, colour, 2)
+            cv2.putText(frame, detail["status"], (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, colour, 2)
+            try:
+                self.pub_annot.publish(self.bridge.cv2_to_imgmsg(frame,
+                                                                 encoding='bgr8'))
+            except Exception:  # noqa: BLE001
+                pass
 
 
 def main():

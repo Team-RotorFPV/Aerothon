@@ -28,8 +28,6 @@ sys.path.insert(0, os.path.join(
 from mission_bt.search_planner import (
     grow_zone,
     coverage_fraction,
-    extend_zone,
-    frontier_strip,
     ground_width,
     lane_spacing,
     max_decode_altitude,
@@ -39,7 +37,6 @@ from mission_bt.search_planner import (
     plan_search,
     px_per_module,
     vfov,
-    zone_from_observation,
     leg_hits_exclusion,
     merge_exclusions,
     path_hits_exclusion,
@@ -206,73 +203,6 @@ class PlanSearchTests(unittest.TestCase):
         large = plan_search(ZONE, 1920, HFOV, 1.0, MODULES)
         self.assertLess(small["decode_alt_m"], large["decode_alt_m"])
         self.assertLessEqual(small["n_lanes"], large["n_lanes"] * 4)
-
-
-class FrontierTests(unittest.TestCase):
-    """The observed window is bounded by LIDAR RANGE, not by the zone.
-
-    In the reference arena the lidar reports 12 m of open ground for a
-    delivery zone that is 40 m deep, so `zone_from_observation` returns a 12 m
-    window. Sweeping it once and giving up is only correct if the target
-    happens to be inside — which, for every live run to date, it was, because
-    they were all started with target C.
-    """
-
-    def test_the_observed_window_is_much_smaller_than_the_real_zone(self):
-        """The premise, measured rather than asserted."""
-        window = zone_from_observation((17.0, 0.0), 0.0, 12.0, 16.6,
-                                       margin_m=1.0)
-        self.assertLess(window[1], 30.0)
-        # Targets B (47, 10), D (33, -10) and E (45, -6) are all outside it.
-        for name, (tx, _ty) in {"B": (47, 10), "D": (33, -10),
-                                "E": (45, -6)}.items():
-            self.assertGreater(tx, window[1],
-                               f"target {name} was expected outside the window")
-
-    def test_extend_zone_pushes_the_far_edge_along_the_heading(self):
-        self.assertEqual(extend_zone((10.0, 20.0, -5.0, 5.0), 0.0, 15.0),
-                         (10.0, 35.0, -5.0, 5.0))
-
-    def test_extend_zone_keeps_the_ground_already_covered(self):
-        """A union, not a translation: the aircraft does not un-see the window
-        it just swept."""
-        z = extend_zone((10.0, 20.0, -5.0, 5.0), math.pi, 8.0)
-        for got, want in zip(z, (2.0, 20.0, -5.0, 5.0)):
-            self.assertAlmostEqual(got, want, places=6)
-
-    def test_extend_zone_handles_a_diagonal_heading(self):
-        z = extend_zone((0.0, 10.0, 0.0, 10.0), math.radians(90.0), 6.0)
-        self.assertAlmostEqual(z[3], 16.0, places=6)
-        self.assertAlmostEqual(z[1], 10.0, places=6)
-
-    def test_the_strip_is_only_the_NEW_ground(self):
-        """Re-sweeping the whole extended zone would re-fly covered ground."""
-        strip = frontier_strip((10.0, 22.0, -5.0, 5.0), 0.0, 12.0)
-        self.assertEqual(strip, (22.0, 34.0, -5.0, 5.0))
-
-    def test_strips_tile_the_ground_without_gaps(self):
-        """Three successive advances must leave no unswept band between them."""
-        window = (10.0, 22.0, -5.0, 5.0)
-        covered = [window]
-        frontier = window
-        for _ in range(3):
-            frontier = frontier_strip(frontier, 0.0, 12.0)
-            covered.append(frontier)
-        for a, b in zip(covered, covered[1:]):
-            self.assertAlmostEqual(a[1], b[0], places=6,
-                                   msg=f"gap between {a} and {b}")
-        self.assertAlmostEqual(covered[-1][1], 58.0, places=6)
-
-    def test_enough_advances_reach_the_far_targets(self):
-        """The point of the whole mechanism."""
-        frontier = zone_from_observation((17.0, 0.0), 0.0, 12.0, 16.6,
-                                         margin_m=1.0)
-        reach = frontier[1]
-        for _ in range(4):
-            frontier = frontier_strip(frontier, 0.0, 12.0)
-            reach = max(reach, frontier[1])
-        for name, tx in {"B": 47.0, "D": 33.0, "E": 45.0}.items():
-            self.assertGreater(reach, tx, f"target {name} still unreachable")
 
 
 if __name__ == "__main__":
@@ -541,18 +471,47 @@ class LegRoutingTests(unittest.TestCase):
         self.assertIn((0.0, 3.0, 0.0, 1.0), merged)
 
     def test_merging_is_conservative_never_smaller_than_its_parts(self):
-        """An L-shaped zone merges to its bounding box, which forbids some
-        flyable ground. Over-forbidding costs coverage; under-forbidding costs
-        marks. Only one of those is recoverable."""
+        """Every part stays inside some merged box, and an L is NOT turned
+        into its bounding box: that forbade the notch, 64% of the box."""
         cells = [(0.0, 10.0, 0.0, 2.0), (0.0, 2.0, 0.0, 10.0)]
         merged = merge_exclusions(cells, 0.0)
-        self.assertEqual(len(merged), 1)
-        x0, x1, y0, y1 = merged[0]
+        self.assertEqual(len(merged), 2)
         for cx0, cx1, cy0, cy1 in cells:
-            self.assertLessEqual(x0, cx0)
-            self.assertGreaterEqual(x1, cx1)
-            self.assertLessEqual(y0, cy0)
-            self.assertGreaterEqual(y1, cy1)
+            self.assertTrue(any(x0 <= cx0 and x1 >= cx1 and y0 <= cy0
+                                and y1 >= cy1 for x0, x1, y0, y1 in merged))
+
+    def test_a_painted_rectangle_of_cells_is_one_box(self):
+        cells = [(x - 1.0, x + 2.0, y - 1.0, y + 2.0)       # 1 m cells, +1 m
+                 for x in range(10) for y in range(6)]
+        self.assertEqual(merge_exclusions(cells, 3.0),
+                         [(-1.0, 11.0, -1.0, 7.0)])
+
+    def test_chained_zones_leave_the_strip_beyond_them_searchable(self):
+        """The custom arena that failed: three red zones chained along the
+        delivery zone's northern edge, each within 3 m of the next, merged
+        into one box that covered the target pad. The strip north of them
+        must still be swept, and the pad must be under a lane."""
+        from mission_bt.search_planner import (clip_lane,
+                                               plan_lawnmower_excluding)
+        red = [(34.5, 44.5, -11.0, -4.0), (27.5, 33.5, -4.5, -0.5),
+               (47.5, 52.5, -11.0, -7.0)]
+        cells = []
+        for x0, x1, y0, y1 in red:            # as the georeferencer sends them
+            for x in range(int(x0), int(x1)):
+                for y in range(int(y0), int(y1)):
+                    cells.append((x - 1.0, x + 2.0, y - 1.0, y + 2.0))
+        zone = (15.5, 53.5, -26.5, 1.5)
+        pad = (48.0, 0.5)
+        wps = plan_lawnmower_excluding(zone, 4.5, 10.0, 1.0472,
+                                       exclusions=cells, clearance_m=1.5)
+        segs = [(wps[i], wps[i + 1]) for i in range(0, len(wps), 2)]
+        near = [a for a, b in segs
+                if abs(a[1] - pad[1]) < 3.0
+                and min(a[0], b[0]) <= pad[0] <= max(a[0], b[0])]
+        self.assertTrue(near, "no lane passes over the target pad")
+        # And it can be got to: a route into the strip exists.
+        r = route_leg((20.0, -15.0), (40.0, pad[1]), 1.5, cells)
+        self.assertTrue(r["ok"], r["reason"])
 
     # ---- the segment predicate the stages will use ---- #
     def test_leg_predicate_agrees_with_the_lane_clipper(self):
