@@ -24,14 +24,26 @@ confirmed camera observations.
 
 **Delivery zone** — the area beyond the corridor containing the target pads.
 
-**Observed zone** — the portion of the delivery zone the aircraft has actually
-measured. Always a subset of the delivery zone, and initially bounded by lidar
-range, not by the zone's real extent.
+**Delivery-zone boundary** — the closed geographic polygon supplied by the
+organisers before flight. It is the authoritative search envelope for the
+delivery zone and required mission input.
 
-**Frontier** — the edge of the observed zone. Search expands it forward and
-laterally in bands.
+**Mission-ready boundary** — a delivery-zone boundary that is present, valid
+and usable. Without one, the aircraft is not ready to arm.
 
-**Strip / band** — the new ground one frontier expansion adds. Swept once.
+**Arena geofence** — the organiser-supplied polygon the whole flight must stay
+inside (rulebook: "Coordinates for the geo-fence boundary will be provided").
+Distinct from the delivery-zone boundary, which bounds only the search. It is
+uploaded to the flight controller, read back and enforced before arming;
+exclusions are never added to it.
+
+**Bottom-left start** — the lawnmower search always begins at the south-west
+(min x, min y) corner of the delivery-zone boundary, whatever point the
+corridor let the aircraft out at.
+
+**Free-space window** — the open ground visible to a ranging sensor from one
+pose. It describes immediate obstacle clearance, not the delivery-zone
+boundary.
 
 ## Perception
 
@@ -68,6 +80,10 @@ ground was seen and is not red. Collapsing the two makes "no camera" read as
 
 **Target pad** — a marker in the delivery zone. Exactly one matches.
 
+**Verified target** — a target pad whose payload matched repeatedly while the
+aircraft was stationary, which the aircraft then centred over and reconfirmed.
+Only a verified target may be used for payload delivery.
+
 **Decode altitude** — the highest altitude the payload marker is still
 readable from. Derived from the measured px-per-module floor.
 
@@ -91,6 +107,55 @@ delivery zone, pads and red zones moved.
 arenas. The acceptance test for the perception-driven claim: passing on the
 shipped arena cannot distinguish "derived from perception" from "derived from
 a constant that happens to agree".
+
+**Custom arena / world spec** — an arena a person placed by hand in the world
+editor (`tools/world_editor`), saved as JSON in `sim/worlds/`: take-off area,
+the outbound and return corridors (each with its own pose, length, width and
+wall height; the return one *linked* beside the outbound one, as in the
+rulebook drawing, or placed anywhere), the return corridor's obstacles, the
+delivery zone, geofence, any number of red zones, the pads, decoys, the named
+target and QR sizes. Unlike a randomised arena nothing about it is chosen by
+the code, so it is the sharpest test for a surviving constant. Only the
+banners and the take-off pad's internal layout keep their shape.
+
+**Return gate search** — how the aircraft finds the return corridor without
+being told where it is: a full turn at the stand-off first (the rulebook
+layout ends here, on the first heading), then vantage points along the
+delivery zone's edge, nearest the outbound exit first, each looking outward.
+A sighting is the identified banner that is not the outbound one (whose
+position was recorded on the way out) and is within the near range.
+
+**Team airframe** — the vehicle the simulator flies by default
+(`AEROTHON_AIRFRAME=cad`): the team's quad built from its CAD in
+`Drone frame/` by `scripts/cad_to_gazebo.py` (meshes and measured mounts in
+`models/aerothon_quad/airframe.json`) and `scripts/build_cad_vehicle.py`.
+2.0 kg all-up, 2312 980 KV on 9450 props at 4S (4S2P 9000 mAh Li-ion),
+Logitech C270 (48.8 deg HFOV) on a tilt servo, LD06 lidar on the raised
+front mount, gravity-hook winch. `AEROTHON_AIRFRAME=iris` flies the older
+ArduPilot Iris variant.
+
+**Gravity hook** — the team's drop mechanism: a motor lowers the payload on
+a hook that lets go by itself once the payload rests and the line goes slack.
+The winch pays out past touchdown for that slack; "release" sends nothing on
+the aircraft (in Gazebo the winch node detaches on slack).
+
+**Edge-on orbit** — what both banner searches do when a full turn reads no
+banner but did see green: the board is being seen from the side or behind,
+where no lettering shows. The largest green region is taken as where the gate
+stands (bearing from the camera, range from where it meets the ground or from
+its height), and the aircraft flies vantage points round it at search
+altitude, facing it, until the lettering reads. It is tried before the blind
+relocation pattern and does not count against its budget. An empty heading
+ends once it can no longer reach the dwell's hit floor, and the lettering can
+be read mid-leg. With no green seen anywhere, a ring of vantage points round
+the search's start is the last resort. `banner_orbit.py`.
+
+**Confirmed delivery** — a drop the nadir camera has seen: after the release
+and after the winch has wound back up, the payload is in frame on the ground,
+at the pixel size its edge length has from that altitude. Distinct from the
+winch's *released* flag, which only says the command was accepted. An
+unconfirmed drop still flies home, but the outcome is DELIVERY_UNCONFIRMED,
+not COMPLETED.
 ## Search and navigation
 
 **Routed leg** — a transit between two points, checked against the exclusion

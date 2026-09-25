@@ -24,3 +24,26 @@
   ros_type_name: "std_msgs/msg/Float64"
   gz_type_name: "gz.msgs.Double"
   direction: ROS_TO_GZ
+
+# Payload winch (winch_ctrl backend:=gazebo): line payout in metres drives the
+# hook's prismatic joint; an Empty on detach lets the DetachableJoint go.
+- ros_topic_name: "/winch/gz/payout"
+  gz_topic_name: "/aerothon/winch/payout"
+  ros_type_name: "std_msgs/msg/Float64"
+  gz_type_name: "gz.msgs.Double"
+  direction: ROS_TO_GZ
+
+- ros_topic_name: "/winch/gz/detach"
+  gz_topic_name: "/aerothon/payload/detach"
+  ros_type_name: "std_msgs/msg/Empty"
+  gz_type_name: "gz.msgs.Empty"
+  direction: ROS_TO_GZ
+
+# Ground truth for GRADING only (sim/run_mission_live.py records it for
+# sim/check_track.py). No mission node subscribes: the mission confirms the
+# drop with its camera.
+- ros_topic_name: "/sim/payload_pose"
+  gz_topic_name: "/model/aerothon_payload/pose"
+  ros_type_name: "geometry_msgs/msg/Pose"
+  gz_type_name: "gz.msgs.Pose"
+  direction: GZ_TO_ROS

@@ -210,25 +210,49 @@ class DwellTests(unittest.TestCase):
         """The heart of it. A yaw that changes every tick is the oscillation."""
         mav = SweepMav(banner_at=None)
         stage = self._stage(mav)
+        held = []
         for _ in range(40):                      # 4.0 s at 10 Hz
             stage.update()
+            if stage.step_index == 0 and stage.phase == stage.DWELL:
+                held.append(mav.commanded_yaws[-1])
             self.clock.advance(0.1)
-        held = mav.commanded_yaws[1:]
         self.assertTrue(held, "nothing was commanded")
         self.assertEqual(len(set(round(y, 6) for y in held)), 1,
                          f"yaw moved during the dwell: {sorted(set(held))}")
 
-    def test_the_dwell_lasts_the_configured_time(self):
+    def test_a_dwell_that_can_still_pass_lasts_the_configured_time(self):
+        """Evidence is collected for the whole dwell whenever it could still
+        reach the confidence floor -- here every frame agrees, and the stage
+        does not decide until the five seconds are up."""
         mav = SweepMav(banner_at=None)
         stage = self._stage(mav, dwell_s=5.0)
-        for _ in range(49):                      # 4.9 s
+        stage.update()                           # nothing in frame at entry...
+        mav.banner_at = 0.0                      # ...then it is, every frame
+        for _ in range(48):                      # to 4.9 s
             stage.update()
             self.clock.advance(0.1)
-        self.assertEqual(stage.step_index, 0)
+        self.assertEqual(stage.phase, stage.DWELL)
         for _ in range(4):
             stage.update()
             self.clock.advance(0.1)
-        self.assertEqual(stage.step_index, 1)
+        self.assertNotEqual(stage.phase, stage.DWELL)
+
+    def test_an_empty_heading_ends_once_it_can_no_longer_pass(self):
+        """Watched on a custom arena: twelve headings of 0/25 frames, five
+        seconds each, before the search could move. With a 0.6 hit floor an
+        empty dwell cannot pass after 40% of it, i.e. 2 s of 5 -- and not
+        before."""
+        mav = SweepMav(banner_at=None)
+        stage = self._stage(mav, dwell_s=5.0)
+        for _ in range(18):                      # 1.8 s
+            stage.update()
+            self.clock.advance(0.1)
+        self.assertEqual(stage.step_index, 0, "gave up before it had to")
+        for _ in range(12):                      # to 3.0 s
+            stage.update()
+            self.clock.advance(0.1)
+        self.assertEqual(stage.step_index, 1,
+                         "stared at a heading that could no longer pass")
 
     def test_the_next_step_is_one_step_further_round(self):
         mav = SweepMav(banner_at=None)
@@ -390,6 +414,80 @@ class DecisionTests(unittest.TestCase):
             stage.update()
             self.clock.advance(0.1)
         self.assertGreaterEqual(stage.step_index, 1)
+
+
+class TwoGateMav(SweepMav):
+    """Two banners, as the arena has: the entrance near, the return gate far.
+
+    Each is (heading, board area in px). The FAR one is straight ahead, which
+    is exactly the takeoff-pad view of the shipped arena: the return gate
+    down the return lane, the entrance gate off to the side.
+    """
+
+    def __init__(self, banners):
+        super().__init__(banner_at=None)
+        self.banners = banners
+
+    def _visible(self):
+        for heading, area in self.banners:
+            err = math.atan2(math.sin(heading - self._yaw),
+                             math.cos(heading - self._yaw))
+            if abs(err) <= self.banner_arc:
+                return err, area
+        return None
+
+    def _bearing_now(self):
+        v = self._visible()
+        return None if v is None else -v[0] / self.banner_arc
+
+    @property
+    def banner_board_area(self):
+        v = self._visible()
+        return 0.0 if v is None else v[1]
+
+
+class NearGateTests(unittest.TestCase):
+    """The entrance is the NEAR banner; the first confident one may be far."""
+
+    FAR = (0.0, 30000.0)                    # ~13 m off at 1280 px, 60 deg
+    NEAR = (math.radians(-60.0), 200000.0)  # ~5 m off
+
+    def setUp(self):
+        self.clock = Clock()
+
+    def _run_to_centre(self, mav):
+        stage = AlignToBanner(mav, clock=self.clock)
+        stage.initialise()
+        for _ in range(6000):
+            stage.update()
+            if stage.phase in (stage.CENTRE, stage.SQUARE) and \
+                    stage._seen_yaw is not None:
+                return stage
+            self.clock.advance(0.1)
+        self.fail("never committed to a banner")
+
+    def test_range_estimate_orders_the_gates(self):
+        stage = AlignToBanner(TwoGateMav([]), clock=self.clock)
+        self.assertGreater(stage.range_from_area(self.FAR[1]), stage.near_range_m)
+        self.assertLess(stage.range_from_area(self.NEAR[1]), stage.near_range_m)
+
+    def test_a_far_banner_in_frame_does_not_short_circuit_the_sweep(self):
+        mav = TwoGateMav([self.FAR, self.NEAR])
+        stage = self._run_to_centre(mav)
+        err = abs(math.atan2(math.sin(stage._seen_yaw - self.NEAR[0]),
+                             math.cos(stage._seen_yaw - self.NEAR[0])))
+        self.assertLess(err, math.radians(10.0),
+                        f"committed to {math.degrees(stage._seen_yaw):.0f} deg, "
+                        "the far gate")
+        self.assertTrue(any("far gate" in m or "sweeping for the near" in m
+                            for m, _ in mav.logs))
+
+    def test_with_only_a_far_banner_it_still_takes_it(self):
+        mav = TwoGateMav([self.FAR])
+        stage = self._run_to_centre(mav)
+        err = abs(math.atan2(math.sin(stage._seen_yaw - self.FAR[0]),
+                             math.cos(stage._seen_yaw - self.FAR[0])))
+        self.assertLess(err, math.radians(10.0))
 
 
 class CentringTests(unittest.TestCase):
@@ -920,6 +1018,19 @@ class SquareOnWithTheLidarTests(unittest.TestCase):
         return stage, run(stage, mav, self.clock, ticks=ticks)
 
     # ---- the measurement drives the manoeuvre ---- #
+    def test_square_heading_cannot_succeed_with_banner_visibly_off_centre(self):
+        mav = GateMav(gate=(5.0, 1.5), face_rad=math.pi)
+        stage = self._stage(mav, max_corrections=0, stable_frames=1)
+        for _ in range(1500):
+            status = stage.update()
+            if status is py_trees.common.Status.SUCCESS:
+                self.assertLessEqual(abs(mav.banner_bearing()), stage.tol)
+                break
+            if status is py_trees.common.Status.FAILURE:
+                break
+            self.clock.advance(0.1)
+        self.assertIs(status, py_trees.common.Status.SUCCESS, mav.abort_reason)
+
     def test_an_aircraft_already_square_finishes_without_moving(self):
         mav = GateMav(gate=(5.0, 0.0), face_rad=math.pi)
         start = mav.pos()[:2]
@@ -989,6 +1100,18 @@ class SquareOnWithTheLidarTests(unittest.TestCase):
                       stage.feedback_message)
         self.assertLessEqual(mav.standoff(), 6.5,
                              "never closed to a range the lidar works at")
+
+    def test_the_standoff_correction_lands_INSIDE_the_band(self):
+        """Seed 1001: at 6.0-6.1 m against a 6.0 m limit the correction was
+        +0.0 / +0.1 m, fourteen times, and the stage failed. Aiming at the
+        edge leaves the aircraft on it; the correction must clear it."""
+        mav = GateMav(gate=(6.15, 0.0), face_rad=math.pi)
+        stage, status = self._fly(mav)
+        self.assertIs(status, py_trees.common.Status.SUCCESS,
+                      stage.feedback_message)
+        self.assertLessEqual(mav.standoff(), 5.6)
+        steps = [m for m, _ in mav.logs if "along the standoff" in m]
+        self.assertLessEqual(len(steps), 3, steps)
 
     # ---- the refusal ---- #
     def test_squaring_up_TRAVELS_round_the_board_rather_than_turning(self):
@@ -1072,8 +1195,13 @@ class SquareOnWithTheLidarTests(unittest.TestCase):
                 break
         mav.visible = False               # the detector drops a few frames
         for _ in range(25):
-            self.assertIs(stage.update(), py_trees.common.Status.RUNNING,
-                          "a dropped camera frame ended a working measurement")
+            status = stage.update()
+            # Squaring up on the lidar may even FINISH during the dropout --
+            # the sector follows the last good bearing -- but it must not fail.
+            self.assertIsNot(status, py_trees.common.Status.FAILURE,
+                             "a dropped camera frame ended a working measurement")
+            if status is py_trees.common.Status.SUCCESS:
+                return
             self.clock.advance(0.1)
         mav.visible = True
         self.assertIs(run(stage, mav, self.clock, ticks=4000),
@@ -1377,6 +1505,47 @@ class RecoverTheBannerByMovingTests(unittest.TestCase):
                 break
         self.assertGreater(moved, 1.5,
                            "swept every heading from one spot and never moved")
+
+    def test_no_move_is_commanded_onto_red_ground(self):
+        """Arena 1004, batch E: the main red zone's corner 2 m from the return stand-off.
+        Relocations and square-up steps knew nothing about it."""
+        from mission_bt.search_planner import routing_obstacles
+        mav = GateMav(gate=(9.0, 0.0), face_rad=math.pi,
+                      max_ident_range_m=6.0)
+        mav.exclusions = [(2.5, 5.0, -3.0, 3.0)]   # between it and the gate
+        blocks = routing_obstacles(mav.exclusions, 1.5)
+        stage = self._stage(mav)
+        for _ in range(6000):
+            if stage.update() is not py_trees.common.Status.RUNNING:
+                break
+            self.clock.advance(0.1)
+        on_red = [g for g in mav.gotos
+                  if any(x0 <= g[0] <= x1 and y0 <= g[1] <= y1
+                         for x0, x1, y0, y1 in blocks)]
+        self.assertEqual(on_red, [], "commanded a point on red ground")
+
+    def test_a_blocked_step_is_turned_not_abandoned(self):
+        """Arena 1004, batch F: the square-up's 1.5 m step round the return
+        board ran at the main red zone's corner. Holding in place re-asked
+        for the same step fourteen times and the stage failed. Turned toward
+        the board, the step clears the red and still gets the aircraft
+        round."""
+        from mission_bt.search_planner import routing_obstacles
+        mav = GateMav(gate=(9.0, 0.0), face_rad=math.pi,
+                      max_ident_range_m=6.0)
+        # The map's box on the main red zone (truth x 24.8..34.8, y 3.4..10.4).
+        mav.exclusions = [(24.5, 35.0, 3.1, 10.7)]
+        stage = self._stage(mav)
+        frm, to = (22.3, 3.5), (23.2, 2.3)          # the step it asked for
+        blocks = routing_obstacles(mav.exclusions, stage.redzone_clearance_m)
+        inside = lambda p: any(x0 <= p[0] <= x1 and y0 <= p[1] <= y1
+                               for x0, x1, y0, y1 in blocks)
+        self.assertFalse(inside(frm))
+        self.assertTrue(inside(to), "the fixture no longer reproduces it")
+        p = stage._clear_step(frm, to)
+        self.assertFalse(inside(p))
+        self.assertGreater(math.dist(p, frm), 1.0, "it did not move")
+        self.assertLess(math.dist(p, to), math.dist(frm, to))
 
     def test_closing_range_recovers_a_board_that_was_too_small(self):
         mav = GateMav(gate=(9.0, 0.0), face_rad=math.pi,

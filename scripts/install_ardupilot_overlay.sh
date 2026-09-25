@@ -167,6 +167,20 @@ else
 fi
 
 # ------------------------------------------------------------------------------
+# 1d. Simulated GPS dilution
+#
+# SITL's simulated u-blox hardcodes an HDOP of 1.21 against the Q27 interlock's
+# `< 1.2`, so "GPS HDOP" could never go green and arming stayed blocked. Unlike
+# the battery voltage and satellite count, there is no SIM_* parameter for it,
+# so it cannot be set from aerothon_sitl.parm. Unconditional: this is not a
+# missing dependency, it is a value the simulator gets wrong on every machine.
+# ------------------------------------------------------------------------------
+log "Aligning the simulated GPS dilution with the Q27 interlock..."
+python3 "$SCRIPT_DIR/patch_ardupilot_sitl_gps_hdop.py" \
+    "$WS/src/ardupilot/libraries/SITL/SIM_GPS_UBLOX.cpp" \
+    || fail "could not patch the simulated u-blox HDOP"
+
+# ------------------------------------------------------------------------------
 # 2. Build
 #
 # BUILD_TESTING=OFF keeps upstream gtest suites out of the build; we test the

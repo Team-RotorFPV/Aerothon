@@ -48,6 +48,7 @@ Topics
 import json
 import math
 
+import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
@@ -63,6 +64,28 @@ IGN_YAW = 1024
 VEL_YAWRATE_MASK = (IGN_PX | IGN_PY | IGN_PZ |
                     IGN_AFX | IGN_AFY | IGN_AFZ | IGN_YAW)  # = 1479
 FRAME_BODY_OFFSET_NED = 9
+
+# The constants math.degrees / math.radians multiply by.
+_RAD2DEG = 180.0 / math.pi
+_DEG2RAD = math.pi / 180.0
+
+
+def _polar_xy(bearings, ranges):
+    """Body-frame (x, y) of each return. The trig is `math`'s, per return,
+    so the points are exactly those the per-ray loop produced."""
+    b = bearings.tolist()
+    cos = np.fromiter(map(math.cos, b), np.float64, len(b))
+    sin = np.fromiter(map(math.sin, b), np.float64, len(b))
+    return ranges * cos, ranges * sin
+
+
+def _headings(n, step):
+    """Candidate headings -n..n steps: theta, and cos / sin as columns."""
+    th = np.arange(-n, n + 1) * step
+    t = th.tolist()
+    c = np.fromiter(map(math.cos, t), np.float64, len(t))
+    s = np.fromiter(map(math.sin, t), np.float64, len(t))
+    return th, c[:, None], s[:, None]
 
 
 class VelocityController(Node):
@@ -80,9 +103,28 @@ class VelocityController(Node):
         p('yaw_align_gain', 1.2)      # rad/s per radian of gap bearing
 
         # Gap search
-        p('search_fov_deg', 120.0)    # +/- around forward to look for a gap
+        # +/- 90 deg around forward to look for a gap. It was +/- 60: in a
+        # tight slalom (a custom arena's 3.2 m lane, 1.7 m gaps) the way past a
+        # block 0.9 m ahead is a slide SIDEWAYS, and at 60 deg the block's
+        # corner capped every candidate, so the aircraft crept into the block
+        # and reported STUCK.
+        p('search_fov_deg', 180.0)
+        p('yaw_follow_limit_deg', 60.0)   # max heading off the corridor axis; see _yaw_rate_for
         p('safety_radius', 0.8)       # goal.md Q8 keep-out bubble (m)
         p('min_gap_width_deg', 14.0)  # narrower than this is not a way through
+        # Physical passage test (find_gap). Iris: 0.25 m arm plus 0.127 m
+        # prop radius ~= 0.4 m, plus 0.25 m for the airframe's lag behind a
+        # velocity command; the comfort strip centres it. At 0.45 m live run
+        # 4 slid down o2's flank 0.17 m off the block and hit it.
+        # Swept in sim/test_slalom_traverse.py against the shipped return lane
+        # with velocity lag: 0.75+ finds no heading through its 2.07 m gaps,
+        # 0.7 / 1.3 clears every block by 0.60-0.65 m from all three starts.
+        p('passage_half_width', 0.7)
+        p('airframe_radius', 0.4)
+        p('passage_comfort_width', 1.3)
+        p('lookahead_m', 5.0)
+        p('turn_penalty_m_per_rad', 1.0)
+        p('gap_commit_m_per_rad', 0.3)   # hysteresis on the chosen heading
         p('gap_bearing_gain', 1.4)    # lateral m/s per radian of gap bearing
         p('brake_dist', 2.5)
         p('stop_dist', 0.8)
@@ -125,6 +167,8 @@ class VelocityController(Node):
         self._pos = None
         self._alt = None            # current altitude, from /local_position/pose
         self._hold_alt = None       # altitude this traversal should maintain
+        self._yaw = None            # current heading, from the pose
+        self._axis = None           # the corridor axis this traversal started on
         self._progress_ref = None
         self._progress_t = None
         self._open_ticks = 0
@@ -172,6 +216,10 @@ class VelocityController(Node):
             self._enclosed_ticks = 0
             self._entered = False
             self._exited = False
+            # The corridor's axis: the heading the aircraft is handed control
+            # on, square to the banner. Latched on the first steering tick.
+            self._axis = None
+            self._last_gap_bearing = None
             # Latch the altitude to hold for this traversal. The mission can
             # override it on /avoidance/hold_alt; without that, whatever the
             # aircraft was flying at when avoidance was handed control is the
@@ -214,6 +262,9 @@ class VelocityController(Node):
         # z was thrown away here, which is why "hold altitude" could never be
         # more than a comment: the controller did not know its own altitude.
         self._alt = float(m.pose.position.z)
+        q = m.pose.orientation
+        self._yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y),
+                               1.0 - 2.0 * (q.y * q.y + q.z * q.z))
 
     def stalled(self):
         """True when the aircraft has not covered ground recently.
@@ -249,98 +300,201 @@ class VelocityController(Node):
 
     # ------------------------------------------------------------------ #
     def conditioned(self, scan):
-        """(bearings, ranges) after masking, clamping and median filtering."""
+        """(bearings, ranges) after masking, clamping and median filtering.
+
+        Both are float64 numpy arrays. Every step is the same IEEE operation
+        the per-ray loop this replaced performed, in the same order, so the
+        output is bit-identical to it (sim/test_navigator_equivalence.py);
+        on a Pi 5 the loop was most of the 20 Hz tick.
+        """
         lo = float(self._g('range_min_valid'))
         hi = float(self._g('range_max_valid'))
         mask = [math.radians(a) for a in self._g('mask_sectors_deg')]
-        bearings, ranges = [], []
-
-        for i, r in enumerate(scan.ranges):
-            ang = scan.angle_min + i * scan.angle_increment
-            wrapped = (ang + math.pi) % (2 * math.pi) - math.pi
-            # Angular mask: drop the arm/standoff shadow sector.
-            if len(mask) == 2:
-                a_deg = math.degrees(wrapped) % 360.0
-                if mask[0] <= math.radians(a_deg) <= mask[1]:
-                    continue
-            if r != r or r in (float('inf'), float('-inf')):
-                r = hi
-            r = max(lo, min(hi, float(r)))
-            bearings.append(wrapped)
-            ranges.append(r)
+        r = np.asarray(scan.ranges, dtype=np.float64)
+        ang = scan.angle_min + np.arange(r.size) * scan.angle_increment
+        wrapped = (ang + math.pi) % (2 * math.pi) - math.pi
+        # Angular mask: drop the arm/standoff shadow sector.
+        if len(mask) == 2:
+            a_rad = ((wrapped * _RAD2DEG) % 360.0) * _DEG2RAD
+            keep = ~((mask[0] <= a_rad) & (a_rad <= mask[1]))
+            wrapped, r = wrapped[keep], r[keep]
+        r = np.where(np.isfinite(r), r, hi)
+        ranges = np.maximum(lo, np.minimum(hi, r))
 
         # Median filter: a single short return between two long ones is noise,
         # not a wall, and braking for it is how a corridor run stalls.
         w = int(self._g('median_window'))
-        if w >= 3 and len(ranges) >= w:
+        n = ranges.size
+        if w >= 3 and n >= w:
             half = w // 2
-            smoothed = []
-            for i in range(len(ranges)):
-                lo_i = max(0, i - half)
-                hi_i = min(len(ranges), i + half + 1)
-                window = sorted(ranges[lo_i:hi_i])
-                smoothed.append(window[len(window) // 2])
+            smoothed = np.empty_like(ranges)
+            # The window is truncated at the ends, and the median of an
+            # even-length window is its upper middle element.
+            if n > 2 * half:
+                win = np.stack([ranges[k:n - 2 * half + k]
+                                for k in range(2 * half + 1)], axis=1)
+                smoothed[half:n - half] = np.sort(win, axis=1)[:, half]
+            for i in list(range(min(half, n))) + list(range(max(half, n - half), n)):
+                window = sorted(ranges[max(0, i - half):min(n, i + half + 1)])
+                smoothed[i] = window[len(window) // 2]
             ranges = smoothed
-        return bearings, ranges
+        return wrapped, ranges
 
     def find_gap(self, bearings, ranges):
-        """Widest contiguous arc, within the search FOV, that is clear enough.
+        """The heading along which the AIRFRAME has the most room.
 
-        Returns (bearing_rad, width_rad, depth_m) or None. Steering at the
-        centre of the widest gap gives corridor centring, obstacle avoidance
-        and pass-side selection from one computation.
+        Returns (bearing_rad, width_rad, depth_m) or None, where depth is how
+        far a strip as wide as the airframe stays clear along that heading.
+
+        WHAT THIS REPLACES, AND WHY
+
+            The widest ANGULAR arc of rays longer than the 0.8 m safety
+            radius. An obstacle 2.3 m ahead is "longer than 0.8 m", so it
+            counted as open, and in the return slalom the widest open arc
+            pointed straight at the next block. Live run 3 on the shipped
+            arena: out of the return gate past o4, then a steady drift into
+            o3's shadow, creeping at centimetres a second with the block
+            0.35 m off the nose, and a 74 degree roll when it touched. Seed
+            1002 in the old regression wedged the same way.
+
+            An angle says nothing about whether the aircraft FITS. So each
+            candidate heading is tested physically: every return inside a
+            strip of `passage_half_width` either side of the line bounds how
+            far the aircraft can fly along it. A wider `passage_comfort_width`
+            strip adds a pull toward the middle of a passage, and a turn
+            penalty keeps it flying straight when straight is as good.
+        """
+        strips = self._strips(bearings, ranges)
+        gap = self._find_gap(bearings, ranges,
+                             float(self._g('passage_half_width')), strips)
+        if gap is None:
+            # Nothing fits the full strip. Before calling it blocked, try the
+            # bare airframe plus 0.1 m: a tight spot should be crept through,
+            # not frozen in front of.
+            gap = self._find_gap(bearings, ranges,
+                                 float(self._g('airframe_radius')) + 0.1,
+                                 strips)
+        if gap is None:
+            gap = self._escape(bearings, ranges)
+        return gap
+
+    def _escape(self, bearings, ranges):
+        """Already too close to something: creep the way that opens room.
+
+        Every forward heading is inside the strip of a return a few tens of
+        centimetres off. Backing off blind is what pinned seed 1002 against a
+        pillar. Instead take the heading whose line passes the near returns
+        widest, and give it a reach just past the stop distance so the speed
+        law creeps (~0.15 m/s) rather than drives.
         """
         fov = math.radians(float(self._g('search_fov_deg'))) / 2.0
-        clear = float(self._g('safety_radius'))
-        min_w = math.radians(float(self._g('min_gap_width_deg')))
-
-        pts = [(b, r) for b, r in zip(bearings, ranges) if abs(b) <= fov]
-        if not pts:
+        r_air = float(self._g('airframe_radius'))
+        stop = float(self._g('stop_dist'))
+        b, r = np.asarray(bearings), np.asarray(ranges)
+        sel = r < 1.5
+        if not sel.any():
             return None
-        pts.sort(key=lambda t: t[0])
-
-        best = None
-        run_start = None
-        prev_b = None
-        for b, r in pts:
-            passable = r > clear
-            if passable and run_start is None:
-                run_start = b
-            if (not passable or b == pts[-1][0]) and run_start is not None:
-                run_end = prev_b if not passable else b
-                width = run_end - run_start
-                if width >= min_w:
-                    mid = 0.5 * (run_start + run_end)
-                    depth = min(rr for bb, rr in pts if run_start <= bb <= run_end)
-                    # Prefer wide gaps, and among similar widths the one
-                    # requiring least turning.
-                    score = width - 0.25 * abs(mid)
-                    if best is None or score > best[0]:
-                        best = (score, mid, width, depth)
-                run_start = None
-            prev_b = b
-
-        if best is None:
+        near_x, near_y = _polar_xy(b[sel], r[sel])
+        step = math.radians(2.0)
+        th, c, s = _headings(int(fov / step), step)
+        x, y = near_x[None, :], near_y[None, :]
+        ahead = x * c + y * s > 0.0
+        lat = np.abs(-x * s + y * c)
+        m = np.where(ahead, lat, np.inf).min(axis=1)
+        m = np.where(ahead.any(axis=1), m, 1.5)
+        score = m - 0.05 * np.abs(th)
+        j = int(np.argmax(score))          # the first of equal bests, as before
+        if m[j] < r_air - 0.05:
             return None
-        _, mid, width, depth = best
-        return mid, width, depth
+        return float(th[j]), step, stop + 0.3
+
+    def _strips(self, bearings, ranges):
+        """Every candidate heading against every return, for _find_gap.
+
+        None of it depends on the strip width, so the full-strip pass and the
+        bare-airframe retry share one computation. Rows are headings -n..n in
+        2 degree steps, columns returns.
+        """
+        fov = math.radians(float(self._g('search_fov_deg'))) / 2.0
+        comfort = float(self._g('passage_comfort_width'))
+        look = float(self._g('lookahead_m'))
+        far = float(self._g('range_max_valid')) - 1e-3
+        b, r = np.asarray(bearings), np.asarray(ranges)
+        # Beyond look-ahead plus a strip width a return cannot shorten any
+        # clearance; skipping it keeps 20 Hz cheap.
+        sel = (r < far) & (r <= look + comfort)
+        b, r = b[sel], r[sel]
+        ox, oy = _polar_xy(b, r)
+        step = math.radians(2.0)
+        n = int(fov / step)
+        th, c, s = _headings(n, step)
+        x, y = ox[None, :], oy[None, :]
+        along = x * c + y * s
+        lat = np.abs(-x * s + y * c)
+        # Returns right beside the airframe (along < 0.3 m) are what it is
+        # sliding past, not what it is flying into.
+        wide_of = np.where((lat <= comfort) & (0.3 < along), along, look).min(
+            axis=1, initial=look)
+        return n, step, th, along, lat, along > 0.0, np.minimum(1.0, r), wide_of
+
+    def _find_gap(self, bearings, ranges, half_w, strips=None):
+        look = float(self._g('lookahead_m'))
+        stop = float(self._g('stop_dist'))
+        turn_k = float(self._g('turn_penalty_m_per_rad'))
+        r_air = float(self._g('airframe_radius'))
+        n, step, th, along, lat, ahead, r_1, wide_of = (
+            strips if strips is not None else self._strips(bearings, ranges))
+        # Strip half-width for each return. The margin beyond the airframe
+        # radius is taken in full from 1 m out and shrinks to none at
+        # contact: an aircraft already beside a block has to be allowed to
+        # peel AWAY from it, which a full-margin strip forbids in every
+        # direction and so freezes it there.
+        hw = r_air + (half_w - r_air) * r_1
+        narrow_of = np.where(ahead & (lat <= hw[None, :]), along, look).min(
+            axis=1, initial=look)
+        # THE TURN PENALTY SCALES WITH HOW OPEN STRAIGHT AHEAD IS. It keeps
+        # the aircraft from weaving down a clear lane; in front of a block it
+        # made "0.9 m to the block, straight on" outscore "2.3 m clear to the
+        # side" (0.88 against 2.27 - 1.57), and the aircraft crept into the
+        # block. Full strength with the look-ahead clear, a tenth of it when
+        # straight ahead is about to be blocked.
+        ahead_m = float(narrow_of[n])
+        k = turn_k * max(0.1, min(1.0, ahead_m / look))
+        # COMMIT TO A SIDE. With a block dead centre both sides score alike,
+        # and choosing afresh every tick flipped left-right-left in front of
+        # it for two minutes. A small pull toward last tick's choice makes the
+        # first decision stick unless the other side becomes clearly better.
+        last = getattr(self, "_last_gap_bearing", None)
+        commit = float(self._g('gap_commit_m_per_rad'))
+        open_ = narrow_of > stop
+        if not open_.any():
+            return None
+        score = 0.6 * narrow_of + 0.4 * wide_of - k * np.abs(th)
+        if last is not None:
+            score = score - commit * np.abs(th - last)
+        j = int(np.argmax(np.where(open_, score, -np.inf)))   # first of equals
+        self._last_gap_bearing = (j - n) * step
+        depth = float(narrow_of[j])
+        # Angular width of the open set of headings around the chosen one.
+        shut = np.flatnonzero(~open_)
+        left, right = shut[shut < j], shut[shut > j]
+        lo = int(left[-1]) + 1 if left.size else 0
+        hi = int(right[0]) - 1 if right.size else 2 * n
+        return (j - n) * step, (hi - lo + 1) * step, depth
 
     @staticmethod
     def _front_min(bearings, ranges, half_fov=math.radians(20)):
-        vals = [r for b, r in zip(bearings, ranges) if abs(b) <= half_fov]
-        return min(vals) if vals else float('inf')
+        vals = np.asarray(ranges)[np.abs(bearings) <= half_fov]
+        return float(vals.min()) if vals.size else float('inf')
 
     @staticmethod
     def _side_min(bearings, ranges, centre_deg, half_fov=math.radians(35)):
         c = math.radians(centre_deg)
-        vals = []
-        for b, r in zip(bearings, ranges):
-            d = (b - c + math.pi) % (2 * math.pi) - math.pi
-            if abs(d) <= half_fov:
-                vals.append(r)
-        return min(vals) if vals else float('inf')
+        d = (np.asarray(bearings) - c + math.pi) % (2 * math.pi) - math.pi
+        vals = np.asarray(ranges)[np.abs(d) <= half_fov]
+        return float(vals.min()) if vals.size else float('inf')
 
-    def open_extent(self, bearings, ranges):
+    def open_extent(self, bearings, ranges, sides=None):
         """(depth_ahead, width) of the open area, in metres.
 
         Used to bound the delivery zone from observation instead of asserting
@@ -348,8 +502,10 @@ class VelocityController(Node):
         width is the span between the nearest returns to either side.
         """
         depth = self._front_min(bearings, ranges, math.radians(15))
-        left = self._side_min(bearings, ranges, 90.0)
-        right = self._side_min(bearings, ranges, -90.0)
+        # `sides`: corridor_open's (left, right), the same two minima.
+        left, right = sides if sides is not None else (
+            self._side_min(bearings, ranges, 90.0),
+            self._side_min(bearings, ranges, -90.0))
         return depth, left + right
 
     def corridor_open(self, bearings, ranges):
@@ -378,10 +534,11 @@ class VelocityController(Node):
         if self.scan is None or self.scan_stale():
             return
         bearings, ranges = self.conditioned(self.scan)
-        if not ranges:
+        if not len(ranges):
             return
         is_open, left_m, right_m = self.corridor_open(bearings, ranges)
-        self._open_depth, self._open_width = self.open_extent(bearings, ranges)
+        self._open_depth, self._open_width = self.open_extent(
+            bearings, ranges, (left_m, right_m))
         self._open_ticks = self._open_ticks + 1 if is_open else 0
         self._enclosed_ticks = 0 if is_open else self._enclosed_ticks + 1
         if self._enclosed_ticks >= int(self._g('corridor_enter_ticks')):
@@ -432,9 +589,23 @@ class VelocityController(Node):
         this node only for the traversal, and inside the corridor the thing
         worth pointing at is the gap.
         """
+        # NEVER MORE THAN `yaw_follow_limit_deg` OFF THE CORRIDOR'S AXIS. With
+        # the gap search opened to +/- 90 deg, facing every sideways gap in a
+        # slalom turned the aircraft round a step at a time until it flew back
+        # out of the corridor entrance. Facing the gap is still right -- a
+        # rotated corridor, a diagonal slip past a block -- only the heading it
+        # asks for is clamped to the axis the traversal started on.
         gain = float(self._g('yaw_align_gain'))
         cap = float(self._g('max_yaw_rate'))
-        rate = gain * float(bearing)
+        yaw = getattr(self, "_yaw", None)
+        if yaw is None:
+            return max(-cap, min(cap, gain * float(bearing)))
+        if getattr(self, "_axis", None) is None:
+            self._axis = yaw
+        wrap = lambda a: math.atan2(math.sin(a), math.cos(a))   # noqa: E731
+        lim = math.radians(float(self._g('yaw_follow_limit_deg')))
+        off = max(-lim, min(lim, wrap(yaw + float(bearing) - self._axis)))
+        rate = gain * wrap(self._axis + off - yaw)
         return max(-cap, min(cap, rate))
 
     def _publish(self, vx, vy, front, bearing, extra):
@@ -444,8 +615,10 @@ class VelocityController(Node):
         sp.type_mask = VEL_YAWRATE_MASK
         sp.velocity.x = float(vx)      # forward
         sp.velocity.y = float(vy)      # LEFT (MAVROS converts FLU -> FRD)
-        sp.velocity.z = float(self._alt_correction())   # CLOSED-LOOP hold
-        sp.yaw_rate = float(self._yaw_rate_for(bearing))
+        vz = float(self._alt_correction())
+        yaw_rate = float(self._yaw_rate_for(bearing))
+        sp.velocity.z = vz             # CLOSED-LOOP hold
+        sp.yaw_rate = yaw_rate
         self.pub_sp.publish(sp)
 
         self.pub_status.publish(Vector3(x=float(front), y=float(bearing),
@@ -459,8 +632,8 @@ class VelocityController(Node):
                   "open_width_m": round(self._open_width, 2),
                   "gap_bearing_deg": round(math.degrees(bearing), 1),
                   "cmd_vx": round(vx, 2), "cmd_vy_left": round(vy, 2),
-                  "cmd_vz": round(self._alt_correction(), 2),
-                  "cmd_yaw_rate": round(self._yaw_rate_for(bearing), 2),
+                  "cmd_vz": round(vz, 2),
+                  "cmd_yaw_rate": round(yaw_rate, 2),
                   "hold_alt_m": (None if self._hold_alt is None
                                  else round(self._hold_alt, 2)),
                   "alt_m": (None if self._alt is None else round(self._alt, 2)),
@@ -486,7 +659,7 @@ class VelocityController(Node):
             return
 
         bearings, ranges = self.conditioned(self.scan)
-        if not ranges:
+        if not len(ranges):
             self._publish(0.0, 0.0, 0.0, 0.0, {"fault": "no valid returns"})
             return
 
@@ -494,7 +667,8 @@ class VelocityController(Node):
         gap = self.find_gap(bearings, ranges)
 
         is_open, left_m, right_m = self.corridor_open(bearings, ranges)
-        self._open_depth, self._open_width = self.open_extent(bearings, ranges)
+        self._open_depth, self._open_width = self.open_extent(
+            bearings, ranges, (left_m, right_m))
         self._open_ticks = self._open_ticks + 1 if is_open else 0
         # Entry must be observed before exit can mean anything.
         self._enclosed_ticks = 0 if is_open else self._enclosed_ticks + 1
@@ -555,7 +729,9 @@ class VelocityController(Node):
         # commanded vx=0, vy=0.6 and slid sideways for four minutes without
         # ever moving along the corridor. Speed comes from the clearance in the
         # direction actually being travelled.
-        reach = max(depth, front if abs(bearing) < math.radians(20) else depth)
+        # The strip clearance along the chosen heading IS the reach; the
+        # dead-ahead minimum could overstate it once the heading is off-axis.
+        reach = depth
         if reach <= stop:
             speed = 0.0
         elif reach >= brake:
@@ -566,8 +742,9 @@ class VelocityController(Node):
         vx = speed * math.cos(bearing)
         # POSITIVE vy is LEFT and a positive bearing is to the left in ROS
         # LaserScan convention, so the sign is direct — asserted in tests.
-        vy = speed * math.sin(bearing) + \
-            float(self._g('gap_bearing_gain')) * bearing * 0.25
+        # Travel along the chosen heading. The old extra `gain * bearing`
+        # push is gone: with a physical heading it only overshot the strip.
+        vy = speed * math.sin(bearing)
         vy = max(-max_lat, min(max_lat, vy))
 
         self._publish(vx, vy, front, bearing,

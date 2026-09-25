@@ -13,11 +13,18 @@ WHAT IS AND IS NOT MODELLED
     interlocks are all genuine, and the same node runs against hardware with
     `backend:=mavlink` driving MAV_CMD_DO_WINCH.
 
-    What is NOT modelled is a physical tether in Gazebo — there is no rope
-    constraint or swinging payload mass. In `backend:=sim` the payout is
-    integrated from commanded rate and ground contact is inferred from the
-    aircraft's own altitude. So this proves the SEQUENCE and the INTERLOCKS,
-    not the mechanics. A Gazebo tether is still outstanding work.
+    backend:=sim      payout integrated from the commanded rate, nothing moves.
+                      Proves the SEQUENCE and the INTERLOCKS only.
+    backend:=gazebo   the same integration, plus the payout is sent to the
+                      Iris's winch joint (/winch/gz/payout, bridged) so a real
+                      100 g payload goes down on the hook, and a release sends
+                      /winch/gz/detach so it physically leaves it. Whether it
+                      actually did is for the CAMERA to say (WinchDrop's
+                      confirmation), not for this node's own flag.
+    backend:=mavlink  MAV_CMD_DO_WINCH on the aircraft.
+
+    Ground contact is still inferred from the aircraft's altitude in every
+    backend; the line is a rigid vertical rod in Gazebo, with no swing.
 
 INTERFACE
     sub  /winch/cmd      std_msgs/String   "lower" | "release" | "stow" | "stop"
@@ -48,8 +55,8 @@ import math
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
-from geometry_msgs.msg import PoseStamped, TwistStamped
-from std_msgs.msg import String
+from geometry_msgs.msg import Pose, PoseStamped, TwistStamped
+from std_msgs.msg import Empty, Float64, String
 
 try:
     from mavros_msgs.srv import CommandLong
@@ -67,7 +74,7 @@ class WinchNode(Node):
     def __init__(self):
         super().__init__("winch_ctrl")
         p = self.declare_parameter
-        p("backend", "sim")                  # sim | mavlink
+        p("backend", "sim")                  # sim | gazebo | mavlink
         p("payout_rate_mps", 0.30)           # line speed
         p("max_payout_m", 6.0)               # spool capacity
         p("ground_clearance_m", 0.25)        # payload considered down within this
@@ -77,6 +84,23 @@ class WinchNode(Node):
         p("hover_stable_samples", 5)
         p("publish_rate_hz", 5.0)
         p("stow_rate_mps", 0.45)
+        # HOW THE PAYLOAD LEAVES THE HOOK.
+        #   gravity  the team's mechanism: a motor lowers a gravity-assisted
+        #            hook that lets go by itself once the payload rests on the
+        #            ground and the line goes slack. "release" is bookkeeping;
+        #            nothing is sent to open anything.
+        #   command  an actuated release: "release" opens the hook.
+        p("hook", "gravity")
+        # Gazebo backend, gravity hook: the payload counts as resting when its
+        # centre is within this of its resting height (half its 0.08 m).
+        p("payload_rest_z_m", 0.06)
+        # A gravity hook needs SLACK to let go: the payload on the ground and
+        # the line still paying out. "Down" is therefore line out to the
+        # altitude PLUS this -- not minus ground_clearance_m, which stopped the
+        # payload 0.19 m up, hanging, and flew it home (first flight on the
+        # team airframe). The payload touches ~0.16 m before the hook reaches
+        # the ground, so this leaves about a quarter metre of slack.
+        p("gravity_slack_m", 0.10)
 
         self.backend = self.get_parameter("backend").value
 
@@ -100,10 +124,61 @@ class WinchNode(Node):
         self.cli_cmd = None
         if self.backend == "mavlink" and _HAVE_MAVROS:
             self.cli_cmd = self.create_client(CommandLong, "/mavros/cmd/command")
+        self.pub_gz_payout = self.pub_gz_detach = None
+        self._detach_sends = 0
+        self._payload_z = None
+        self._slack_hist = []        # (payout, payload z) per tick while lowering
+        self.hook_open = False       # the payload has physically left the hook
+        if self.backend == "gazebo":
+            self._enable_gazebo()
 
         self.create_timer(1.0 / float(self.get_parameter("publish_rate_hz").value),
                           self._tick)
         self.get_logger().info(f"winch_ctrl up; backend={self.backend}")
+
+    def _enable_gazebo(self):
+        """The Iris winch joint's payout and the payload's detach (bridged)."""
+        self.backend = "gazebo"
+        self.pub_gz_payout = self.create_publisher(Float64, "/winch/gz/payout", 10)
+        self.pub_gz_detach = self.create_publisher(Empty, "/winch/gz/detach", 10)
+        # The simulator's stand-in for the hook's own mechanics: it can only
+        # know the payload is resting from where the payload is.
+        self.create_subscription(Pose, "/sim/payload_pose", self._on_payload_pose,
+                                 qos_profile_sensor_data)
+
+    def _on_payload_pose(self, m):
+        self._payload_z = float(m.position.z)
+
+    def _gravity_hook(self):
+        """Gazebo only: let the payload go once the line goes slack.
+
+        SLACK, not "on the ground": the first fix tested the payload's height
+        against the bare ground, and the payload landed on the target pad,
+        8 cm up, where that never fired. What a gravity-assisted hook
+        responds to is the line paying out while the payload no longer
+        follows it: whatever it rests on, pad or grass. The height test stays
+        as a second way to see it.
+
+        And it matters in Gazebo more than in the air: the simulated line is
+        a rigid joint, so a hook still latched to a resting payload is driven
+        down against it and shoves the aircraft UP -- 1.3 m, watched.
+        """
+        if self.hook_open or self._payload_z is None or self.payout < 0.3:
+            self._slack_hist = []
+            return
+        self._slack_hist = (self._slack_hist + [(self.payout, self._payload_z)])[-4:]
+        (p0, z0), (p1, z1) = self._slack_hist[0], self._slack_hist[-1]
+        slack = (len(self._slack_hist) >= 3 and p1 - p0 >= 0.10
+                 and z0 - z1 < 0.25 * (p1 - p0))
+        resting = self._payload_z <= float(self.get_parameter("payload_rest_z_m").value)
+        if not (slack or resting):
+            return
+        self.hook_open = True
+        self._detach_sends = 5
+        self.get_logger().info(
+            f"gravity hook: {'line slack' if slack else 'payload on the ground'} "
+            f"(payload z {self._payload_z:.2f} m, {self.payout:.2f} m of line "
+            f"out) -- the hook lets go")
 
     # ------------------------------------------------------------------ #
     def _now(self):
@@ -171,6 +246,12 @@ class WinchNode(Node):
         self.get_logger().error(f"winch fault: {reason}")
 
     def _send_backend(self, action):
+        if self.backend == "gazebo":
+            if action == "release" and self.get_parameter("hook").value == "command":
+                # A bridged Empty can be lost on a busy host; re-send for a
+                # few ticks (detaching an already-detached joint is a no-op).
+                self._detach_sends = 5
+            return
         if self.backend != "mavlink" or self.cli_cmd is None:
             return
         if not self.cli_cmd.service_is_ready():
@@ -192,9 +273,13 @@ class WinchNode(Node):
 
     # ------------------------------------------------------------------ #
     def at_ground(self):
-        """Payload is down: line paid out to within a clearance of the alt."""
+        """Payload is down: line paid out to within a clearance of the alt,
+        or -- for a gravity hook -- past it, far enough for slack."""
         if self._alt is None:
             return False
+        if self.get_parameter("hook").value == "gravity":
+            return self.payout >= self._alt + float(
+                self.get_parameter("gravity_slack_m").value)
         clear = float(self.get_parameter("ground_clearance_m").value)
         return self.payout >= (self._alt - clear)
 
@@ -250,6 +335,13 @@ class WinchNode(Node):
         dt = max(0.0, now - self._last_tick)
         self._last_tick = now
         self.integrate(dt)
+        if self.pub_gz_payout is not None:
+            if self.get_parameter("hook").value == "gravity":
+                self._gravity_hook()
+            self.pub_gz_payout.publish(Float64(data=float(self.payout)))
+            if self._detach_sends > 0:
+                self.pub_gz_detach.publish(Empty())
+                self._detach_sends -= 1
         self.publish_status()
 
     def integrate(self, dt):
@@ -290,6 +382,8 @@ class WinchNode(Node):
             "at_limit": self.at_limit(),
             "ground": self.at_ground(),
             "released": self.released,
+            "hook": self.get_parameter("hook").value,
+            "hook_open": self.hook_open,
             "fault": self.fault,
             "release_ok": ok,
             "blockers": blockers,

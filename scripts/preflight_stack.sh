@@ -47,6 +47,17 @@ check 'ArduPilot SITL launcher (sim_vehicle.py)' command -v sim_vehicle.py
 check 'ArduPilot ROS/Gazebo bringup package' ros2 pkg prefix ardupilot_gz_bringup
 check 'ArduPilot Gazebo model/plugin package' ros2 pkg prefix ardupilot_gazebo
 
+# Python imports the running stack needs.
+#
+# These were missing on the WSL box and nothing checked them, so the failure
+# surfaced late and in the wrong place: the GCS aggregator died on `import
+# websockets` after Gazebo was already up, the behaviour tree could not import
+# py_trees, and cv_bridge aborted against NumPy 2 with a binary-incompatibility
+# message that reads like a perception bug. Fail here instead, by name.
+check 'python: websockets (GCS aggregator)' python3 -c 'import websockets'
+check 'python: py_trees (mission behaviour tree)' python3 -c 'import py_trees'
+check 'python: cv_bridge / NumPy ABI' python3 -c 'import numpy, cv_bridge'
+
 if [[ "$FAILED" -ne 0 ]]; then
   printf '\nStack is not ready for a closed-loop SITL flight. See docs/STACK_AND_DEPLOYMENT.md.\n'
   exit 1

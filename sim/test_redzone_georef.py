@@ -225,7 +225,7 @@ class LaneClippingTests(unittest.TestCase):
 
     def test_an_exclusion_splits_the_lane(self):
         segs = clip_lane(0.0, 20.0, 5.0, 1.0, [(8.0, 12.0, 4.0, 6.0)])
-        self.assertEqual(segs, [(0.0, 8.0), (12.0, 20.0)])
+        self.assertEqual(segs, [(0.0, 6.75), (13.25, 20.0)])
 
     def test_an_exclusion_beside_the_lane_is_ignored(self):
         segs = clip_lane(0.0, 20.0, 5.0, 1.0, [(8.0, 12.0, 40.0, 46.0)])
@@ -246,7 +246,7 @@ class LaneClippingTests(unittest.TestCase):
     def test_overlapping_exclusions_merge(self):
         segs = clip_lane(0.0, 20.0, 5.0, 1.0,
                          [(8.0, 12.0, 4.0, 6.0), (10.0, 14.0, 4.0, 6.0)])
-        self.assertEqual(segs, [(0.0, 8.0), (14.0, 20.0)])
+        self.assertEqual(segs, [(0.0, 6.75), (15.25, 20.0)])
 
     def test_an_exclusion_covering_everything_leaves_nothing(self):
         self.assertEqual(
@@ -305,6 +305,60 @@ class ExclusionPlanTests(unittest.TestCase):
         wps = plan_lawnmower_excluding(self.ZONE, self.spacing(), self.ALT, HFOV)
         self.assertLess(wps[0][0], wps[1][0])
         self.assertGreater(wps[2][0], wps[3][0])
+
+
+class AttitudeAndFillTests(unittest.TestCase):
+    """Live run 4, shipped arena: the south red zone (x 38.5..45.5,
+    y -15..-11) was mapped as x 36..49, y -17..-7, and a patch of the main
+    zone sat 3 m south of the paint -- while the aircraft still flew into
+    both. Three causes, each pinned here."""
+
+    W, H = 1280, 720
+    HFOV = 1.0472
+
+    def _q_yaw(self, yaw):
+        return (math.cos(yaw / 2), 0.0, 0.0, math.sin(yaw / 2))
+
+    def test_full_attitude_matches_yaw_only_when_level(self):
+        from perception_redzone.georef import ground_point, ground_point_q
+        for yaw in (0.0, math.pi / 2, -2.0):
+            for u, v in ((0, 0), (640, 360), (1280, 720), (100, 600)):
+                a = ground_point(u, v, (self.W, self.H), self.HFOV, 10.0,
+                                 (3.0, -2.0), yaw, math.pi / 2)
+                b = ground_point_q(u, v, (self.W, self.H), self.HFOV, 10.0,
+                                   (3.0, -2.0), self._q_yaw(yaw), math.pi / 2)
+                self.assertAlmostEqual(a[0], b[0], places=6)
+                self.assertAlmostEqual(a[1], b[1], places=6)
+
+    def test_a_pitched_airframe_moves_the_ground_point(self):
+        """Nose down 5 deg at 10 m moves the nadir point ~0.87 m ahead."""
+        from perception_redzone.georef import ground_point_q
+        p = math.radians(5.0)
+        q = (math.cos(p / 2), 0.0, math.sin(p / 2), 0.0)   # +pitch about y: nose DOWN in FLU
+        g = ground_point_q(640, 360, (self.W, self.H), self.HFOV, 10.0,
+                           (0.0, 0.0), q, math.pi / 2)
+        self.assertAlmostEqual(abs(g[0]), 10.0 * math.tan(p), delta=0.02)
+        self.assertAlmostEqual(g[1], 0.0, places=6)
+
+    def test_a_polygon_marks_its_INTERIOR(self):
+        from perception_redzone.georef import GroundGrid
+        g = GroundGrid(cell_m=1.0, confirm_hits=1)
+        cells = g.polygon_cells([(0.0, 0.0), (7.0, 0.0), (7.0, 4.0), (0.0, 4.0)])
+        for i in range(7):
+            for j in range(4):
+                self.assertIn((i, j), cells, f"cell {(i, j)} inside left unmarked")
+        self.assertNotIn((10, 10), cells)
+
+    def test_one_frame_is_one_hit(self):
+        from perception_redzone.georef import GroundGrid
+        g = GroundGrid(cell_m=1.0, confirm_hits=3)
+        cells = g.polygon_cells([(0.0, 0.0), (2.0, 0.0), (2.0, 2.0), (0.0, 2.0)])
+        g.add_cells(cells)
+        self.assertEqual(g.confirmed_cells(), [],
+                         "a single frame confirmed a cell")
+        g.add_cells(cells)
+        g.add_cells(cells)
+        self.assertIn((0, 0), g.confirmed_cells())
 
 
 if __name__ == "__main__":

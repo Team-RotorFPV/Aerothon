@@ -1,0 +1,920 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AeroTHON World Editor</title>
+<style>
+  :root {
+    --bg: #f4f5f7; --panel: #ffffff; --ink: #1c2330; --muted: #5d6778;
+    --line: #d9dde4; --accent: #1f6feb; --err: #c62828; --warn: #b26a00;
+    --ok: #1b7f3b; --chip: #eef1f5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #11151b; --panel: #1a2029; --ink: #e6e9ee; --muted: #9aa4b2;
+      --line: #2d3541; --accent: #5b9dff; --err: #ff6b6b; --warn: #f0b24b;
+      --ok: #4cc57a; --chip: #232b36;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #11151b; --panel: #1a2029; --ink: #e6e9ee; --muted: #9aa4b2;
+    --line: #2d3541; --accent: #5b9dff; --err: #ff6b6b; --warn: #f0b24b;
+    --ok: #4cc57a; --chip: #232b36;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink);
+    font: 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  #app { display: flex; height: 100%; }
+  #view { position: relative; flex: 1; min-width: 0; }
+  #view canvas { display: block; }
+  #toolbar { position: absolute; top: 10px; left: 10px; display: flex; gap: 6px;
+    flex-wrap: wrap; }
+  #cursor { position: absolute; bottom: 10px; left: 10px; background: var(--panel);
+    border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px;
+    font-variant-numeric: tabular-nums; }
+  #hint { position: absolute; bottom: 10px; right: 10px; background: var(--panel);
+    border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; color: var(--muted);
+    max-width: 55%; }
+  #side { width: 380px; background: var(--panel); border-left: 1px solid var(--line);
+    overflow-y: auto; padding: 12px 14px 40px; }
+  h1 { font-size: 15px; margin: 0 0 8px; }
+  h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted);
+    margin: 18px 0 6px; }
+  button, select, input { font: inherit; color: var(--ink); }
+  button { background: var(--chip); border: 1px solid var(--line); border-radius: 6px;
+    padding: 4px 9px; cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+  button.on { outline: 2px solid var(--accent); }
+  button:disabled { opacity: .5; cursor: default; }
+  input[type=number], input[type=text], select { background: var(--bg); border: 1px solid var(--line);
+    border-radius: 5px; padding: 3px 6px; width: 100%; }
+  .row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin: 4px 0; }
+  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+  .grid label { display: flex; flex-direction: column; font-size: 11px; color: var(--muted); }
+  .list { display: flex; flex-direction: column; gap: 3px; }
+  .item { display: flex; justify-content: space-between; align-items: center; padding: 3px 7px;
+    border-radius: 5px; cursor: pointer; border: 1px solid transparent; }
+  .item:hover { background: var(--chip); }
+  .item.sel { border-color: var(--accent); background: var(--chip); }
+  .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; }
+  .checks div { padding: 3px 0; }
+  .e { color: var(--err); } .w { color: var(--warn); } .ok { color: var(--ok); }
+  .muted { color: var(--muted); }
+  #runbox pre { white-space: pre-wrap; background: var(--bg); border: 1px solid var(--line);
+    border-radius: 6px; padding: 6px; max-height: 220px; overflow: auto; font-size: 11px; }
+  kbd { background: var(--chip); border: 1px solid var(--line); border-radius: 3px; padding: 0 4px;
+    font-size: 11px; }
+  @media (max-width: 800px) {
+    #app { flex-direction: column; }
+    #view { height: 55vh; flex: none; }
+    #side { width: 100%; border-left: 0; border-top: 1px solid var(--line); }
+  }
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<div id="app">
+  <div id="view">
+    <div id="toolbar">
+      <button id="btnTop" class="on">Top</button>
+      <button id="btn3d">3D</button>
+      <button id="btnFit">Fit</button>
+      <button id="btnSnap" class="on">Snap 0.5 m</button>
+    </div>
+    <div id="cursor">x —, y —</div>
+    <div id="hint">Drag objects to move &middot; <kbd>Q</kbd>/<kbd>E</kbd> rotate 5&deg; (<kbd>Shift</kbd> 15&deg;)
+      &middot; <kbd>Del</kbd> remove &middot; double-click a fence edge to add a vertex &middot;
+      right-drag / wheel to pan and zoom</div>
+  </div>
+  <div id="side">
+    <h1>AeroTHON world editor</h1>
+    <div class="row">
+      <input id="name" type="text" placeholder="world name" style="flex:1">
+    </div>
+    <div class="row">
+      <button id="btnNew">New (shipped)</button>
+      <select id="worldList" style="width:auto;flex:1"><option value="">Load saved…</option></select>
+      <button id="btnLoadFile">Open file</button>
+      <input id="file" type="file" accept=".json" hidden>
+    </div>
+    <div class="row">
+      <button id="btnSave" class="primary">Save</button>
+      <button id="btnExport">Download JSON</button>
+      <span id="saveMsg" class="muted"></span>
+    </div>
+
+    <h2>Objects</h2>
+    <div id="objects" class="list"></div>
+    <div class="row">
+      <button id="addRed">+ Red zone</button>
+      <button id="addDecoy">+ Decoy</button>
+      <button id="addObst">+ Obstacle</button>
+    </div>
+
+    <h2>Selected</h2>
+    <div id="props" class="muted">Nothing selected.</div>
+
+    <h2>Mission</h2>
+    <div class="grid">
+      <label>Start QR names
+        <select id="startTarget">
+          <option value="random">random</option><option>a</option><option>b</option>
+          <option>c</option><option>d</option><option>e</option>
+        </select></label>
+      <label>Start QR (m)<input id="qrStart" type="number" step="0.1" min="0.2" max="5"></label>
+      <label>Target QR (m)<input id="qrTarget" type="number" step="0.1" min="0.2" max="5"></label>
+    </div>
+
+    <h2>Geofence</h2>
+    <div class="row">
+      <select id="fenceMode" style="width:auto">
+        <option value="auto">auto (around everything)</option>
+        <option value="polygon">polygon (edit vertices)</option>
+      </select>
+      <label class="muted" id="marginWrap">margin <input id="fenceMargin" type="number" step="0.5"
+        style="width:70px"> m</label>
+    </div>
+    <div class="row">
+      <button id="fenceFromAuto">Polygon from auto</button>
+      <button id="fenceAddV">+ Vertex</button>
+      <button id="fenceDelV">− Vertex</button>
+    </div>
+
+    <h2>Checks <span id="checkSrc" class="muted"></span></h2>
+    <div id="checks" class="checks"></div>
+
+    <div id="runbox" hidden>
+      <h2>Simulation</h2>
+      <div class="row">
+        <label><input id="runGui" type="checkbox" checked> open Gazebo chase view</label>
+        <label><input id="runRec" type="checkbox"> record video</label>
+      </div>
+      <div class="row"><button id="btnRun" class="primary">Save &amp; run simulation</button></div>
+      <pre id="runStatus">idle</pre>
+    </div>
+    <p class="muted" style="margin-top:18px">World frame (Gazebo ENU), metres, yaw in degrees
+      anticlockwise from +x. The mission's local frame starts at the spawn point.</p>
+  </div>
+</div>
+
+<script type="module">
+import * as THREE from "three";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+
+// ---------------------------------------------------------------------------
+// Geometry shared with scripts/world_spec.py. Keep these in step with it.
+// ---------------------------------------------------------------------------
+const PADS = ["a", "b", "c", "d", "e"];
+const WALL_T = 0.10, LANE_GAP = 0.30;
+const AIRFRAME_SPAN = 1.0, PASS_COMFORT = 1.6;
+const CORRIDOR_ALT = 3.0, LIDAR_ABOVE = 0.235, BELOW_BODY = 0.35;
+const SHIPPED_OBSTACLES = [[1.4, 1.05], [3.8, -1.05], [6.2, 1.05], [8.6, -1.05]];
+const TAKEOFF_PAD = [5.0, 8.0];
+const START_QR_OFFSET = [0.0, 2.0];
+const SPAWN_OFFSET = [-1.0, 2.0];
+const HOME_FENCE_CLEARANCE = 2.0;
+const BANNER_NEAR_RANGE = 9.6;
+
+function defaultSpec() {
+  return {
+    schema: "aerothon-world/1", name: "my_world",
+    takeoff: { x: -1, y: 0, yaw_deg: 0 },
+    corridor: { x: 2, y: 2, yaw_deg: 0, length: 10, width: 3.5, wall_height: 3.6 },
+    return_corridor: { linked: true, x: 12, y: -2, yaw_deg: 180, length: 10, width: 3.5, wall_height: 3.6,
+      obstacles: SHIPPED_OBSTACLES.map(([u, v]) => ({ u, v, w: 0.35, d: 1.45, h: 3.4, yaw_deg: 0 })) },
+    delivery_zone: { x: 32, y: 0, w: 40, h: 30 },
+    geofence: { mode: "auto", margin: 6 },
+    red_zones: [
+      { x: 38, y: 5, w: 10, h: 7, yaw_deg: 0 },
+      { x: 29, y: 10, w: 6, h: 4, yaw_deg: 0 },
+      { x: 40, y: -11, w: 7, h: 4, yaw_deg: 0 }],
+    pads: { a: { x: 21, y: 10 }, b: { x: 47, y: 10 }, c: { x: 23, y: 1 },
+            d: { x: 33, y: -10 }, e: { x: 45, y: -6 } },
+    decoys: [{ x: 8, y: -14, yaw_deg: 0 }, { x: 34, y: 9, yaw_deg: 68.75 }],
+    start_target: "random",
+    qr: { start_m: 2.2, target_m: 3.0 },
+  };
+}
+
+const rad = d => d * Math.PI / 180;
+function place([lx, ly], x, y, yaw) {
+  const c = Math.cos(yaw), s = Math.sin(yaw);
+  return [x + lx * c - ly * s, y + lx * s + ly * c];
+}
+function rectCorners(cx, cy, w, h, yaw = 0) {
+  return [[-w / 2, -h / 2], [w / 2, -h / 2], [w / 2, h / 2], [-w / 2, h / 2]]
+    .map(p => place(p, cx, cy, yaw));
+}
+// Same as world_spec.linked_return_pose(): beside the outbound lane, to its
+// starboard, entrance level with its exit, pointing back.
+function linkReturn(s) {
+  const c = s.corridor, r = s.return_corridor;
+  if (!r.linked) return;
+  const spacing = (+c.width + +r.width) / 2 + 2 * WALL_T + LANE_GAP;
+  const [x, y] = place([+c.length, -spacing], c.x, c.y, rad(c.yaw_deg));
+  r.x = Math.round(x * 1e4) / 1e4; r.y = Math.round(y * 1e4) / 1e4;
+  r.yaw_deg = ((+c.yaw_deg + 360) % 360) - 180;
+}
+function lanePoly(c, m = 0) {
+  const L = +c.length, h = +c.width / 2 + WALL_T - m;
+  return [[-0.1 + m, -h], [L + 0.1 - m, -h], [L + 0.1 - m, h], [-0.1 + m, h]].map(p => place(p, c.x, c.y, rad(c.yaw_deg)));
+}
+const corridorPoly = s => lanePoly(s.corridor);
+const returnPoly = s => lanePoly(s.return_corridor);
+const corridorExit = s => place([+s.corridor.length, 0], s.corridor.x, s.corridor.y, rad(s.corridor.yaw_deg));
+const returnEntrance = s => [+s.return_corridor.x, +s.return_corridor.y];
+function obstaclePolys(s) {
+  const r = s.return_corridor, yaw = rad(r.yaw_deg);
+  return (r.obstacles || []).map(o => { const [cx, cy] = place([+o.u, +o.v], r.x, r.y, yaw); return rectCorners(cx, cy, +o.w, +o.d, yaw + rad(o.yaw_deg || 0)); });
+}
+const takeoffPoly = s => rectCorners(s.takeoff.x, s.takeoff.y, ...TAKEOFF_PAD, rad(s.takeoff.yaw_deg));
+const spawnPoint = s => place(SPAWN_OFFSET, s.takeoff.x, s.takeoff.y, rad(s.takeoff.yaw_deg));
+const startQrPoint = s => place(START_QR_OFFSET, s.takeoff.x, s.takeoff.y, rad(s.takeoff.yaw_deg));
+function zoneRect(s) { const z = s.delivery_zone; return [z.x - z.w / 2, z.x + z.w / 2, z.y - z.h / 2, z.y + z.h / 2]; }
+function zonePoly(s) { const [x0, x1, y0, y1] = zoneRect(s); return [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]; }
+const redPoly = r => rectCorners(r.x, r.y, r.w, r.h, rad(r.yaw_deg || 0));
+const padPoly = (s, l) => { const p = s.pads[l], m = +s.qr.target_m; return rectCorners(p.x, p.y, m, m, rad(p.yaw_deg || 0)); };
+function area(p) { let a = 0; for (let i = 0; i < p.length; i++) { const [x1, y1] = p[i], [x2, y2] = p[(i + 1) % p.length]; a += x1 * y2 - x2 * y1; } return a / 2; }
+function fencePoly(s) {
+  const g = s.geofence;
+  if (g.mode === "polygon" && (g.vertices || []).length >= 3) {
+    const pts = g.vertices.map(v => [+v[0], +v[1]]);
+    return area(pts) > 0 ? pts : pts.slice().reverse();
+  }
+  const m = +(g.margin ?? 6);
+  const [x0, x1, y0, y1] = zoneRect(s);
+  const pts = [...takeoffPoly(s), ...corridorPoly(s), ...returnPoly(s), [x0, y0], [x1, y1]];
+  const xs = pts.map(p => p[0]), ys = pts.map(p => p[1]);
+  const X0 = Math.min(...xs) - m, X1 = Math.max(...xs) + m, Y0 = Math.min(...ys) - m, Y1 = Math.max(...ys) + m;
+  return [[X0, Y0], [X1, Y0], [X1, Y1], [X0, Y1]];
+}
+function inPoly([x, y], poly) {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const [xi, yi] = poly[i], [xj, yj] = poly[j];
+    if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) inside = !inside;
+  }
+  return inside;
+}
+function segDist(p, a, b) {
+  const dx = b[0] - a[0], dy = b[1] - a[1], L = dx * dx + dy * dy;
+  const t = L === 0 ? 0 : Math.max(0, Math.min(1, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / L));
+  return Math.hypot(p[0] - (a[0] + t * dx), p[1] - (a[1] + t * dy));
+}
+function edgeDist(p, poly) { let d = Infinity; for (let i = 0; i < poly.length; i++) d = Math.min(d, segDist(p, poly[i], poly[(i + 1) % poly.length])); return d; }
+function orient(a, b, c) { return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]); }
+function cross(p1, p2, p3, p4) { return orient(p3, p4, p1) * orient(p3, p4, p2) < 0 && orient(p1, p2, p3) * orient(p1, p2, p4) < 0; }
+function overlap(a, b) {
+  for (let i = 0; i < a.length; i++) for (let j = 0; j < b.length; j++)
+    if (cross(a[i], a[(i + 1) % a.length], b[j], b[(j + 1) % b.length])) return true;
+  return inPoly(a[0], b) || inPoly(b[0], a);
+}
+function gap(a, b) {
+  if (overlap(a, b)) return 0;
+  return Math.min(Math.min(...a.map(p => edgeDist(p, b))), Math.min(...b.map(p => edgeDist(p, a))));
+}
+function isSimple(p) {
+  const n = p.length;
+  for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) {
+    if (Math.abs(i - j) <= 1 || (i === 0 && j === n - 1)) continue;
+    if (cross(p[i], p[(i + 1) % n], p[j], p[(j + 1) % n])) return false;
+  }
+  return true;
+}
+
+// The same rules as world_spec.validate(); the server's answer wins when the
+// editor is served by tools/world_editor/serve.py.
+function validate(s) {
+  const E = [], W = [];
+  const z = s.delivery_zone;
+  if (!(z.w > 0 && z.h > 0)) { E.push("delivery zone needs a positive width and height"); return [E, W]; }
+  const zp = zonePoly(s);
+  const miss = PADS.filter(l => !s.pads[l]);
+  if (miss.length) E.push("missing delivery pad(s): " + miss.map(m => m.toUpperCase()).join(", "));
+  for (const k of ["start_m", "target_m"]) { const v = +s.qr[k]; if (!(v >= 0.2 && v <= 5)) E.push(`QR size ${k} = ${v} m is outside 0.2-5 m`); }
+  const fence = fencePoly(s);
+  if (fence.length < 3) E.push("the geofence needs at least 3 vertices");
+  else if (!isSimple(fence)) E.push("the geofence polygon crosses itself");
+  else {
+    const home = spawnPoint(s);
+    if (!inPoly(home, fence)) E.push("the take-off point (FCU home) is outside the geofence");
+    else if (edgeDist(home, fence) < HOME_FENCE_CLEARANCE) E.push("the take-off point is within 2 m of the geofence (readiness refuses to arm)");
+    for (const [n, p] of [["delivery zone", zp], ["outbound corridor", corridorPoly(s)], ["return corridor", returnPoly(s)], ["take-off pad", takeoffPoly(s)]])
+      if (!p.every(q => inPoly(q, fence))) E.push(`the ${n} is not entirely inside the geofence`);
+  }
+  const cor = corridorPoly(s), ret = returnPoly(s), tk = takeoffPoly(s);
+  for (const [n, c] of [["outbound corridor", s.corridor], ["return corridor", s.return_corridor]])
+    for (const [k, lo, hi] of [["length", 4, 40], ["width", 2, 8], ["wall_height", 2, 8]]) {
+      const v = +c[k]; if (!(v >= lo && v <= hi)) E.push(`the ${n}'s ${k.replace("_", " ")} ${v} m is outside ${lo}-${hi} m`);
+    }
+  if (overlap(cor, tk)) E.push("the outbound corridor overlaps the take-off pad");
+  if (overlap(ret, tk)) E.push("the return corridor overlaps the take-off pad");
+  if (overlap(lanePoly(s.corridor, 0.05), lanePoly(s.return_corridor, 0.05))) E.push("the outbound and return corridors overlap");
+  {
+    const r = s.return_corridor, L = +r.length, Wd = +r.width;
+    (r.obstacles || []).forEach((o, i) => {
+      const n = i + 1, w = +o.w, d = +o.d, h = +o.h;
+      if (Math.min(w, d, h) <= 0) { E.push(`obstacle ${n} needs a positive size`); return; }
+      const a = rad(o.yaw_deg || 0);
+      const du = Math.abs(w * Math.cos(a)) / 2 + Math.abs(d * Math.sin(a)) / 2;
+      const dv = Math.abs(w * Math.sin(a)) / 2 + Math.abs(d * Math.cos(a)) / 2;
+      if (+o.u - du < 0 || +o.u + du > L) E.push(`obstacle ${n} sticks out of the end of the return corridor`);
+      if (Math.abs(+o.v) + dv > Wd / 2 + WALL_T + 1e-6) { E.push(`obstacle ${n} goes through the return corridor's wall`); return; }
+      const free = Math.max(Wd / 2 - (+o.v + dv), (+o.v - dv) + Wd / 2);
+      if (free < AIRFRAME_SPAN) E.push(`obstacle ${n} blocks the return corridor: the widest gap past it is ${free.toFixed(2)} m; it needs at least ${AIRFRAME_SPAN} m (0.8 m airframe + clearance)`);
+      else if (free < PASS_COMFORT) W.push(`obstacle ${n} leaves only ${free.toFixed(2)} m to fly past; the corridor navigator passes reliably with ${PASS_COMFORT} m or more`);
+      // One-plane lidar: at the 3 m corridor altitude it scans at ~3.24 m.
+      const plane = CORRIDOR_ALT + LIDAR_ABOVE, belly = CORRIDOR_ALT - BELOW_BODY;
+      if (h > belly && h < plane + 0.1) E.push(`obstacle ${n} is ${h} m tall: its top is below the lidar's scan plane (${plane.toFixed(2)} m at the ${CORRIDOR_ALT} m corridor altitude) but above the airframe's underside (${belly.toFixed(2)} m) -- the aircraft cannot see it and would fly into it. Make it taller than ${(plane + 0.1).toFixed(2)} m or shorter than ${belly.toFixed(2)} m`);
+      else if (h <= belly) W.push(`obstacle ${n} is ${h} m tall; the corridor is flown at ${CORRIDOR_ALT} m, so the aircraft passes over it`);
+    });
+  }
+  {
+    const [hx, hy] = spawnPoint(s), dx = hx - s.corridor.x, dy = hy - s.corridor.y, cy = rad(s.corridor.yaw_deg);
+    if (dx * Math.cos(cy) + dy * Math.sin(cy) > -2) W.push("the take-off point is not in front of the corridor entrance; the outbound banner faces the corridor's -x side");
+    const d = Math.hypot(dx, dy);
+    if (d > BANNER_NEAR_RANGE) W.push(`the outbound banner is ${d.toFixed(1)} m from the take-off point; the mission takes a banner within ${BANNER_NEAR_RANGE.toFixed(1)} m as the near gate`);
+  }
+  for (const [n, c] of [["outbound", s.corridor], ["return", s.return_corridor]])
+    if (overlap(lanePoly(c, 0.5), zp)) W.push(`the ${n} corridor overlaps the delivery zone; the rulebook corridors lead INTO the zone, they do not sit inside it`);
+  const ex = corridorExit(s), rin = returnEntrance(s);
+  if (edgeDist(ex, zp) > 6 && !inPoly(ex, zp)) W.push(`the outbound corridor exit is ${edgeDist(ex, zp).toFixed(1)} m from the delivery zone; the mission enters the zone from it`);
+  if (edgeDist(rin, zp) > 6 && !inPoly(rin, zp)) W.push(`the return corridor entrance is ${edgeDist(rin, zp).toFixed(1)} m from the delivery zone; the return lap starts from the zone`);
+  if (gap(tk, zp) < 1) W.push("the take-off pad touches the delivery zone");
+  s.red_zones.forEach((r, i) => {
+    const n = i + 1;
+    if (!(r.w > 0 && r.h > 0)) { E.push(`red zone ${n} needs a positive width and height`); return; }
+    const rp = redPoly(r);
+    if (overlap(rp, tk)) E.push(`red zone ${n} overlaps the take-off pad`);
+    if (overlap(rp, cor)) E.push(`red zone ${n} overlaps the outbound corridor`);
+    if (overlap(rp, ret)) E.push(`red zone ${n} overlaps the return corridor`);
+    for (const [where, pt] of [["outbound corridor exit", ex], ["return corridor entrance", rin]]) {
+      const g = inPoly(pt, rp) ? 0 : edgeDist(pt, rp);
+      if (g < 3) W.push(`red zone ${n} is ${g.toFixed(1)} m from the ${where}; the rulebook gives no other way through`);
+    }
+    if (!rp.every(p => inPoly(p, zp))) W.push(`red zone ${n} is not entirely inside the delivery zone`);
+  });
+  for (const l of PADS) {
+    if (!s.pads[l]) continue;
+    const pp = padPoly(s, l);
+    if (!pp.every(p => inPoly(p, zp))) E.push(`pad ${l.toUpperCase()} is not entirely inside the delivery zone`);
+    s.red_zones.forEach((r, i) => { if (r.w > 0 && r.h > 0 && gap(pp, redPoly(r)) < 1) E.push(`pad ${l.toUpperCase()} is within 1 m of red zone ${i + 1}; it cannot be delivered to without a violation`); });
+  }
+  const placed = PADS.filter(l => s.pads[l]);
+  for (let i = 0; i < placed.length; i++) for (let j = i + 1; j < placed.length; j++) {
+    const a = s.pads[placed[i]], b = s.pads[placed[j]], d = Math.hypot(a.x - b.x, a.y - b.y);
+    if (d < +s.qr.target_m + 1) E.push(`pads ${placed[i].toUpperCase()} and ${placed[j].toUpperCase()} overlap`);
+    else if (d < 5) W.push(`pads ${placed[i].toUpperCase()} and ${placed[j].toUpperCase()} are ${d.toFixed(1)} m apart; both can be in one camera frame`);
+  }
+  return [E, W];
+}
+
+// ---------------------------------------------------------------------------
+// State
+// ---------------------------------------------------------------------------
+let spec = defaultSpec();
+let sel = null;                     // {kind, key}
+let snap = true;
+const served = location.protocol.startsWith("http");
+const undo = [];
+
+function clone(o) { return JSON.parse(JSON.stringify(o)); }
+function pushUndo() { undo.push(clone(spec)); if (undo.length > 100) undo.shift(); }
+const snapv = v => snap ? Math.round(v * 2) / 2 : Math.round(v * 100) / 100;
+
+// ---------------------------------------------------------------------------
+// Scene
+// ---------------------------------------------------------------------------
+const view = document.getElementById("view");
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+view.prepend(renderer.domElement);
+const scene = new THREE.Scene();
+const css = getComputedStyle(document.documentElement);
+scene.background = new THREE.Color(0xb9c9dc);
+scene.add(new THREE.AmbientLight(0xffffff, 0.75));
+const sun = new THREE.DirectionalLight(0xffffff, 0.8); sun.position.set(-20, -30, 60); scene.add(sun);
+
+const persp = new THREE.PerspectiveCamera(45, 1, 0.1, 2000);
+persp.up.set(0, 0, 1);
+const ortho = new THREE.OrthographicCamera(-50, 50, 50, -50, 0.1, 2000);
+ortho.up.set(0, 1, 0);
+let camera = ortho;
+let controls;
+
+function makeControls() {
+  if (controls) controls.dispose();
+  controls = new OrbitControls(camera, renderer.domElement);
+  controls.enableDamping = false;
+  controls.mouseButtons = { LEFT: null, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: camera === ortho ? THREE.MOUSE.PAN : THREE.MOUSE.ROTATE };
+  controls.screenSpacePanning = true;
+  if (camera === ortho) { controls.enableRotate = false; }
+}
+
+const ground = new THREE.Mesh(new THREE.PlaneGeometry(4000, 4000), new THREE.MeshLambertMaterial({ color: 0x8d949c }));
+ground.position.z = -0.02; scene.add(ground);
+const grid1 = new THREE.GridHelper(400, 400, 0x9aa1a9, 0x9aa1a9); grid1.rotation.x = Math.PI / 2; grid1.position.z = -0.01;
+grid1.material.transparent = true; grid1.material.opacity = 0.35; scene.add(grid1);
+const grid10 = new THREE.GridHelper(400, 40, 0xc7ccd2, 0xc7ccd2); grid10.rotation.x = Math.PI / 2; grid10.position.z = -0.005; scene.add(grid10);
+const axes = new THREE.Group();
+axes.add(arrow([1, 0, 0], 0xd23b3b), arrow([0, 1, 0], 0x2f9e44));
+axes.add(label("x", 0xd23b3b, 1.2, [6.5, 0, 0.1]), label("y", 0x2f9e44, 1.2, [0, 6.5, 0.1]));
+scene.add(axes);
+function arrow(dir, color) { return new THREE.ArrowHelper(new THREE.Vector3(...dir), new THREE.Vector3(0, 0, 0.05), 5, color, 0.8, 0.5); }
+
+const world = new THREE.Group(); scene.add(world);
+
+function canvasTex(w, h, draw) {
+  const c = document.createElement("canvas"); c.width = w; c.height = h;
+  draw(c.getContext("2d"), w, h);
+  const t = new THREE.CanvasTexture(c); t.anisotropy = 4; t.colorSpace = THREE.SRGBColorSpace; return t;
+}
+function label(text, color = 0x111111, size = 1.4, pos = [0, 0, 0], bg = null) {
+  const t = canvasTex(512, 128, (g, w, h) => {
+    if (bg) { g.fillStyle = bg; g.fillRect(0, 0, w, h); }
+    g.fillStyle = "#" + color.toString(16).padStart(6, "0");
+    g.font = "bold 72px system-ui, sans-serif"; g.textAlign = "center"; g.textBaseline = "middle";
+    g.fillText(text, w / 2, h / 2);
+  });
+  const m = new THREE.Mesh(new THREE.PlaneGeometry(size * 4, size), new THREE.MeshBasicMaterial({ map: t, transparent: true, depthWrite: false }));
+  m.position.set(...pos); m.renderOrder = 10; return m;
+}
+function flat(w, h, color, z = 0.02, opts = {}) {
+  const m = new THREE.Mesh(new THREE.PlaneGeometry(w, h), new THREE.MeshLambertMaterial({ color, ...opts }));
+  m.position.z = z; return m;
+}
+function box(sx, sy, sz, color, pos, opacity = 1) {
+  const m = new THREE.Mesh(new THREE.BoxGeometry(sx, sy, sz),
+    new THREE.MeshLambertMaterial({ color, transparent: opacity < 1, opacity }));
+  m.position.set(...pos); return m;
+}
+function outline(pts, color, z = 0.06, width = 1) {
+  const g = new THREE.BufferGeometry().setFromPoints([...pts, pts[0]].map(p => new THREE.Vector3(p[0], p[1], z)));
+  return new THREE.Line(g, new THREE.LineBasicMaterial({ color, linewidth: width }));
+}
+const qrTexCache = {};
+function qrTex(seed, letter) {
+  const key = seed + letter;
+  if (qrTexCache[key]) return qrTexCache[key];
+  let r = 0; for (const ch of key) r = (r * 31 + ch.charCodeAt(0)) >>> 0;
+  const rnd = () => ((r = (r * 1664525 + 1013904223) >>> 0) / 4294967296);
+  const t = canvasTex(256, 256, (g, w) => {
+    const n = 21, c = w / (n + 4);
+    g.fillStyle = "#fff"; g.fillRect(0, 0, w, w); g.fillStyle = "#000";
+    for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) {
+      const finder = (a, b) => i >= a && i < a + 7 && j >= b && j < b + 7;
+      let on = rnd() > 0.5;
+      for (const [a, b] of [[0, 0], [0, 14], [14, 0]]) if (finder(a, b)) {
+        const di = i - a, dj = j - b; on = di === 0 || di === 6 || dj === 0 || dj === 6 || (di >= 2 && di <= 4 && dj >= 2 && dj <= 4);
+      }
+      if (on) g.fillRect((i + 2) * c, (j + 2) * c, c, c);
+    }
+    if (letter) { g.fillStyle = "rgba(31,111,235,.85)"; g.font = "bold 120px system-ui"; g.textAlign = "center"; g.textBaseline = "middle"; g.fillText(letter, w / 2, w / 2 + 6); }
+  });
+  qrTexCache[key] = t; return t;
+}
+const redTex = canvasTex(512, 256, (g, w, h) => {
+  g.fillStyle = "#e01414"; g.fillRect(0, 0, w, h);
+  g.strokeStyle = "#fff"; g.lineWidth = 14; g.strokeRect(10, 10, w - 20, h - 20);
+  g.fillStyle = "#fff"; g.font = "bold 96px system-ui"; g.textAlign = "center"; g.textBaseline = "middle"; g.fillText("RED ZONE", w / 2, h / 2);
+});
+
+function tag(obj, kind, key) { obj.traverse(o => { o.userData.sel = { kind, key }; }); return obj; }
+function isSel(kind, key) { return sel && sel.kind === kind && String(sel.key) === String(key); }
+function selRing(poly, z = 0.12) { return outline(poly, 0x1f6feb, z); }
+
+function rebuild() {
+  linkReturn(spec);
+  world.clear();
+  const s = spec;
+  // take-off area
+  {
+    const g = new THREE.Group();
+    g.add(flat(...TAKEOFF_PAD, 0x2280d2, 0.01));
+    const q = new THREE.Mesh(new THREE.PlaneGeometry(+s.qr.start_m, +s.qr.start_m), new THREE.MeshBasicMaterial({ map: qrTex("start", "") }));
+    q.position.set(...START_QR_OFFSET, 0.03); g.add(q);
+    const drone = new THREE.Group();
+    drone.add(box(0.5, 0.08, 0.1, 0x111111, [0, 0, 0.3]), box(0.08, 0.5, 0.1, 0x111111, [0, 0, 0.3]));
+    const nose = new THREE.Mesh(new THREE.ConeGeometry(0.18, 0.6, 12), new THREE.MeshLambertMaterial({ color: 0xff7a00 }));
+    nose.rotation.z = -Math.PI / 2; nose.position.set(0.45, 0, 0.3); drone.add(nose);
+    drone.position.set(...SPAWN_OFFSET, 0); g.add(drone);
+    g.add(label("TAKE-OFF", 0xffffff, 1.0, [0, -3.2, 0.05]));
+    g.position.set(s.takeoff.x, s.takeoff.y, 0); g.rotation.z = rad(s.takeoff.yaw_deg);
+    world.add(tag(g, "takeoff", "")); if (isSel("takeoff")) world.add(selRing(takeoffPoly(s)));
+  }
+  // corridors: each lane from its own length / width / wall height
+  function lane(c, floor, text) {
+    const g = new THREE.Group(), L = +c.length, Wd = +c.width, H = +c.wall_height;
+    const f = flat(L, Wd, floor, 0.02); f.position.set(L / 2, 0, 0.02); g.add(f);
+    const wy = Wd / 2 + WALL_T / 2;
+    for (const y of [wy, -wy]) g.add(box(L + 0.2, WALL_T, H, 0xdfe5ec, [L / 2, y, H / 2], 0.55));
+    g.add(box(0.18, 0.18, 4, 0x067a2d, [0, -1.92, 2]), box(0.18, 0.18, 4, 0x067a2d, [0, 1.92, 2]));
+    g.add(box(0.08, 3.7, 1.15, 0x0b8f3a, [0, 0, 3.38]));
+    g.add(label(text, 0xffffff, 0.9, [L / 2, 0, 0.05]));
+    g.position.set(c.x, c.y, 0); g.rotation.z = rad(c.yaw_deg);
+    return g;
+  }
+  world.add(tag(lane(s.corridor, 0x07ad47, "OUT →"), "corridor", ""));
+  if (isSel("corridor")) world.add(selRing(corridorPoly(s)));
+  {
+    const r = s.return_corridor, g = lane(r, 0xff6a0d, r.linked ? "RETURN → (linked)" : "RETURN →");
+    world.add(tag(g, "return", ""));
+    if (isSel("return")) world.add(selRing(returnPoly(s)));
+    // Obstacles are their own pickables so each can be dragged.
+    (r.obstacles || []).forEach((o, i) => {
+      const [cx, cy] = place([+o.u, +o.v], r.x, r.y, rad(r.yaw_deg));
+      const b = box(+o.w, +o.d, +o.h, isSel("obst", i) ? 0x1f6feb : 0x111111, [cx, cy, +o.h / 2]);
+      b.rotation.z = rad(r.yaw_deg) + rad(o.yaw_deg || 0);
+      world.add(tag(b, "obst", i));
+    });
+  }
+  // delivery zone
+  {
+    const z = s.delivery_zone, g = new THREE.Group();
+    g.add(flat(z.w, z.h, 0x8fcf6a, 0.005));
+    g.add(outline(rectCorners(0, 0, z.w, z.h), 0xffffff, 0.07));
+    g.add(label("DELIVERY ZONE", 0x2f5f1a, 1.6, [0, z.h / 2 - 1.5, 0.05]));
+    g.position.set(z.x, z.y, 0);
+    world.add(tag(g, "zone", "")); if (isSel("zone")) world.add(selRing(zonePoly(s), 0.13));
+  }
+  // red zones
+  s.red_zones.forEach((r, i) => {
+    const m = new THREE.Mesh(new THREE.PlaneGeometry(r.w, r.h), new THREE.MeshLambertMaterial({ map: redTex }));
+    m.position.set(r.x, r.y, 0.04); m.rotation.z = rad(r.yaw_deg || 0);
+    const l = label(String(i + 1), 0xffffff, 1.0, [r.x, r.y - Math.min(r.h / 2 - 0.6, 1.8), 0.08]);
+    world.add(tag(m, "red", i), tag(l, "red", i)); if (isSel("red", i)) world.add(selRing(redPoly(r)));
+  });
+  // pads
+  for (const l of PADS) {
+    const p = s.pads[l]; if (!p) continue;
+    const m = new THREE.Mesh(new THREE.PlaneGeometry(+s.qr.target_m, +s.qr.target_m), new THREE.MeshBasicMaterial({ map: qrTex("pad", l.toUpperCase()) }));
+    m.position.set(p.x, p.y, 0.05); m.rotation.z = rad(p.yaw_deg || 0);
+    world.add(tag(m, "pad", l));
+    if (s.start_target === l) world.add(outline(padPoly(s, l), 0xffc400, 0.1));
+    if (isSel("pad", l)) world.add(selRing(padPoly(s, l)));
+  }
+  // decoys
+  s.decoys.forEach((d, i) => {
+    const g = new THREE.Group();
+    g.add(box(2.0, 0.12, 1.1, 0x0b8f3a, [0, 0, 1.2]), box(0.08, 0.08, 1.2, 0x067a2d, [-0.9, 0, 0.6]), box(0.08, 0.08, 1.2, 0x067a2d, [0.9, 0, 0.6]));
+    g.add(flat(2.4, 0.6, 0x0b8f3a, 0.015));
+    g.position.set(d.x, d.y, 0); g.rotation.z = rad(d.yaw_deg || 0);
+    world.add(tag(g, "decoy", i)); if (isSel("decoy", i)) world.add(selRing(rectCorners(d.x, d.y, 2.6, 1, rad(d.yaw_deg || 0))));
+  });
+  // geofence
+  const fp = fencePoly(s);
+  world.add(outline(fp, s.geofence.mode === "polygon" ? 0xff7a00 : 0xffa94d, 0.15));
+  if (s.geofence.mode === "polygon") {
+    s.geofence.vertices.forEach((v, i) => {
+      const h = new THREE.Mesh(new THREE.CylinderGeometry(0.6, 0.6, 0.2, 16), new THREE.MeshBasicMaterial({ color: isSel("fencev", i) ? 0x1f6feb : 0xff7a00 }));
+      h.rotation.x = Math.PI / 2; h.position.set(v[0], v[1], 0.2); world.add(tag(h, "fencev", i));
+    });
+  }
+  // corridor exit marker, for the eye
+  const ex = corridorExit(s);
+  const exm = new THREE.Mesh(new THREE.RingGeometry(0.35, 0.55, 20), new THREE.MeshBasicMaterial({ color: 0xffffff }));
+  exm.position.set(ex[0], ex[1], 0.09); world.add(exm);
+  refreshPanel();
+}
+
+// ---------------------------------------------------------------------------
+// Picking and dragging
+// ---------------------------------------------------------------------------
+const ray = new THREE.Raycaster();
+const ndc = new THREE.Vector2();
+const plane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
+let drag = null;
+
+function groundAt(ev) {
+  const r = renderer.domElement.getBoundingClientRect();
+  ndc.set(((ev.clientX - r.left) / r.width) * 2 - 1, -((ev.clientY - r.top) / r.height) * 2 + 1);
+  ray.setFromCamera(ndc, camera);
+  const p = new THREE.Vector3();
+  return ray.ray.intersectPlane(plane, p) ? p : null;
+}
+function pick(ev) {
+  groundAt(ev);
+  const hits = ray.intersectObjects(world.children, true).filter(h => h.object.userData.sel);
+  if (!hits.length) return null;
+  const order = { fencev: 0, obst: 0, pad: 1, decoy: 2, red: 3, takeoff: 4, corridor: 5, return: 5, zone: 6 };
+  hits.sort((a, b) => (order[a.object.userData.sel.kind] - order[b.object.userData.sel.kind]) || (a.distance - b.distance));
+  return hits[0].object.userData.sel;
+}
+function anchorOf(s) {
+  switch (s.kind) {
+    case "takeoff": return spec.takeoff; case "corridor": return spec.corridor;
+    case "zone": return spec.delivery_zone; case "red": return spec.red_zones[s.key];
+    case "pad": return spec.pads[s.key]; case "decoy": return spec.decoys[s.key];
+    case "fencev": { const v = spec.geofence.vertices[s.key]; return { get x() { return v[0]; }, set x(a) { v[0] = a; }, get y() { return v[1]; }, set y(b) { v[1] = b; } }; }
+    case "return": return spec.return_corridor;
+    case "obst": {
+      // Obstacles live in the return corridor's (u, v) frame; drag in world x/y.
+      const r = spec.return_corridor, o = r.obstacles[s.key], yaw = rad(r.yaw_deg), c = Math.cos(yaw), sn = Math.sin(yaw);
+      const w = () => place([+o.u, +o.v], r.x, r.y, yaw);
+      const setW = (x, y) => { const dx = x - r.x, dy = y - r.y; o.u = Math.round((dx * c + dy * sn) * 100) / 100; o.v = Math.round((-dx * sn + dy * c) * 100) / 100; };
+      return { get x() { return w()[0]; }, set x(a) { setW(a, w()[1]); }, get y() { return w()[1]; }, set y(b) { setW(w()[0], b); },
+               get yaw_deg() { return o.yaw_deg || 0; }, set yaw_deg(v) { o.yaw_deg = v; } };
+    }
+  }
+}
+renderer.domElement.addEventListener("pointerdown", ev => {
+  if (ev.button !== 0) return;
+  const s = pick(ev);
+  sel = s;
+  if (s) {
+    const p = groundAt(ev), a = anchorOf(s);
+    pushUndo();
+    // Moving a linked return corridor by hand is a request to place it freely.
+    if (s.kind === "return" && spec.return_corridor.linked) spec.return_corridor.linked = false;
+    drag = { s, dx: a.x - p.x, dy: a.y - p.y, moved: false };
+    renderer.domElement.setPointerCapture(ev.pointerId);
+  }
+  rebuild();
+});
+renderer.domElement.addEventListener("pointermove", ev => {
+  const p = groundAt(ev);
+  if (p) {
+    const [hx, hy] = spawnPoint(spec);
+    document.getElementById("cursor").textContent =
+      `world x ${p.x.toFixed(2)}, y ${p.y.toFixed(2)}   ·   mission-local x ${(p.x - hx).toFixed(2)}, y ${(p.y - hy).toFixed(2)}`;
+  }
+  if (!drag || !p) return;
+  const a = anchorOf(drag.s);
+  a.x = snapv(p.x + drag.dx); a.y = snapv(p.y + drag.dy);
+  drag.moved = true; rebuild();
+});
+renderer.domElement.addEventListener("pointerup", ev => {
+  if (drag && !drag.moved) undo.pop();
+  if (drag) changed(false);
+  drag = null;
+});
+renderer.domElement.addEventListener("dblclick", ev => {
+  if (spec.geofence.mode !== "polygon") return;
+  const p = groundAt(ev); if (!p) return;
+  const v = spec.geofence.vertices; let best = -1, bd = 2.0;
+  for (let i = 0; i < v.length; i++) { const d = segDist([p.x, p.y], v[i], v[(i + 1) % v.length]); if (d < bd) { bd = d; best = i; } }
+  if (best < 0) return;
+  pushUndo(); v.splice(best + 1, 0, [snapv(p.x), snapv(p.y)]); sel = { kind: "fencev", key: best + 1 }; changed();
+});
+addEventListener("keydown", ev => {
+  if (ev.target.tagName === "INPUT" || ev.target.tagName === "SELECT") return;
+  if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === "z") { if (undo.length) { spec = undo.pop(); sel = null; changed(); } ev.preventDefault(); return; }
+  if (!sel) return;
+  const a = anchorOf(sel);
+  if ((ev.key === "q" || ev.key === "Q" || ev.key === "e" || ev.key === "E") && a && "yaw_deg" in a || (sel && sel.kind === "pad" && "qQeE".includes(ev.key))) {
+    const step = (ev.shiftKey ? 15 : 5) * ("qQ".includes(ev.key) ? 1 : -1);
+    pushUndo(); a.yaw_deg = (((a.yaw_deg || 0) + step + 540) % 360) - 180; changed();
+  } else if (ev.key === "Delete" || ev.key === "Backspace") {
+    pushUndo(); removeSelected();
+  } else if (ev.key === "Escape") { sel = null; rebuild(); }
+});
+function removeSelected() {
+  if (!sel) return;
+  if (sel.kind === "red") spec.red_zones.splice(sel.key, 1);
+  else if (sel.kind === "decoy") spec.decoys.splice(sel.key, 1);
+  else if (sel.kind === "fencev" && spec.geofence.vertices.length > 3) spec.geofence.vertices.splice(sel.key, 1);
+  else if (sel.kind === "obst") spec.return_corridor.obstacles.splice(sel.key, 1);
+  else { undo.pop(); return; }
+  sel = null; changed();
+}
+
+// ---------------------------------------------------------------------------
+// Panel
+// ---------------------------------------------------------------------------
+const $ = id => document.getElementById(id);
+function objectRows() {
+  const r = spec.return_corridor;
+  const rows = [["takeoff", "", "Take-off area", "#2280d2"],
+    ["corridor", "", `Outbound corridor  (${spec.corridor.length}×${spec.corridor.width} m)`, "#07ad47"],
+    ["return", "", `Return corridor  (${r.length}×${r.width} m${r.linked ? ", linked" : ""})`, "#ff6a0d"]];
+  (r.obstacles || []).forEach((o, i) => rows.push(["obst", i, `  Obstacle ${i + 1}  (${o.w}×${o.d}×${o.h} m)`, "#111111"]));
+  rows.push(["zone", "", "Delivery zone", "#8fcf6a"]);
+  spec.red_zones.forEach((r, i) => rows.push(["red", i, `Red zone ${i + 1}  (${r.w}×${r.h} m)`, "#e01414"]));
+  for (const l of PADS) if (spec.pads[l]) rows.push(["pad", l, `Pad ${l.toUpperCase()}${spec.start_target === l ? "  ★ target" : ""}`, "#ffffff"]);
+  spec.decoys.forEach((d, i) => rows.push(["decoy", i, `Decoy ${i + 1}`, "#0b8f3a"]));
+  if (spec.geofence.mode === "polygon") spec.geofence.vertices.forEach((v, i) => rows.push(["fencev", i, `Fence vertex ${i + 1}`, "#ff7a00"]));
+  return rows;
+}
+function field(lbl, obj, key, step = 0.5, after = null) {
+  const l = document.createElement("label"); l.textContent = lbl;
+  const inp = document.createElement("input"); inp.type = "number"; inp.step = step; inp.value = obj[key] ?? 0;
+  inp.addEventListener("change", () => { pushUndo(); obj[key] = +inp.value; if (after) after(); changed(); });
+  l.append(inp); return l;
+}
+function refreshPanel() {
+  const ol = $("objects"); ol.innerHTML = "";
+  for (const [kind, key, text, color] of objectRows()) {
+    const d = document.createElement("div"); d.className = "item" + (isSel(kind, key) ? " sel" : "");
+    d.innerHTML = `<span><span class="swatch" style="background:${color};border:1px solid #888"></span>${text}</span>`;
+    d.onclick = () => { sel = { kind, key }; rebuild(); };
+    ol.append(d);
+  }
+  const pr = $("props"); pr.innerHTML = "";
+  if (!sel) { pr.className = "muted"; pr.textContent = "Nothing selected. Click an object in the view or the list."; }
+  else {
+    pr.className = ""; const g = document.createElement("div"); g.className = "grid";
+    const a = anchorOf(sel);
+    if (sel.kind === "fencev") { const v = spec.geofence.vertices[sel.key]; g.append(field("x", v, 0), field("y", v, 1)); }
+    else if (sel.kind === "obst") {
+      const o = spec.return_corridor.obstacles[sel.key];
+      g.append(field("along u", o, "u", 0.1), field("across v", o, "v", 0.05), field("yaw°", o, "yaw_deg", 5),
+               field("length (along)", o, "w", 0.05), field("width (across)", o, "d", 0.05), field("height", o, "h", 0.1));
+    } else {
+      const r = spec.return_corridor, locked = sel.kind === "return" && r.linked;
+      if (!locked) g.append(field("x", a, "x"), field("y", a, "y"));
+      if (sel.kind !== "zone" && !locked) g.append(field("yaw°", a, "yaw_deg", 5));
+      if (sel.kind === "zone" || sel.kind === "red") g.append(field("width", a, "w"), field("height", a, "h"));
+      if (sel.kind === "corridor" || sel.kind === "return")
+        g.append(field("length", a, "length", 0.5), field("width", a, "width", 0.1), field("wall height", a, "wall_height", 0.1));
+    }
+    pr.append(g);
+    if (sel.kind === "return") {
+      const row = document.createElement("div"); row.className = "row";
+      const lab = document.createElement("label"), cb = document.createElement("input");
+      cb.type = "checkbox"; cb.checked = !!spec.return_corridor.linked;
+      cb.onchange = () => { pushUndo(); spec.return_corridor.linked = cb.checked; changed(); };
+      lab.append(cb, " linked beside the outbound corridor (rulebook layout)");
+      const add = document.createElement("button"); add.textContent = "+ Obstacle";
+      add.onclick = () => addObstacle();
+      row.append(lab, add); pr.append(row);
+    }
+    const note = { takeoff: "Pad 5 × 8 m; start QR 2 m and spawn (orange nose) fixed on it. The spawn is the FCU home.",
+      corridor: "Placed by its banner (the entrance); +x runs down the lane into the zone.",
+      return: "Placed by its banner, the entrance from the zone side; +x runs down the lane away from the zone. Linked: it sits beside the outbound lane and moves with it; drag it to place it anywhere.",
+      obst: "In the return corridor's frame: u along the lane from its banner, v across it. Moves with the corridor. Q/E turns it.",
+      zone: "Axis-aligned. The lawnmower starts at its bottom-left corner.",
+      red: "Any size and heading. Pads must stay 1 m clear.", pad: "Five pads A–E; the gold outline is the one the start QR names.",
+      decoy: "Green banner-shaped decoy the perception must reject.", fencev: "Double-click an edge to add a vertex; Del removes one." }[sel.kind];
+    const p = document.createElement("p"); p.className = "muted"; p.textContent = note; pr.append(p);
+    if (["red", "decoy", "fencev", "obst"].includes(sel.kind)) { const b = document.createElement("button"); b.textContent = "Remove"; b.onclick = () => { pushUndo(); removeSelected(); }; pr.append(b); }
+  }
+  $("startTarget").value = spec.start_target; $("qrStart").value = spec.qr.start_m; $("qrTarget").value = spec.qr.target_m;
+  $("fenceMode").value = spec.geofence.mode; $("fenceMargin").value = spec.geofence.margin ?? 6;
+  $("marginWrap").style.display = spec.geofence.mode === "auto" ? "" : "none";
+  $("fenceAddV").disabled = $("fenceDelV").disabled = spec.geofence.mode !== "polygon";
+  $("name").value = spec.name || "";
+}
+function showChecks(E, W, src) {
+  const c = $("checks"); c.innerHTML = "";
+  $("checkSrc").textContent = src;
+  if (!E.length && !W.length) c.innerHTML = `<div class="ok">✓ No problems. This world can be flown.</div>`;
+  for (const e of E) { const d = document.createElement("div"); d.className = "e"; d.textContent = "✗ " + e; c.append(d); }
+  for (const w of W) { const d = document.createElement("div"); d.className = "w"; d.textContent = "! " + w; c.append(d); }
+  // Left clickable: a greyed-out button with no reason reads as broken.
+  // Clicking it with errors lists them in the run panel instead.
+  $("btnRun").textContent = E.length
+    ? `Save & run simulation (${E.length} error${E.length > 1 ? "s" : ""} to fix first)`
+    : "Save & run simulation";
+}
+let vTimer = null;
+function changed(rebuildNow = true) {
+  if (rebuildNow) rebuild(); else refreshPanel();
+  const [E, W] = validate(spec); showChecks(E, W, served ? "(checking…)" : "(in browser)");
+  if (served) {
+    clearTimeout(vTimer);
+    vTimer = setTimeout(async () => {
+      try {
+        const r = await fetch("api/validate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(spec) });
+        const j = await r.json(); showChecks(j.errors, j.warnings, "(world_spec.py)");
+      } catch { showChecks(E, W, "(in browser; server unreachable)"); }
+    }, 250);
+  }
+}
+
+$("name").addEventListener("change", e => { spec.name = e.target.value.trim().replace(/[^A-Za-z0-9_-]/g, "_"); refreshPanel(); });
+$("startTarget").addEventListener("change", e => { pushUndo(); spec.start_target = e.target.value; changed(); });
+$("qrStart").addEventListener("change", e => { pushUndo(); spec.qr.start_m = +e.target.value; changed(); });
+$("qrTarget").addEventListener("change", e => { pushUndo(); spec.qr.target_m = +e.target.value; changed(); });
+$("fenceMode").addEventListener("change", e => {
+  pushUndo();
+  if (e.target.value === "polygon" && !(spec.geofence.vertices || []).length) spec.geofence.vertices = fencePoly(spec).map(p => p.map(v => Math.round(v * 10) / 10));
+  spec.geofence.mode = e.target.value; changed();
+});
+$("fenceMargin").addEventListener("change", e => { pushUndo(); spec.geofence.margin = +e.target.value; changed(); });
+$("fenceFromAuto").onclick = () => { pushUndo(); const m = spec.geofence.margin ?? 6; spec.geofence = { mode: "auto", margin: m }; const v = fencePoly(spec).map(p => p.map(x => Math.round(x * 10) / 10)); spec.geofence = { mode: "polygon", margin: m, vertices: v }; changed(); };
+$("fenceAddV").onclick = () => {
+  const v = spec.geofence.vertices; let i = sel && sel.kind === "fencev" ? sel.key : v.length - 1;
+  const a = v[i], b = v[(i + 1) % v.length]; pushUndo();
+  v.splice(i + 1, 0, [snapv((a[0] + b[0]) / 2), snapv((a[1] + b[1]) / 2)]); sel = { kind: "fencev", key: i + 1 }; changed();
+};
+$("fenceDelV").onclick = () => { if (sel && sel.kind === "fencev") { pushUndo(); removeSelected(); } };
+$("addRed").onclick = () => { pushUndo(); const z = spec.delivery_zone; spec.red_zones.push({ x: z.x, y: z.y, w: 5, h: 4, yaw_deg: 0 }); sel = { kind: "red", key: spec.red_zones.length - 1 }; changed(); };
+function addObstacle() {
+  const r = spec.return_corridor; pushUndo();
+  r.obstacles = r.obstacles || [];
+  r.obstacles.push({ u: +r.length / 2, v: 0.8, w: 0.35, d: 1.2, h: 3.2, yaw_deg: 0 });
+  sel = { kind: "obst", key: r.obstacles.length - 1 }; changed();
+}
+$("addObst").onclick = addObstacle;
+$("addDecoy").onclick = () => { pushUndo(); const c = spec.corridor; spec.decoys.push({ x: c.x + 5, y: c.y - 12, yaw_deg: 0 }); sel = { kind: "decoy", key: spec.decoys.length - 1 }; changed(); };
+$("btnNew").onclick = () => { pushUndo(); spec = defaultSpec(); sel = null; changed(); fit(); };
+$("btnSnap").onclick = e => { snap = !snap; e.target.classList.toggle("on", snap); };
+$("btnExport").onclick = () => {
+  const blob = new Blob([JSON.stringify(spec, null, 2)], { type: "application/json" });
+  const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = (spec.name || "world") + ".json"; a.click();
+};
+$("btnLoadFile").onclick = () => $("file").click();
+$("file").onchange = async e => { const f = e.target.files[0]; if (!f) return; loadSpec(JSON.parse(await f.text())); e.target.value = ""; };
+function loadSpec(j) {
+  pushUndo(); const d = defaultSpec();
+  const rc = { ...d.return_corridor, ...(j.return_corridor || {}) };
+  rc.obstacles = (rc.obstacles || []).map(o => ({ yaw_deg: 0, ...o }));
+  spec = { ...d, ...j, takeoff: { ...d.takeoff, ...(j.takeoff || {}) }, corridor: { ...d.corridor, ...(j.corridor || {}) },
+    return_corridor: rc,
+    delivery_zone: { ...d.delivery_zone, ...(j.delivery_zone || {}) }, qr: { ...d.qr, ...(j.qr || {}) },
+    geofence: { ...(j.geofence || d.geofence) }, red_zones: (j.red_zones || []).map(r => ({ yaw_deg: 0, ...r })),
+    pads: j.pads || d.pads, decoys: (j.decoys || []).map(x => ({ yaw_deg: 0, ...x })) };
+  sel = null; changed(); fit();
+}
+
+// ---- server: save, list, run ----
+async function listWorlds() {
+  if (!served) return;
+  try {
+    const j = await (await fetch("api/worlds")).json();
+    const s = $("worldList"); s.innerHTML = `<option value="">Load saved…</option>` + j.worlds.map(n => `<option>${n}</option>`).join("");
+  } catch {}
+}
+$("worldList").onchange = async e => { if (!e.target.value) return; loadSpec(await (await fetch("api/worlds/" + encodeURIComponent(e.target.value))).json()); e.target.value = ""; };
+async function save() {
+  if (!spec.name) { spec.name = "my_world"; }
+  if (!served) { $("btnExport").click(); return true; }
+  const r = await fetch("api/worlds/" + encodeURIComponent(spec.name), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(spec, null, 2) });
+  const j = await r.json();
+  $("saveMsg").textContent = r.ok ? `saved ${j.path}` : `not saved: ${j.error}`;
+  $("saveMsg").className = r.ok ? "ok" : "e";
+  listWorlds(); return r.ok;
+}
+$("btnSave").onclick = save;
+$("btnRun").onclick = async () => {
+  if (!(await save())) return;
+  const [errs] = validate(spec);
+  if (errs.length) {
+    $("runStatus").textContent = "not started: fix the errors first\n\n" + errs.map(e => "• " + e).join("\n");
+    return;
+  }
+  const q = new URLSearchParams({ gui: $("runGui").checked ? 1 : 0, record: $("runRec").checked ? 1 : 0 });
+  const r = await fetch(`api/run/${encodeURIComponent(spec.name)}?${q}`, { method: "POST" });
+  const j = await r.json(); $("runStatus").textContent = r.ok ? "starting…" : "not started: " + j.error;
+  poll();
+};
+let pollTimer = null;
+async function poll() {
+  clearTimeout(pollTimer);
+  try {
+    const j = await (await fetch("api/run")).json();
+    const lines = [`${j.running ? "RUNNING" : "idle"}${j.name ? "  " + j.name : ""}${j.elapsed_s ? "  " + Math.round(j.elapsed_s / 60) + " min" : ""}`];
+    if (j.state) lines.push("state: " + j.state);
+    if (j.result) lines.push("result: " + j.result);
+    if (j.grade && j.grade.length) lines.push("", ...j.grade);
+    if (j.video) lines.push("", "video: " + j.video);
+    if (j.log_tail && j.log_tail.length && !j.state) lines.push("", ...j.log_tail);
+    $("runStatus").textContent = lines.join("\n");
+    $("btnRun").disabled = j.running;
+    if (j.running) pollTimer = setTimeout(poll, 5000);
+  } catch { $("runStatus").textContent = "server unreachable"; }
+}
+
+// ---------------------------------------------------------------------------
+// Camera
+// ---------------------------------------------------------------------------
+function bounds() {
+  const pts = [...fencePoly(spec), ...takeoffPoly(spec), ...corridorPoly(spec), ...zonePoly(spec)];
+  const xs = pts.map(p => p[0]), ys = pts.map(p => p[1]);
+  return [Math.min(...xs), Math.max(...xs), Math.min(...ys), Math.max(...ys)];
+}
+function fit() {
+  const [x0, x1, y0, y1] = bounds(); const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
+  const w = view.clientWidth, h = view.clientHeight, aspect = w / h;
+  const half = Math.max((x1 - x0) / 2 / aspect, (y1 - y0) / 2) * 1.1;
+  ortho.left = -half * aspect; ortho.right = half * aspect; ortho.top = half; ortho.bottom = -half;
+  ortho.position.set(cx, cy, 200); ortho.zoom = 1; ortho.lookAt(cx, cy, 0); ortho.updateProjectionMatrix();
+  persp.position.set(cx - (x1 - x0) * 0.35, cy - (y1 - y0) * 1.1, Math.max(x1 - x0, y1 - y0) * 0.75);
+  persp.lookAt(cx, cy, 0);
+  makeControls(); controls.target.set(cx, cy, 0); controls.update();
+}
+function setCam(c) { camera = c; $("btnTop").classList.toggle("on", c === ortho); $("btn3d").classList.toggle("on", c === persp); fit(); }
+$("btnTop").onclick = () => setCam(ortho);
+$("btn3d").onclick = () => setCam(persp);
+$("btnFit").onclick = fit;
+function resize() {
+  const w = view.clientWidth, h = view.clientHeight;
+  renderer.setSize(w, h); persp.aspect = w / h; persp.updateProjectionMatrix();
+  const half = (ortho.top - ortho.bottom) / 2, cx = (ortho.left + ortho.right) / 2;
+  ortho.left = cx - half * w / h; ortho.right = cx + half * w / h; ortho.updateProjectionMatrix();
+}
+addEventListener("resize", resize);
+
+resize(); rebuild(); fit(); changed(false);
+if (served) { $("runbox").hidden = false; listWorlds(); poll(); }
+(function loop() { requestAnimationFrame(loop); renderer.render(scene, camera); })();
+</script>
+</body>
+</html>

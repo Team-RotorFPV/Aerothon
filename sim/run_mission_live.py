@@ -15,14 +15,16 @@ Exit: 0 the mission reached a terminal outcome, 1 it never left WAITING,
 
 import argparse
 import json
+import math
 import sys
 import time
 
 import rclpy
+import rclpy.parameter
 from rclpy.node import Node
 from rclpy.qos import (QoSProfile, QoSDurabilityPolicy, QoSHistoryPolicy,
                        QoSReliabilityPolicy, qos_profile_sensor_data)
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import Pose, PoseStamped
 from mavros_msgs.msg import State
 from std_msgs.msg import Bool, String
 
@@ -34,7 +36,13 @@ def latched():
 
 class MissionRunner(Node):
     def __init__(self):
-        super().__init__("mission_live_runner")
+        # SIM time, so the recorded track -- and the flight time read off it --
+        # is what the aircraft experienced, not what a slow host took.
+        super().__init__("mission_live_runner", parameter_overrides=[
+            rclpy.parameter.Parameter("use_sim_time",
+                                      rclpy.parameter.Parameter.Type.BOOL,
+                                      True)])
+        self.track = []
         self.state = State()
         self.pose = PoseStamped()
         self.mission_state = None
@@ -42,6 +50,7 @@ class MissionRunner(Node):
         self.qr = {}
         self.winch = {}
         self.camera = {}
+        self.payload = None           # ground-truth payload pose, WORLD frame
         self.transitions = []
 
         best = QoSProfile(depth=10, history=QoSHistoryPolicy.KEEP_LAST,
@@ -50,8 +59,7 @@ class MissionRunner(Node):
         self.create_subscription(State, "/mavros/state",
                                  lambda m: setattr(self, "state", m), best)
         self.create_subscription(PoseStamped, "/mavros/local_position/pose",
-                                 lambda m: setattr(self, "pose", m),
-                                 qos_profile_sensor_data)
+                                 self._on_pose, qos_profile_sensor_data)
         self.create_subscription(String, "/mission/state", self._on_state, 10)
         self.create_subscription(String, "/mission/result",
                                  lambda m: setattr(self, "result", m.data), latched())
@@ -61,8 +69,41 @@ class MissionRunner(Node):
                                  lambda m: self._json(m, "winch"), 10)
         self.create_subscription(String, "/camera/pose_state",
                                  lambda m: self._json(m, "camera"), 10)
+        # Where the payload really is (Gazebo, for GRADING -- see
+        # sim/check_track.py). Nothing in the mission reads this topic.
+        self.create_subscription(
+            Pose, "/sim/payload_pose",
+            lambda m: setattr(self, "payload", (m.position.x, m.position.y,
+                                                m.position.z)), best)
 
         self.pub_start = self.create_publisher(Bool, "/mission/start", 10)
+
+    def _on_pose(self, m):
+        self.pose = m
+        t = self.get_clock().now().nanoseconds * 1e-9
+        # 10 Hz of sim time is plenty to resolve a 1.5 m red-zone clearance.
+        if not self.track or t - self.track[-1][0] >= 0.1:
+            p = m.pose.position
+            q = m.pose.orientation
+            # Roll and pitch too: a collision or a loss of control shows as a
+            # tilt spike, and the grader must see it even when the tree goes
+            # on to report COMPLETED.
+            roll = math.degrees(math.atan2(2 * (q.w * q.x + q.y * q.z),
+                                           1 - 2 * (q.x * q.x + q.y * q.y)))
+            pitch = math.degrees(math.asin(max(-1.0, min(1.0,
+                                           2 * (q.w * q.y - q.z * q.x)))))
+            self.track.append((t, p.x, p.y, p.z, bool(self.state.armed),
+                               str(self.mission_state), roll, pitch,
+                               str(self.state.mode), self.payload))
+
+    def write_track(self, path):
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("t_sim,x,y,z,armed,state,roll_deg,pitch_deg,mode,"
+                    "payload_wx,payload_wy,payload_wz\n")
+            for t, x, y, z, armed, s, r, pt, mode, pay in self.track:
+                pw = ",".join(f"{v:.3f}" for v in pay) if pay else ",,"
+                f.write(f"{t:.2f},{x:.3f},{y:.3f},{z:.3f},{int(armed)},{s},"
+                        f"{r:.1f},{pt:.1f},{mode},{pw}\n")
 
     def _json(self, msg, attr):
         try:
@@ -95,6 +136,8 @@ class MissionRunner(Node):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--watch", type=float, default=300.0)
+    ap.add_argument("--track", default="/tmp/aerothon_track.csv",
+                    help="where to write the flown track (sim time, local ENU)")
     ap.add_argument("--settle", type=float, default=20.0,
                     help="discovery settling time before doing anything")
     args = ap.parse_args()
@@ -151,6 +194,14 @@ def main():
             nxt += 8.0
         if n.result is not None:
             print(f"\n  terminal outcome reached at t={el:.0f}s")
+            # Keep recording until the FCU's own state shows the disarm. The
+            # result latches on the tree's side first; stopping there left
+            # the last track sample armed (seed 1002) and the grader rightly
+            # refused to take "landed and disarmed" on trust.
+            tail_end = time.time() + 20.0
+            while rclpy.ok() and time.time() < tail_end and n.state.armed:
+                rclpy.spin_once(n, timeout_sec=0.05)
+            n.spin(2.0)
             break
 
     print("\n" + "=" * 72)
@@ -166,6 +217,17 @@ def main():
     print("\n state transitions:")
     for t, s in n.transitions:
         print(f"   +{t - t0:6.1f}s  {s}")
+
+    # Flight time in SIM seconds: first armed sample to the last one.
+    armed = [row[0] for row in n.track if row[4]]   # t of armed samples
+    if armed:
+        print(f"\n flight time (sim)       : {armed[-1] - armed[0]:.1f} s "
+              f"(rulebook window 900 s)")
+    try:
+        n.write_track(args.track)
+        print(f" track                   : {args.track} ({len(n.track)} samples)")
+    except OSError as exc:
+        print(f" track not written: {exc}")
 
     n.destroy_node()
     rclpy.shutdown()

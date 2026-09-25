@@ -96,7 +96,9 @@ echo "--- waiting for stack ---"
 # that same moment. Staying alive also allows measuring a RATE instead of
 # noting that one message arrived.
 ready=0
-if python3 sim/wait_ready.py --timeout 300 --require-scan; then
+# At a real-time factor of ~0.3 (software rendering, no GPU) the EKF origin
+# alone takes over three wall minutes, so 300 s was not enough on this host.
+if python3 sim/wait_ready.py --timeout "${AEROTHON_READY_TIMEOUT:-900}" --require-scan; then
     ready=1
 fi
 if [[ "$ready" != "1" ]]; then
@@ -107,59 +109,27 @@ if [[ "$ready" != "1" ]]; then
 fi
 
 echo ""
+echo "--- host speed (RTF) and sensor rates ---"
+timeout 40 python3 sim/probe_rates.py --seconds 15 || echo "(probe failed)"
+
+echo ""
 echo "--- which target did the start pad get? ---"
 grep -a "start pad names" "$LOG" | tail -1
 
 echo ""
-echo "--- supporting nodes ---"
-timeout 12 ros2 node list 2>/dev/null | grep -E "camera_ctrl|winch_ctrl|stream_rate_keeper|perception_qr" || echo "(none found)"
-
-echo ""
-echo "--- starting mission ---"
-timeout 12 ros2 topic pub -r 2 /mission/start std_msgs/msg/Bool "{data: true}" >/dev/null 2>&1 &
-sleep 13
-
-echo ""
-printf "%6s  %-18s %-30s %s\n" "t(s)" "state" "position" "camera/qr"
-last_state=""
-for i in $(seq 1 $((WATCH / 8))); do
-    st=$(timeout 4 ros2 topic echo --once /mission/state 2>/dev/null | head -1 | sed 's/data: //' | tr -d "'" || echo "?")
-    pos=$(timeout 5 ros2 topic echo --once /mavros/local_position/pose 2>/dev/null \
-          | grep -A3 "position:" | tail -3 | awk -F: '{printf "%.1f ", $2}' || echo "")
-    det=$(timeout 4 ros2 topic echo --once /percep/qr/detail 2>/dev/null | head -1 \
-          | sed 's/data: //' | cut -c1-70 || echo "")
-    printf "%6s  %-18s %-30s %s\n" "$((i*8))" "$st" "[$pos]" "$det"
-    [[ "$st" == "$last_state" ]] || last_state="$st"
-
-    # Stop once the tree has latched a terminal outcome. The mission result is
-    # first-writer-wins, so there is nothing further to observe -- and each
-    # iteration costs up to 17 s of `ros2 topic echo` timeouts. An arena that
-    # failed at t=24 s was still being watched at t=520 s, which made a
-    # five-arena regression mostly a study of idle simulators.
-    #
-    # Read from the tree's own log rather than /mission/result: short-lived
-    # ros2 CLI calls lose the DDS discovery race against this stack.
-    if grep -aq "Mission result:" "$LOG" 2>/dev/null; then
-        echo ""
-        echo "--- terminal outcome latched, ending watch early ---"
-        grep -a "Mission result:" "$LOG" | tail -1
-        break
-    fi
-    sleep 4
-done
-
-echo ""
-echo "--- outcome ---"
-timeout 6 ros2 topic echo --once /mission/result 2>/dev/null | head -2 || echo "(no result latched)"
-
-echo ""
-echo "--- winch ---"
-timeout 6 ros2 topic echo --once /winch/status 2>/dev/null | head -2 || echo "(none)"
+echo "--- starting and watching the mission ---"
+# ONE long-lived rclpy node publishes the start and watches to the latched
+# result. The `ros2 topic pub` / `ros2 topic echo --once` calls this used to
+# make lose DDS discovery against this stack: the start never arrived and the
+# tree sat in WAITING for the whole watch window, reported as "?" every line.
+python3 sim/run_mission_live.py --watch "$WATCH" --settle 10
+RUN_RC=$?
 
 echo ""
 echo "--- mission state transitions seen by the tree ---"
-grep -a "Mission state ->\|Mission result\|Mission FAILED\|Mission tree reset" "$LOG" | tail -25
+grep -a "Mission state ->\|Mission result\|Mission FAILED\|Mission tree reset" "$LOG" | tail -40
 
 echo ""
 echo "--- node deaths ---"
 grep -ac "process has died" "$LOG" 2>/dev/null || echo 0
+exit $RUN_RC

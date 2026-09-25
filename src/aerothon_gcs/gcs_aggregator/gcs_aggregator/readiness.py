@@ -43,6 +43,8 @@ ITEMS = (
     ("detectors", "Detector health"),
     ("actuator", "Winch health"),
     ("rc_failsafe", "RC failsafe"),
+    ("delivery_zone", "Delivery-zone boundary"),
+    ("geofence", "Arena geofence"),
 )
 
 DEFAULT_LIMITS = {
@@ -192,6 +194,25 @@ def evaluate(obs, limits=None):
         in_fs = bool(obs["rc_failsafe"])
         item("rc_failsafe", "RC failsafe", not in_fs, in_fs,
              "" if not in_fs else "RC failsafe active")
+
+    # ---- organiser-supplied delivery field ---- #
+    if "delivery_zone_valid" not in obs:
+        out.append(_unknown("delivery_zone", "Delivery-zone boundary"))
+    else:
+        ok = bool(obs["delivery_zone_valid"])
+        value = "loaded" if ok else "invalid"
+        item("delivery_zone", "Delivery-zone boundary", ok, value,
+             "" if ok else (obs.get("delivery_zone_reason") or
+                            "delivery-zone boundary is invalid"))
+
+    # ---- organiser-supplied arena geofence (rulebook: "will be provided") #
+    if "geofence_valid" not in obs:
+        out.append(_unknown("geofence", "Arena geofence"))
+    else:
+        ok = bool(obs["geofence_valid"])
+        item("geofence", "Arena geofence", ok, "loaded" if ok else "invalid",
+             "" if ok else (obs.get("geofence_reason") or
+                            "arena geofence is invalid"))
 
     return out
 

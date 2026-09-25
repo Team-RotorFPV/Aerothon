@@ -46,6 +46,12 @@ DESIRED = {
     2: 4.0,      # SYSTEM_TIME
     27: 10.0,    # RAW_IMU
     65: 5.0,     # RC_CHANNELS
+    # EKF_STATUS_REPORT. Nothing requested this, so MAVROS never
+    # published /mavros/estimator_status, the interlock's "EKF health"
+    # item reported "no data received" forever, and is_ready() -- which
+    # requires EVERY item -- could never go true. On the real aircraft
+    # as much as in simulation.
+    193: 2.0,    # EKF_STATUS_REPORT
 }
 
 

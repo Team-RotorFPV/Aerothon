@@ -24,12 +24,24 @@ from mission_bt.mission_tree import (
     StageAwareAbort,
     SetModeArm,
     Takeoff,
-    Goto,
     WinchDrop,
     LawnmowerSearch,
     build_root,
 )
 import py_trees
+
+
+class _Done:
+    """A service future that has already completed."""
+
+    def __init__(self, result):
+        self._result = result
+
+    def done(self):
+        return True
+
+    def result(self):
+        return self._result
 
 
 class MockMav:
@@ -62,6 +74,39 @@ class MockMav:
         self.armed_cmd = None
         self.avoidance_enabled = None
         self.winch_cmds = []
+        # Organiser inputs: delivery-zone boundary and arena geofence.
+        self.delivery_zone_local = (12.0, 52.0, -15.0, 15.0)
+        self.geofence_local = [(-9.5, -21.0), (58.0, -21.0), (58.0, 21.0),
+                               (-9.5, 21.0)]
+        self.fence_readback = None
+        self.fence_verified = False
+        self.fence_reason = ""
+        self.params = {}
+
+    def delivery_search_zone(self, clearance_m):
+        x0, x1, y0, y1 = self.delivery_zone_local
+        c = clearance_m
+        return (x0 + c, x1 - c, y0 + c, y1 - c)
+
+    def home_global(self):
+        return (-35.3632621, 149.1652374)
+
+    def home_local_xy(self):
+        return (0.0, 0.0)
+
+    def push_fence(self, items):
+        self.fence_readback = list(items)      # FC echoes it back intact
+        return _Done(MagicMock(success=True))
+
+    def set_param(self, name, value):
+        self.params[name] = value
+        return _Done(MagicMock(success=True))
+
+    def yaw(self):
+        return 0.0
+
+    def log(self, msg, warn=False):
+        pass
 
     def connected(self):
         return self.state.connected
@@ -151,11 +196,46 @@ class TestMissionBT(unittest.TestCase):
         self.assertEqual(status, py_trees.common.Status.FAILURE)
 
     def test_guard_disconnected_aborts(self):
-        """When FCU is disconnected, CheckAbortTriggered returns SUCCESS to trigger Abort."""
+        """An FCU link down for the whole grace trips the abort."""
+        now = [100.0]
         self.mav.state.connected = False
-        guard = CheckAbortTriggered(self.mav, self.node)
-        status = guard.update()
-        self.assertEqual(status, py_trees.common.Status.SUCCESS)
+        guard = CheckAbortTriggered(self.mav, self.node, clock=lambda: now[0])
+        self.assertEqual(guard.update(), py_trees.common.Status.FAILURE)
+        now[0] += guard.link_grace_s
+        self.assertEqual(guard.update(), py_trees.common.Status.SUCCESS)
+        self.assertIn("FCU disconnected", guard.feedback_message)
+
+    def test_guard_rides_out_a_heartbeat_blip(self):
+        """Arena 1001, batch E: MAVROS declared the link lost and had it back
+        0.27 s later, with the aircraft hovering armed in GUIDED. That must
+        not end the mission."""
+        now = [100.0]
+        guard = CheckAbortTriggered(self.mav, self.node, clock=lambda: now[0])
+        self.mav.state.connected = False
+        self.assertEqual(guard.update(), py_trees.common.Status.FAILURE)
+        now[0] += 0.27
+        self.mav.state.connected = True
+        self.assertEqual(guard.update(), py_trees.common.Status.FAILURE)
+        # A later drop gets its own full grace, not what is left of the first.
+        now[0] += 10.0
+        self.mav.state.connected = False
+        self.assertEqual(guard.update(), py_trees.common.Status.FAILURE)
+        now[0] += guard.link_grace_s * 0.9
+        self.assertEqual(guard.update(), py_trees.common.Status.FAILURE)
+        self.assertFalse(self.mav.abort_latched)
+
+    def test_land_does_not_complete_on_a_dropped_link(self):
+        """A dropped link reads as armed=False; that is not a landing."""
+        from mission_bt.mission_tree import Land
+        land = Land(self.mav)
+        land.initialise()
+        self.mav.state.armed = False
+        self.mav.state.connected = False
+        self.assertEqual(land.update(), py_trees.common.Status.RUNNING)
+        self.assertEqual(self.mav.results, [])
+        self.mav.state.connected = True
+        self.assertEqual(land.update(), py_trees.common.Status.SUCCESS)
+        self.assertEqual(self.mav.results[0][0], "COMPLETED")
 
     def test_guard_battery_critical_aborts(self):
         """When battery drops below threshold, CheckAbortTriggered returns SUCCESS."""
@@ -176,10 +256,16 @@ class TestMissionBT(unittest.TestCase):
         root = build_root(self.mav, self.node, self.defaults)
         root.setup_with_descendants()
         
-        # First tick should evaluate SetModeArm and set mode to GUIDED
-        root.tick_once()
+        # The pre-flight stages (delivery zone, fence push/read-back/params)
+        # take a few ticks; SetModeArm must then ask for GUIDED.
+        for _ in range(10):
+            root.tick_once()
+            if self.mav.last_mode:
+                break
         self.assertEqual(self.mav.last_mode, "GUIDED")
         self.assertNotEqual(self.mav.last_mode, "RTL")
+        self.assertEqual(self.mav.params.get("FENCE_ENABLE"), 1)
+        self.assertTrue(self.mav.fence_verified)
 
     def test_root_tree_preempts_to_abort_when_aborted(self):
         """Verify that when an abort is triggered, the tree immediately invokes StageAwareAbort."""

@@ -301,6 +301,9 @@ class AlignToBannerTests(unittest.TestCase):
             def pos(self):
                 return (1.0, 2.0, 3.0)
 
+            def alt(self):
+                return self.pos()[2]
+
             def yaw(self):
                 return self._yaw
 
@@ -705,6 +708,9 @@ class BannerFailureIsDiagnosableTests(unittest.TestCase):
 
             def pos(self):
                 return (1.0, 2.0, 3.0)
+
+            def alt(self):
+                return self.pos()[2]
 
             def yaw(self):
                 return self._yaw

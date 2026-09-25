@@ -50,13 +50,12 @@ import math
 
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data
 import cv2
 import numpy as np
 
 from perception_banner.word_reader import reads_banner
 from cv_bridge import CvBridge
-from geometry_msgs.msg import PoseStamped, Vector3
+from geometry_msgs.msg import Vector3
 from sensor_msgs.msg import Image
 from std_msgs.msg import String
 
@@ -287,7 +286,9 @@ class BannerNode(Node):
         # frame-edge speck and the 0.75 aspect rejection. Reverted rather than
         # tuned; the single scale below is the configuration that measures
         # clean on the captured frames.
-        attempts = [(name, self.lettering_mask(roi, dark=dark))
+        # Both sides judge against the same board: measure it once.
+        ref = self._board_reference(roi)
+        attempts = [(name, self.lettering_mask(roi, dark=dark, ref=ref))
                     for name, dark in (("brightness", False),
                                        ("inverse", True))]
         if bool(self._g('stroke_path')):
@@ -334,7 +335,6 @@ class BannerNode(Node):
         counts as the banner."""
         x, y, bw, bh = bbox
         bh_frame, bw_frame = frame.shape[:2]
-        roi = frame[y:y + bh, x:x + bw]
 
         n_lab, _, stats, _ = cv2.connectedComponentsWithStats(white, connectivity=8)
         min_area = float(self._g('min_component_frac')) * bw * bh
@@ -414,36 +414,6 @@ class BannerNode(Node):
 
         return True, "", info, board
 
-    def read_lettering(self, white, stats, comps):   # noqa: D401  (unused)
-        """DEPRECATED -- superseded by word_reader.reads_banner().
-
-        Kept briefly so the shape of what it did stays visible next to what
-        replaced it: it segmented the lettering into blobs and classified each
-        against a 5x7 template. That is why a fragmenting board produced
-        eighteen 'letters', and why the operator saw '??N?E??????N?' presented
-        as a reading.
-        """
-        """(confirmed, text, matched) from the white blobs already segmented.
-
-        Left-to-right over the components gate 3 found, resampled to the 5x7
-        templates in perception_banner.glyphs. Costs about a millisecond and
-        adds no dependency -- it answers one question, "do these blobs spell
-        AEROTHON", which is the question seed 1001 needs answered when the
-        aspect gate rejects the board from the delivery-zone side.
-        """
-        boxes = sorted(
-            ((stats[i, cv2.CC_STAT_LEFT], stats[i, cv2.CC_STAT_TOP],
-              stats[i, cv2.CC_STAT_WIDTH], stats[i, cv2.CC_STAT_HEIGHT])
-             for i in comps),
-            key=lambda b: b[0])
-        patches = [white[by:by + bh_, bx:bx + bw_]
-                   for bx, by, bw_, bh_ in boxes
-                   if bw_ > 0 and bh_ > 0]
-        if len(patches) < int(self._g('min_text_letters')):
-            return False, "", 0
-        return reads_as_target(patches,
-                               min_letters=int(self._g('min_text_letters')))
-
     def lettering_mask_stroke(self, roi):
         """Lettering by LOCAL contrast, so a shadow cannot hide it.
 
@@ -489,18 +459,10 @@ class BannerNode(Node):
         mask = cv2.bitwise_and(mask, cv2.bitwise_not(board))
         return cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
 
-    def lettering_mask(self, roi, dark=False, close_frac=None):
-        """Pixels that are lettering ON THIS BOARD, judged against the board.
-
-        The letters are whatever is markedly brighter and markedly less
-        saturated than the green they sit on. That holds under studio light,
-        flat ambient sim light, overcast and direct sun; an absolute
-        "V >= 170" holds under exactly one of those, and a live frame proved
-        it (`components: 0` for a banner filling the image).
-
-        The absolute floor/ceiling are kept as a backstop so a dark green board
-        cannot make near-black pixels count as lettering.
-        """
+    def _board_reference(self, roi, close_frac=None):
+        """What lettering_mask judges against, for one ROI: (hsv, board,
+        v_board, v_min, s_max, solid). Independent of which side of the board
+        the lettering falls, so identity() computes it once for both."""
         hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
         sat, val = hsv[:, :, 1], hsv[:, :, 2]
 
@@ -516,6 +478,30 @@ class BannerNode(Node):
             v_min = float(self._g('white_v_min'))
             s_max = float(self._g('white_s_max'))
             v_board = 255.0            # no board reference: bright path only
+
+        # Letters are holes in the green panel: see lettering_mask for why
+        # the board is closed with a kernel scaled to the region.
+        cf = (float(self._g('board_close_frac')) if close_frac is None
+              else float(close_frac))
+        k = int(max(3, roi.shape[0] * cf)) | 1
+        solid = cv2.morphologyEx(board, cv2.MORPH_CLOSE,
+                                 np.ones((k, k), np.uint8))
+        return hsv, board, v_board, v_min, s_max, solid
+
+    def lettering_mask(self, roi, dark=False, close_frac=None, ref=None):
+        """Pixels that are lettering ON THIS BOARD, judged against the board.
+
+        The letters are whatever is markedly brighter and markedly less
+        saturated than the green they sit on. That holds under studio light,
+        flat ambient sim light, overcast and direct sun; an absolute
+        "V >= 170" holds under exactly one of those, and a live frame proved
+        it (`components: 0` for a banner filling the image).
+
+        The absolute floor/ceiling are kept as a backstop so a dark green board
+        cannot make near-black pixels count as lettering.
+        """
+        hsv, board, v_board, v_min, s_max, solid = (
+            ref if ref is not None else self._board_reference(roi, close_frac))
 
         # CONTRAST, in either direction -- not "brighter".
         #
@@ -561,12 +547,8 @@ class BannerNode(Node):
         # too, but a hundred times larger. Closing the green mask with a
         # kernel scaled to the region fills the letters and leaves the opening
         # open, which separates the two without knowing anything about this
-        # particular gate.
-        cf = (float(self._g('board_close_frac')) if close_frac is None
-              else float(close_frac))
-        k = int(max(3, roi.shape[0] * cf)) | 1
-        solid = cv2.morphologyEx(board, cv2.MORPH_CLOSE,
-                                 np.ones((k, k), np.uint8))
+        # particular gate. That closed board is `solid`, from
+        # _board_reference.
         confined = cv2.bitwise_and(mask, solid)
         # A GUARD, not a filter. On a board that fills its own region -- the
         # rendered banner, and every synthetic fixture -- the closed green
@@ -644,12 +626,23 @@ class BannerNode(Node):
         mask = self.green_mask(frame)
         cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         detail["candidates"] = len(cnts)
+        # THE LARGEST GREEN REGION, identified or not. A board seen edge-on
+        # shows no lettering -- nothing here can call it the banner -- but it
+        # is still where the gate is. The mission orbits it to get a face-on
+        # view (banner_orbit.py); without this it only knew "something green
+        # somewhere" and searched the wrong way.
+        if cnts:
+            big = max(cnts, key=cv2.contourArea)
+            gx, gy, gw, gh = cv2.boundingRect(big)
+            detail["green_px"] = [int(gx), int(gy), int(gw), int(gh)]
+            detail["green_area_px"] = int(cv2.contourArea(big))
+            detail["green_bearing"] = round(((gx + gw / 2.0) - w / 2.0) / (w / 2.0), 3)
+            detail["image_wh"] = [int(w), int(h)]
 
         best = None
         for c in sorted(cnts, key=cv2.contourArea, reverse=True)[:5]:
             area = cv2.contourArea(c)
             x, y, bw, bh = cv2.boundingRect(c)
-            aspect = bw / max(1, bh)
             # Rejections used to be SILENT: a candidate dropped on area or
             # aspect left detail["reason"] empty, so the panel showed
             # "identified: false, reason: ''" and gave an operator nothing to
@@ -841,10 +834,13 @@ class BannerNode(Node):
 
         self.pub.publish(out)
         self.pub_detail.publish(String(data=json.dumps(detail)))
-        try:
-            self.pub_annot.publish(self.bridge.cv2_to_imgmsg(frame, encoding='bgr8'))
-        except Exception:  # noqa: BLE001
-            pass
+        # The boxes above are drawn regardless -- the OCR reads from this same
+        # frame -- but the 2.7 MB conversion is only for a GCS that watches.
+        if self.pub_annot.get_subscription_count():
+            try:
+                self.pub_annot.publish(self.bridge.cv2_to_imgmsg(frame, encoding='bgr8'))
+            except Exception:  # noqa: BLE001
+                pass
 
 
 def main():

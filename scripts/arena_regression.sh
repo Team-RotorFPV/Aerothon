@@ -27,13 +27,18 @@ ROOT="$(dirname "$SCRIPT_DIR")"
 cd "$ROOT" || exit 1
 
 N=5
-WATCH=420
+# Wall seconds per arena. A full mission is ~5 simulated minutes, which at
+# the ~0.28 real-time factor of a software-rendered WSL host is ~45 minutes
+# of wall time; 420 s cut every run off mid-search.
+WATCH=5400
+FIRST=1001
 OUT="${AEROTHON_REGRESSION_DIR:-/tmp/aerothon_arena_regression}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -n|--runs) N="$2"; shift 2 ;;
         --watch)   WATCH="$2"; shift 2 ;;
+        --first-seed) FIRST="$2"; shift 2 ;;
         --out)     OUT="$2"; shift 2 ;;
         *) echo "unknown arg: $1"; exit 2 ;;
     esac
@@ -69,7 +74,7 @@ fi
 
 mkdir -p "$OUT"
 SUMMARY="$OUT/summary.tsv"
-printf 'seed\ttarget\toutcome\treason\tduration_s\tlog\n' > "$SUMMARY"
+printf 'seed\ttarget\toutcome\tgrade\treason\tduration_s\tlog\n' > "$SUMMARY"
 
 echo "=================================================================="
 echo " PHASE 11 ARENA REGRESSION   runs=$N   watch=${WATCH}s"
@@ -78,7 +83,7 @@ echo "=================================================================="
 
 pass=0
 for i in $(seq 1 "$N"); do
-    SEED=$((1000 + i))
+    SEED=$((FIRST + i - 1))
     LOG="$OUT/arena_${SEED}.log"
     echo ""
     echo "--- arena $i/$N (seed $SEED) ---"
@@ -121,11 +126,34 @@ for i in $(seq 1 "$N"); do
     ARENA=$(grep -am1 "RANDOMISED ARENA:" "$LOG" | cut -c1-160 || true)
     [[ -n "$ARENA" ]] && echo "    $ARENA" >> "$OUT/layouts.txt"
 
-    printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
-        "$SEED" "$TARGET" "$RESULT" "$REASON" "$DUR" "$LOG" >> "$SUMMARY"
-    echo "    target=$TARGET  outcome=$RESULT  ${DUR}s"
+    # GRADE THE TRACK, not just the outcome line. COMPLETED says the tree ran
+    # to the end; it does not say the aircraft stayed off red ground, inside
+    # the geofence, under the ceiling, or dropped on the pad. check_track
+    # answers those from the recorded track against this arena's layout.
+    cp /tmp/aerothon_track.csv "$OUT/arena_${SEED}_track.csv" 2>/dev/null
+    # The stack's own log (tree decisions, routing, red-zone map). It is
+    # overwritten by the next arena, and without it a graded failure cannot
+    # be diagnosed after the fact.
+    cp /tmp/aerothon_live_mission.log "$OUT/arena_${SEED}_stack.log" 2>/dev/null
+    cp /tmp/aerothon_arena_layout.json "$OUT/arena_${SEED}_layout.json" 2>/dev/null
+    GRADE="UNGRADED"
+    if [[ -f "$OUT/arena_${SEED}_track.csv" && -f "$OUT/arena_${SEED}_layout.json" ]]; then
+        if python3 sim/check_track.py --track "$OUT/arena_${SEED}_track.csv" \
+                --layout "$OUT/arena_${SEED}_layout.json" \
+                --target "$(tr 'A-E' 'a-e' <<<"$TARGET")" \
+                > "$OUT/arena_${SEED}_grade.txt" 2>&1; then
+            GRADE="GRADE_PASS"
+        else
+            GRADE="GRADE_FAIL"
+        fi
+    fi
+
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$SEED" "$TARGET" "$RESULT" "$GRADE" "$REASON" "$DUR" "$LOG" >> "$SUMMARY"
+    echo "    target=$TARGET  outcome=$RESULT  grade=$GRADE  ${DUR}s"
     echo "    reason: $REASON"
-    [[ "$RESULT" == "COMPLETED" ]] && pass=$((pass + 1))
+    grep -a "\[FAIL\]" "$OUT/arena_${SEED}_grade.txt" 2>/dev/null | sed 's/^/    /'
+    [[ "$RESULT" == "COMPLETED" && "$GRADE" == "GRADE_PASS" ]] && pass=$((pass + 1))
 done
 
 # Tear the last arena's stack down. It is left running otherwise, which holds

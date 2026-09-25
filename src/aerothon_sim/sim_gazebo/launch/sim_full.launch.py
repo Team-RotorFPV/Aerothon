@@ -41,9 +41,33 @@ def generate_launch_description():
     # the firmware was built with DDS support.
     pkg_ardupilot_sitl = get_package_share_directory('ardupilot_sitl')
     pkg_ardupilot_gazebo = get_package_share_directory('ardupilot_gazebo')
+    # Stage our SITL defaults on a path with no spaces in it.
+    #
+    # ardupilot_sitl builds the arducopter command with shell=True and does not
+    # quote its arguments, so every path handed to it must be space-free. This
+    # workspace lives under "/mnt/d/MY DOCUMENTS/...", which split the
+    # comma-separated --defaults list mid-path; SITL died on startup with
+    # "PANIC: Failed to load defaults", and with no flight controller the whole
+    # stack reported "no data received" on every MAVLink-derived interlock item
+    # -- a failure that names the parameter file nowhere. The two upstream
+    # .parm files survive only because their own install paths are clean.
+    sitl_params = os.path.join(tempfile.gettempdir(), 'aerothon_sitl.parm')
+    shutil.copyfile(os.path.join(pkg_sim, 'config', 'aerothon_sitl.parm'),
+                    sitl_params)
+
+    failsafe_params = os.path.join(tempfile.gettempdir(),
+                                   'aerothon_failsafe.parm')
+    shutil.copyfile(os.path.join(pkg_sim, 'config', 'aerothon_failsafe.parm'),
+                    failsafe_params)
+
     sitl_defaults = ','.join([
         os.path.join(pkg_ardupilot_sitl, 'config', 'default_params', 'copter.parm'),
         os.path.join(pkg_ardupilot_gazebo, 'config', 'gazebo-iris-gimbal.parm'),
+        # Last wins: competition-representative battery and GPS, so the Q27
+        # interlock sees what the real aircraft presents.
+        sitl_params,
+        # Rulebook 5.4 item 6 fail-safes, identical to the aircraft's file.
+        failsafe_params,
     ])
 
     world_template = os.path.join(pkg_sim, 'worlds', 'mission2.sdf')
@@ -136,6 +160,17 @@ def generate_launch_description():
             # topic_tools is optional in minimal ROS installs; the mission
             # stack already publishes its own TF tree.
             'use_gz_tf': use_gz_tf,
+            # Give the mission's router its own SITL channel.
+            #
+            # SERIAL0 belongs to MAVProxy, which the upstream bringup starts
+            # unconditionally and which re-requests its streams at its 4 Hz
+            # default. Chaining the router behind MAVProxy's --out meant every
+            # SET_MESSAGE_INTERVAL the stack issued was clobbered on MAVProxy's
+            # next sweep: LOCAL_POSITION_NED sat at 4 Hz against the 50 Hz the
+            # setpoint loop asks for, GPS_RAW_INT never arrived, and the Q27
+            # interlock could not see HDOP. SERIAL1 is a separate channel with
+            # its own stream-rate state, so the two no longer fight.
+            'serial1': 'udpclient:127.0.0.1:14560',
             # Use MAVLink SITL/MAVROS. DDS agent is an optional deployment
             # path and is not required for this competition loop.
             'use_dds_agent': 'false',
