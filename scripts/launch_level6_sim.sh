@@ -364,6 +364,16 @@ echo "[SIM] camera ${AEROTHON_CAMERA_W:-1280}x${AEROTHON_CAMERA_H:-720}" \
      "| start QR ${AEROTHON_START_QR_M:-2.2} m" \
      "| target QR ${AEROTHON_TARGET_QR_M:-3.0} m"
 
+# The airframe: the team's quad from its CAD (default) or the Iris variant.
+# The mission launch reads the same two variables, so the camera the model
+# renders and the lens the perception stack assumes cannot disagree.
+export AEROTHON_AIRFRAME="${AEROTHON_AIRFRAME:-cad}"
+if [[ "$AEROTHON_AIRFRAME" == "iris" ]]; then
+    export AEROTHON_CAMERA_HFOV="${AEROTHON_CAMERA_HFOV:-1.0472}"
+else
+    export AEROTHON_CAMERA_HFOV="${AEROTHON_CAMERA_HFOV:-0.851919}"
+fi
+echo "[SIM] airframe $AEROTHON_AIRFRAME, camera HFOV $AEROTHON_CAMERA_HFOV rad"
 python3 "$SCRIPT_DIR/materialize_vehicle_model.py" \
     --source "$ARDUPILOT_GAZEBO_PREFIX/share/ardupilot_gazebo/models/iris_with_gimbal/model.sdf" \
     --output-root "$VEHICLE_MODELS_DIR"

@@ -1778,6 +1778,22 @@ def offset_to_ground(mav, off, hfov_rad=1.0472, image_w_px=1280,
             y + fwd * math.sin(psi) - right * math.cos(psi))
 
 
+def note_marker(mav, **camera):
+    """Remember where ANY marker in view is on the ground.
+
+    The start marker is found with a narrow camera from above the take-off
+    point: on the team airframe's C270 (48.8 deg) a 2.2 m marker 0.9 m ahead
+    sits on the frame edge, is seen for a frame and lost, and CenterStartQR
+    then held where it was -- where the marker is out of view -- until it
+    timed out. With a fix it flies to where the marker was seen.
+    """
+    off = getattr(mav, "qr_offset", None)
+    if off is not None and getattr(off, "z", 0.0) > 0.0:
+        g = offset_to_ground(mav, off, **camera)
+        if g is not None:
+            mav.marker_xy = g
+
+
 def note_target(mav, **camera):
     """Remember where the MATCHED pad is on the ground, whenever it is seen.
 
@@ -1851,6 +1867,8 @@ class CenterOnQR(py_trees.behaviour.Behaviour):
 
         if self.require_match:
             note_target(self.mav, **self.camera)
+        else:
+            note_marker(self.mav, **self.camera)
         if not self._visible():
             self._held = 0
             self.feedback_message = ("matched target not in frame"
@@ -1859,8 +1877,8 @@ class CenterOnQR(py_trees.behaviour.Behaviour):
             # Go to where the matched pad was last fixed on the ground; with
             # no fix, hold where the target was last seen rather than drift.
             x, y, z = self.mav.pos()
-            fix = (getattr(self.mav, "target_xy", None)
-                   if self.require_match else None)
+            fix = getattr(self.mav, "target_xy" if self.require_match
+                          else "marker_xy", None)
             if fix is not None:
                 self._hold_xy = fix
                 self.feedback_message += (f"; returning to its fix "
@@ -1937,9 +1955,12 @@ class FindStartQR(py_trees.behaviour.Behaviour):
     """
 
     def __init__(self, mav, start_alt, floor_alt=2.0, step=1.0,
-                 dwell_ticks=40):
+                 dwell_ticks=40, hfov_rad=1.0472, image_w_px=1280,
+                 image_h_px=720):
         super().__init__("FindStartQR")
         self.mav = mav
+        self.camera = dict(hfov_rad=hfov_rad, image_w_px=image_w_px,
+                           image_h_px=image_h_px)
         self.start_alt = start_alt
         self.floor_alt = floor_alt
         self.step = step
@@ -1959,6 +1980,8 @@ class FindStartQR(py_trees.behaviour.Behaviour):
         self.mav.goto(self._x, self._y, self._alt, self.mav.yaw())
 
         if self.mav.qr_visible():
+            # Where it is, for CenterStartQR if it slips out of frame again.
+            note_marker(self.mav, **self.camera)
             self.feedback_message = f"marker visible at {self._alt:.1f} m"
             return py_trees.common.Status.SUCCESS
 
@@ -2050,6 +2073,9 @@ class ScanStartQR(py_trees.behaviour.Behaviour):
                                          f"holding over it")
                 return py_trees.common.Status.RUNNING
             self.mav.set_target(self._confirmed)
+            # The home pad's own position, for the landing: the aircraft is
+            # centred over it here. Other markers overwrite `marker_xy` later.
+            self.mav.home_marker_xy = tuple(self.mav.pos()[:2])
             self.feedback_message = f"target={self._confirmed}"
             return py_trees.common.Status.SUCCESS
 
@@ -2759,7 +2785,7 @@ class LawnmowerSearch(py_trees.behaviour.Behaviour):
                  modules=33, px_floor=5.3, overlap=0.30, clearance_m=1.5,
                  exclusions=None, search_budget_m=0.0, min_step_m=4.0,
                  hover_s=5.0, clock=None, image_height_px=None,
-                 crab=False, search_speed_mps=None):
+                 crab=False, search_speed_mps=None, fix_wait_ticks=10):
         """`zone` may be an (x0, x1, y0, y1) tuple or a CALLABLE returning one.
 
         `crab` flies the lanes yawed 90 degrees to their direction, so the
@@ -2792,6 +2818,10 @@ class LawnmowerSearch(py_trees.behaviour.Behaviour):
                                         * float(image_height_px)
                                         / float(image_width_px))
         self.search_speed_mps = search_speed_mps
+        # Ticks to hold, on a match, for the offset that places the pad.
+        self.fix_wait_ticks = int(fix_wait_ticks)
+        self._fix_wait = 0
+        self._fix_hold = None
         self._speed_sent = False
         self._plan_args = dict(image_width_px=image_width_px,
                                hfov_rad=hfov_rad, marker_m=marker_m,
@@ -2956,6 +2986,8 @@ class LawnmowerSearch(py_trees.behaviour.Behaviour):
         return list(src() if callable(src) else src)
 
     def initialise(self):
+        self._fix_wait = 0
+        self._fix_hold = None
         self.i = 0
         self.skipped = 0
         self.router.reset()
@@ -3171,7 +3203,23 @@ class LawnmowerSearch(py_trees.behaviour.Behaviour):
                     image_w_px=self._plan_args['image_width_px'],
                     image_h_px=self._image_h)
         if self.mav.qr_matched:
+            # A MATCH WITHOUT A FIX IS NOT DONE. With the C270 the pad is
+            # often matched at the frame edge, and the match can be handled
+            # before the offset that places it: the sweep then ended with no
+            # idea where the pad was, CenterOnTarget held the spot it stopped
+            # at -- the pad just out of frame -- and timed out. Stop here and
+            # give the offset a moment (2 s) to arrive.
+            if getattr(self.mav, "target_xy", None) is None                     and self._fix_wait < self.fix_wait_ticks:
+                self._fix_wait += 1
+                x, y, z = self.mav.pos()
+                if self._fix_hold is None:
+                    self._fix_hold = (x, y, z, self.mav.yaw())
+                self.mav.goto(*self._fix_hold)
+                self.feedback_message = "matched; waiting for the pad's position"
+                return py_trees.common.Status.RUNNING
             return py_trees.common.Status.SUCCESS
+        self._fix_wait = 0
+        self._fix_hold = None
         if self.hover.tick(self.mav):
             self.feedback_message = (f"holding over '{self.hover.payload}' "
                                      f"before resuming the sweep")
@@ -4294,6 +4342,12 @@ class PrecisionDescent(py_trees.behaviour.Behaviour):
             min_track_altitude(marker_m, hfov_rad, image_w_px, image_h_px)
             if marker_m else 0.0)
         self.commit_alt = max(commit_alt, self.track_floor)
+        # ROOM TO LOCK. The descent tracks down to commit_alt, and commit_alt
+        # is where the marker stops fitting in the frame -- 4.96 m for a 2.2 m
+        # marker in the C270's 28.6 deg front-to-back field. Starting at 5 m
+        # left 4 cm of tracking: on the team airframe it never locked, and
+        # landed 2.7 m from the pad. Start at least this far above it.
+        self.start_alt = max(start_alt, self.commit_alt + 1.5)
         self.step_m = step_m
         self.tol = tol
         self.gain = gain
@@ -4348,6 +4402,15 @@ class PrecisionDescent(py_trees.behaviour.Behaviour):
             self._lost += 1
             if self._lost == self.lost_grace + 1:
                 self.reacquisitions += 1
+            # WHERE THE PAD IS, not where the aircraft is. GPS puts it over
+            # home; the pad was read and centred on at the start, 1 m from
+            # home in the shipped layout -- at the frame edge from here.
+            fix = getattr(self.mav, "home_marker_xy", None)
+            if fix is not None and math.hypot(fix[0] - x, fix[1] - y) > 0.3:
+                self.mav.goto(fix[0], fix[1], max(z, self.start_alt), psi)
+                self.feedback_message = (f"marker not in view; going to the "
+                                         f"pad's fix ({fix[0]:.1f}, {fix[1]:.1f})")
+                return py_trees.common.Status.RUNNING
             if self._lost > self.lost_grace:
                 # Climb to widen the footprint and look again. Descending
                 # blind would make an ordinary landing look like a precise one.
@@ -4491,8 +4554,16 @@ def build_root(mav, node, p):
         SetCameraPose("CameraNadirForQR", mav, "NADIR"),
         # Phase 3: find the marker, centre on it, THEN decode. Replaces a
         # hardcoded hover over a guessed scan_pose (geometry audit A4).
-        FindStartQR(mav, p['takeoff_alt'], floor_alt=p.get('scan_floor_alt', 2.0)),
-        CenterOnQR("CenterStartQR", mav),
+        FindStartQR(mav, p['takeoff_alt'], floor_alt=p.get('scan_floor_alt', 2.0),
+                    hfov_rad=p.get('camera_hfov', 1.0472),
+                    image_w_px=p.get('image_width_px', 1280),
+                    image_h_px=p.get('image_height_px', 720)),
+        # The lens it was built without: every centring step was scaled for a
+        # 60 deg camera, 25 % long on the C270.
+        CenterOnQR("CenterStartQR", mav,
+                   hfov_rad=p.get('camera_hfov', 1.0472),
+                   image_w_px=p.get('image_width_px', 1280),
+                   image_h_px=p.get('image_height_px', 720)),
         ScanStartQR(mav, hover_s=p.get('qr_hover_s', 5.0), clock=clock),
         SetCameraPose("CameraForwardForCorridor", mav, "FORWARD"),
         # Phase 4: the banner marks the corridor mouth. Aligning to it replaces

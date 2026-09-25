@@ -1,18 +1,27 @@
 #!/usr/bin/env python3
-"""Build the competition Iris variant from the maintained ArduPilot model.
+"""Build the vehicle the simulator flies.
 
-The flight dynamics and rotor plugins remain upstream ArduPilot. Only the
-stock three-axis gimbal is removed and replaced by the actual competition
-layout: a fixed top RPLidar C1 and a front Logitech-style webcam on one pitch
-servo.
+    --airframe cad   (default) the team's real airframe, from its CAD: see
+                     scripts/build_cad_vehicle.py and scripts/cad_to_gazebo.py
+    --airframe iris  the maintained ArduPilot Iris with the stock gimbal
+                     replaced by a top RPLidar C1 and a front webcam on one
+                     pitch servo -- the vehicle every run before the team's
+                     CAD arrived was flown on
+
+Either way the flight dynamics and rotor plugins are upstream ArduPilot's, and
+the model lands in the same world slot (model://aerothon_iris_c1_webcam).
 """
 
 from __future__ import annotations
 
 import argparse
+import math
 import os
+import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 
 COMPETITION_HARDWARE = """
@@ -239,14 +248,44 @@ def main() -> None:
                         default=int(os.environ.get("AEROTHON_CAMERA_W", 1280)))
     parser.add_argument("--camera-height", type=int,
                         default=int(os.environ.get("AEROTHON_CAMERA_H", 720)))
+    parser.add_argument("--airframe", choices=("cad", "iris"),
+                        default=os.environ.get("AEROTHON_AIRFRAME", "cad"))
+    parser.add_argument("--airframe-dir", type=Path, default=Path(__file__).resolve().parent.parent
+                        / "src" / "aerothon_sim" / "sim_gazebo" / "models" / "aerothon_quad")
+    # Unset: the airframe's own camera (C270 48.8 deg for cad, 60 deg for iris).
     parser.add_argument("--camera-hfov", type=float,
-                        default=float(os.environ.get("AEROTHON_CAMERA_HFOV", 1.0472)))
+                        default=(float(os.environ["AEROTHON_CAMERA_HFOV"])
+                                 if "AEROTHON_CAMERA_HFOV" in os.environ else None))
+    # The real LD06 mount, if it differs from the CAD: metres up / forward.
+    parser.add_argument("--lidar-raise", type=float,
+                        default=float(os.environ.get("AEROTHON_LIDAR_RAISE_M", 0.0)))
+    parser.add_argument("--lidar-forward", type=float,
+                        default=float(os.environ.get("AEROTHON_LIDAR_FORWARD_M", 0.0)))
     # Points per revolution. 500 is the RPLidar C1's own figure (5000 Hz
     # sampling / 10 Hz rotation) and the dominant simulator cost; see the
     # comment on the <scan> block above.
     parser.add_argument("--lidar-samples", type=int,
-                        default=int(os.environ.get("AEROTHON_LIDAR_SAMPLES", 500)))
+                        default=(int(os.environ["AEROTHON_LIDAR_SAMPLES"])
+                                 if "AEROTHON_LIDAR_SAMPLES" in os.environ else None))
     args = parser.parse_args()
+
+    if args.airframe == "cad":
+        # LD06: 4500 samples/s at 10 Hz is 450 points a revolution.
+        from build_cad_vehicle import build
+        mdir, info = build(args.airframe_dir, args.source.parent.parent,
+                           args.output_root, args.camera_width, args.camera_height,
+                           args.camera_hfov, args.lidar_samples or 450,
+                           args.lidar_raise, args.lidar_forward)
+        print(mdir)
+        print("[vehicle] team airframe: rotor top speed "
+              f"{info['w_max_rad_s']:.0f} rad/s, camera HFOV "
+              f"{math.degrees(info['hfov']):.1f} deg, lidar at "
+              f"{tuple(round(v, 3) for v in info['lidar_pose'])}")
+        return
+    if args.camera_hfov is None:
+        args.camera_hfov = 1.0472
+    if args.lidar_samples is None:
+        args.lidar_samples = 500
 
     tree = ET.parse(args.source)
     root = tree.getroot()

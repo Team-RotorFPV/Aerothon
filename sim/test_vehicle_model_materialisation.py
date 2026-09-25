@@ -99,7 +99,7 @@ def materialise(source_xml):
     source = os.path.join(tmp, "model.sdf")
     with open(source, "w", encoding="utf-8") as handle:
         handle.write(source_xml)
-    subprocess.run([sys.executable, _SCRIPT, "--source", source,
+    subprocess.run([sys.executable, _SCRIPT, "--airframe", "iris", "--source", source,
                     "--output-root", os.path.join(tmp, "out")],
                    check=True, capture_output=True)
     out = os.path.join(tmp, "out", "aerothon_iris_c1_webcam", "model.sdf")

@@ -225,9 +225,14 @@ class QrNode(Node):
             # controller can act on a marker before the target is known.
             offset.z = 1.0 if matched else 0.5
 
+        # WHERE before WHAT: the mission ends its sweep on `matched`, and a
+        # match handled before its own offset left it with no ground fix for
+        # the pad (team airframe, flight 4: matched at the frame edge, stopped,
+        # never saw the pad again). Cross-topic order is not guaranteed, so the
+        # sweep also waits for the fix; this makes the wait the rare case.
+        self.pub_offset.publish(offset)
         self.pub_decoded.publish(String(data=accepted))
         self.pub_matched.publish(Bool(data=matched))
-        self.pub_offset.publish(offset)
 
         rng = self.expected_px_range()
         self.pub_detail.publish(String(data=json.dumps({

@@ -13,7 +13,7 @@ from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, TimerAction
 from launch.conditions import IfCondition
-from launch.substitutions import LaunchConfiguration, Command
+from launch.substitutions import Command, EnvironmentVariable, LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.descriptions import ParameterValue
 
@@ -26,6 +26,8 @@ def generate_launch_description():
     target = LaunchConfiguration('target')
     launch_rviz = LaunchConfiguration('rviz')
     launch_slam = LaunchConfiguration('slam')
+    airframe = LaunchConfiguration('airframe')
+    camera_hfov = ParameterValue(LaunchConfiguration('camera_hfov'), value_type=float)
 
     pkg_bringup = get_package_share_directory('mission_bringup')
     rviz_config_file = os.path.join(pkg_bringup, 'config', 'aerothon_slam.rviz')
@@ -33,7 +35,8 @@ def generate_launch_description():
     # URDF Robot description for RViz & TF
     pkg_desc = get_package_share_directory('uav_description')
     xacro_file = os.path.join(pkg_desc, 'urdf', 'uav.urdf.xacro')
-    robot_description = ParameterValue(Command(['xacro "', xacro_file, '"']), value_type=str)
+    robot_description = ParameterValue(
+        Command(['xacro "', xacro_file, '" airframe:=', airframe]), value_type=str)
 
     args = [
         DeclareLaunchArgument('use_sim', default_value='true', description='Use sim time (Gazebo)'),
@@ -41,6 +44,16 @@ def generate_launch_description():
         DeclareLaunchArgument('image_topic', default_value='/image_raw', description='Camera image topic'),
         DeclareLaunchArgument('scan_topic', default_value='/scan', description='LaserScan topic'),
         DeclareLaunchArgument('target', default_value='', description='Pre-assigned target QR (empty=dynamic)'),
+        # The airframe and its camera. The team's quad (cad) carries a Logitech
+        # C270: 55 deg diagonal is 48.8 deg across a 16:9 frame. Banner range,
+        # lane spacing and red-zone projection are all computed from this, so
+        # it has to be the lens actually fitted.
+        DeclareLaunchArgument('airframe', default_value=EnvironmentVariable(
+            'AEROTHON_AIRFRAME', default_value='cad'),
+            description='cad (team airframe) | iris (ArduPilot Iris variant)'),
+        DeclareLaunchArgument('camera_hfov', default_value=EnvironmentVariable(
+            'AEROTHON_CAMERA_HFOV', default_value='0.851919'),
+            description='Camera horizontal field of view, rad (C270: 0.851919)'),
         DeclareLaunchArgument('rviz', default_value='true', description='Launch RViz 2 with SLAM/TF displays'),
         DeclareLaunchArgument('slam', default_value='true', description='Launch async slam_toolbox 2D SLAM node'),
         DeclareLaunchArgument('stream_rate_keeper', default_value='true',
@@ -81,7 +94,8 @@ def generate_launch_description():
 
     banner = Node(
         package='perception_banner', executable='banner_node', output='screen',
-        parameters=[{'image_topic': image_topic, 'use_sim_time': use_sim}],
+        parameters=[{'image_topic': image_topic, 'use_sim_time': use_sim,
+                     'camera_hfov': camera_hfov}],
     )
 
     # One camera feed with every detector's findings drawn on it. The GCS
@@ -94,7 +108,8 @@ def generate_launch_description():
 
     redzone = Node(
         package='perception_redzone', executable='redzone_node', output='screen',
-        parameters=[{'image_topic': image_topic, 'use_sim_time': use_sim}],
+        parameters=[{'image_topic': image_topic, 'use_sim_time': use_sim,
+                     'camera_hfov': camera_hfov}],
     )
 
     # Is the delivered payload on the ground? WinchDrop confirms every drop
@@ -163,7 +178,7 @@ def generate_launch_description():
     # 5. Autonomous Behavior Tree Mission Executive
     mission = Node(
         package='mission_bt', executable='mission_tree', output='screen',
-        parameters=[{'use_sim_time': use_sim}],
+        parameters=[{'use_sim_time': use_sim, 'camera_hfov': camera_hfov}],
     )
 
     # 6. GCS Aggregator WebSocket Server (port 8765)

@@ -107,7 +107,84 @@ class WinchGazeboBackendTests(unittest.TestCase):
         self.assertAlmostEqual(self.payout[-1], self.node.payout, places=6)
         self.assertEqual(self.detach, [])
 
+    def _hook(self, mode):
+        import rclpy.parameter as rp
+        self.node.set_parameters([rp.Parameter("hook", rp.Parameter.Type.STRING, mode)])
+
+    def _payload_at(self, z):
+        from geometry_msgs.msg import Pose
+        m = Pose()
+        m.position.z = z
+        self.node._on_payload_pose(m)
+
+    def _lower_to_ground(self):
+        self.node._on_cmd(self.String(data="lower"))
+        for _ in range(400):
+            self.node.integrate(0.1)
+            if self.node.at_ground():
+                break
+
+    # ---- the team's gravity hook (the default) ---- #
+    def test_the_gravity_hook_lets_go_once_the_payload_rests(self):
+        """The motor lowers the hook; the hook drops out of the payload's
+        loop by itself when the payload is down and the line goes slack."""
+        self._lower_to_ground()
+        self._payload_at(0.04)                 # resting on its 0.08 m base
+        self.tick(8)
+        self.assertEqual(len(self.detach), 5)
+        self.assertTrue(self.node.hook_open)
+
+    def test_the_gravity_hook_pays_out_past_the_ground_for_slack(self):
+        """First flight on the team airframe: the winch stopped at altitude
+        minus 0.25 m, the payload hung 0.19 m up, the hook never went slack,
+        and the payload flew home. Down means the line is longer than the
+        altitude."""
+        self._lower_to_ground()
+        self.assertGreaterEqual(self.node.payout, 5.0 + 0.1 - 1e-6)
+        self._hook("command")
+        self.node.payout = 4.8
+        self.assertTrue(self.node.at_ground(), "an actuated hook opens hanging")
+
+    def test_a_payload_resting_on_the_pad_is_let_go_when_the_line_slackens(self):
+        """Second flight: the payload came to rest on the 8 cm target pad,
+        above the bare-ground height test, and was never released."""
+        self.node._on_cmd(self.String(data="lower"))
+        for payout, z in ((3.0, 1.1), (3.06, 1.04), (3.12, 0.98),   # following
+                          (3.18, 0.12), (3.24, 0.12), (3.30, 0.12), (3.36, 0.12)):
+            self.node.payout = payout
+            self._payload_at(z)
+            self.node._gravity_hook()
+        self.assertTrue(self.node.hook_open)
+
+    def test_a_payload_still_following_the_line_is_not_let_go(self):
+        self.node._on_cmd(self.String(data="lower"))
+        for k in range(8):
+            self.node.payout = 2.0 + 0.06 * k
+            self._payload_at(3.0 - 0.06 * k)
+            self.node._gravity_hook()
+        self.assertFalse(self.node.hook_open)
+
+    def test_a_hanging_payload_is_never_let_go(self):
+        self._lower_to_ground()
+        self._payload_at(0.9)                  # still in the air
+        self.tick(8)
+        self.assertEqual(self.detach, [])
+        self._payload_at(0.13)                 # on the hook, aircraft on the pad
+        self.node.payout = 0.0
+        self.tick(8)
+        self.assertEqual(self.detach, [])
+
+    def test_a_release_command_opens_nothing_on_a_gravity_hook(self):
+        self._lower_to_ground()
+        self._payload_at(0.9)
+        self.node._on_cmd(self.String(data="release"))
+        self.assertTrue(self.node.released)   # the mission's bookkeeping
+        self.tick(8)
+        self.assertEqual(self.detach, [], "a gravity hook has nothing to open")
+
+    # ---- an actuated release ---- #
     def test_release_detaches_the_payload_and_resends(self):
+        self._hook("command")
         self.node._on_cmd(self.String(data="lower"))
         for _ in range(400):
             self.node.integrate(0.1)

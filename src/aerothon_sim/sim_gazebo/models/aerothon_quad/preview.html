@@ -1,0 +1,31 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Airframe preview</title>
+<style>html,body{margin:0;height:100%;background:#1c1f24;color:#ddd;font:13px sans-serif}#l{position:absolute;left:10px;top:8px}</style>
+<script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"}}</script>
+</head><body><div id="l">aerothon_quad: body.glb + props (FLU: red = +x forward, green = +y left, blue = +z up)</div>
+<script type="module">
+import * as THREE from "three";
+import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+THREE.Object3D.DEFAULT_UP.set(0, 0, 1);
+const r = new THREE.WebGLRenderer({ antialias: true }); r.setSize(innerWidth, innerHeight); document.body.appendChild(r.domElement);
+const s = new THREE.Scene(); s.background = new THREE.Color(0x1c1f24);
+const c = new THREE.PerspectiveCamera(40, innerWidth / innerHeight, 0.01, 50); c.position.set(0.55, 0.6, 0.45);
+const o = new OrbitControls(c, r.domElement);
+s.add(new THREE.HemisphereLight(0xffffff, 0x444444, 2.2)); const d = new THREE.DirectionalLight(0xffffff, 2); d.position.set(1, 2, 3); s.add(d);
+s.add(new THREE.AxesHelper(0.3)); const grid = new THREE.GridHelper(1, 10); grid.rotation.x = Math.PI / 2; grid.position.z = -0.173; s.add(grid);
+const L = new GLTFLoader();
+const add = (u, p) => L.load(u, g => { g.scene.position.set(...p); s.add(g.scene); });
+add("meshes/body.glb", [0, 0, 0]);
+fetch("airframe.json").then(x => x.json()).then(a => {
+  for (const [k, m] of Object.entries(a.motors)) add("meshes/" + a.prop_meshes[k], [m.hub[0], m.hub[1], a.prop_plane_z]);
+});
+const loop = () => {
+  requestAnimationFrame(loop);
+  const w = innerWidth || 800, h = innerHeight || 600;
+  if (r.domElement.width !== w || r.domElement.height !== h) { r.setSize(w, h); c.aspect = w / h; c.updateProjectionMatrix(); }
+  r.render(s, c);
+}; loop();
+const q = new URLSearchParams(location.search).get("view");
+if (q === "top") c.position.set(0, 0.001, 1.1); if (q === "front") c.position.set(1.0, 0, 0.1); if (q === "side") c.position.set(0, 1.0, 0.1);
+</script></body></html>

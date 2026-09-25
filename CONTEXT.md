@@ -125,6 +125,20 @@ delivery zone's edge, nearest the outbound exit first, each looking outward.
 A sighting is the identified banner that is not the outbound one (whose
 position was recorded on the way out) and is within the near range.
 
+**Team airframe** — the vehicle the simulator flies by default
+(`AEROTHON_AIRFRAME=cad`): the team's quad built from its CAD in
+`Drone frame/` by `scripts/cad_to_gazebo.py` (meshes and measured mounts in
+`models/aerothon_quad/airframe.json`) and `scripts/build_cad_vehicle.py`.
+2.0 kg all-up, 2312 980 KV on 9450 props at 4S (4S2P 9000 mAh Li-ion),
+Logitech C270 (48.8 deg HFOV) on a tilt servo, LD06 lidar on the raised
+front mount, gravity-hook winch. `AEROTHON_AIRFRAME=iris` flies the older
+ArduPilot Iris variant.
+
+**Gravity hook** — the team's drop mechanism: a motor lowers the payload on
+a hook that lets go by itself once the payload rests and the line goes slack.
+The winch pays out past touchdown for that slack; "release" sends nothing on
+the aircraft (in Gazebo the winch node detaches on slack).
+
 **Edge-on orbit** — what both banner searches do when a full turn reads no
 banner but did see green: the board is being seen from the side or behind,
 where no lettering shows. The largest green region is taken as where the gate
