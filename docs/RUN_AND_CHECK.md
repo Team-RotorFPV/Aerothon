@@ -55,11 +55,9 @@ ros2 launch mission_bringup mission2.launch.py use_sim:=true fcu_url:=udp://127.
 Spawns the Mission 2 arena (corridor walls, obstacle bumps, delivery zone, QR codes) and bridges `/scan`, `/image_raw`, and `/clock`.
 
 ```bash
-# Terminal 1: SITL with Gazebo frame
-sim_vehicle.py -v ArduCopter -f gazebo-iris --model JSON --console
-
-# Terminal 2: Gazebo World + Parameter Bridge
-ros2 launch sim_gazebo mission2_world.launch.py
+# SITL, the materialised world, the bridge and the stack, in one launcher
+# (mission2.sdf is a template: materialize_world.py fills it first)
+scripts/launch_level6_sim.sh
 ```
 
 ---

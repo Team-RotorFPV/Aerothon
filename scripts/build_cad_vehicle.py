@@ -30,12 +30,19 @@ import copy
 import json
 import math
 import xml.etree.ElementTree as ET
-from pathlib import Path
 
 MODEL = "aerothon_iris_c1_webcam"      # the world's vehicle slot; kept stable
 # 4S2P Li-ion at 4S, a 9450 on a 2312 980 KV: ~1.17 kg of thrust per motor.
 MAX_THRUST_N = 11.5
 PROP_A0, PROP_CLA = 0.3, 4.25        # the Iris's blade section, unchanged
+# YAW TORQUE. LiftDrag gives a blade drag of cda*alpha against a lift of
+# cla*alpha, so a rotor's reaction torque per newton of thrust is
+# (cda/cla)*cp. At the Iris's cda of 0.10 that is 0.0019 m; a real 9x4.5
+# prop measures C_Q*D/C_T ~ 0.012-0.016 m. With six times too little yaw
+# torque, every 45 deg step of the banner sweep saturated a motor and the
+# aircraft sank to the ground (dataflash 00000169/170.BIN). cda is set from
+# the real prop's ratio, at the conservative end.
+PROP_TORQUE_PER_THRUST_M = 0.0125
 # The props render to the camera and the GUI, NOT to the lidar: the LD06's
 # scan plane is 5 mm above the prop disc in the CAD, and a degree of pitch
 # would put the blades in the scan. Visual bit 1 is "prop"; the lidar's mask
@@ -94,8 +101,10 @@ def build(airframe_dir, upstream_models, out_root, camera_w=1280, camera_h=720,
            "</ode></contact><friction><ode><mu>0.8</mu><mu2>0.8</mu2></ode></friction>"
            "</surface>" if n.startswith("skid") else "")
         + "</collision>" for n, c, s in boxes)
+    # enable_wind: the world's WindEffects system (a "wind" condition,
+    # materialize_world.py) pushes this link; without it wind does nothing.
     base = ET.fromstring(
-        f"<link name='base_link'>"
+        f"<link name='base_link'><enable_wind>true</enable_wind>"
         f"{inertial(body_m, I['ixx'], I['iyy'], I['izz'], af['com'], I['ixy'], I['ixz'], I['iyz'])}"
         f"{collisions}"
         f"<visual name='airframe'><geometry><mesh><uri>{uri}/body.glb</uri></mesh></geometry></visual>"
@@ -155,6 +164,7 @@ def build(airframe_dir, upstream_models, out_root, camera_w=1280, camera_h=720,
             x = float(p.find("cp").text.split()[0])
             p.find("cp").text = f"{math.copysign(cp, x):.5f} 0 0"
             p.find("area").text = f"{area:.6f}"
+            p.find("cda").text = f"{PROP_TORQUE_PER_THRUST_M / cp * PROP_CLA:.4f}"
         if p.get("name") == "ArduPilotPlugin":
             p.find("imuName").text = "imu_link::imu_sensor"
             for ctl in list(p.findall("control")):
@@ -207,18 +217,147 @@ def build(airframe_dir, upstream_models, out_root, camera_w=1280, camera_h=720,
     # Axis -Y so a NEGATIVE angle looks down: see the Iris variant's note in
     # materialize_vehicle_model.py; the camera stack assumes it.
     model.append(ET.fromstring(
-        f"<joint name='webcam_pitch_joint' type='revolute'><pose>0 0 0 0 0 0</pose>"
-        f"<parent>webcam_servo_base</parent><child>webcam_link</child>"
-        f"<axis><xyz>0 -1 0</xyz><limit><lower>-1.65</lower><upper>0.523599</upper>"
-        f"<effort>2</effort><velocity>2</velocity></limit><dynamics><damping>0.08</damping>"
-        f"</dynamics></axis></joint>"))
+        "<joint name='webcam_pitch_joint' type='revolute'><pose>0 0 0 0 0 0</pose>"
+        "<parent>webcam_servo_base</parent><child>webcam_link</child>"
+        "<axis><xyz>0 -1 0</xyz><limit><lower>-1.65</lower><upper>0.523599</upper>"
+        "<effort>2</effort><velocity>2</velocity></limit><dynamics><damping>0.08</damping>"
+        "</dynamics></axis></joint>"))
     model.append(ET.fromstring(
         "<plugin filename='gz-sim-joint-position-controller-system' "
         "name='gz::sim::systems::JointPositionController'><joint_name>webcam_pitch_joint</joint_name>"
         "<topic>/gimbal/direct_pitch</topic><p_gain>40</p_gain><i_gain>4</i_gain>"
         "<d_gain>0.6</d_gain><i_max>1</i_max><i_min>-1</i_min></plugin>"))
 
-    # ---- the hook, under the dropping mechanism ----
+    if "claw" in af:
+        add_claw(model, af["claw"], uri)
+    else:
+        add_hook(model, af)
+
+    sdf = ET.Element("sdf", version="1.9")
+    sdf.append(model)
+    tree = ET.ElementTree(sdf)
+    ET.indent(tree, space="  ")
+    mdir = out_root / MODEL
+    (mdir / "meshes").mkdir(parents=True, exist_ok=True)
+    tree.write(mdir / "model.sdf", encoding="utf-8", xml_declaration=True)
+    for f in (airframe_dir / "meshes").iterdir():
+        (mdir / "meshes" / f.name).write_bytes(f.read_bytes())
+    (mdir / "model.config").write_text(
+        "<?xml version=\"1.0\"?>\n<model><name>AeroTHON quad (team airframe)</name>"
+        "<version>1.0</version><sdf version=\"1.9\">model.sdf</sdf>"
+        "<description>The team's airframe from CAD: 2312 980 KV on 9450, 4S2P Li-ion, "
+        "LD06 lidar, C270 on a tilt servo, gravity-hook winch.</description></model>\n")
+    return mdir, {"w_max_rad_s": w_max, "cp": cp, "area": area, "hfov": hfov,
+                  "lidar_pose": (lx, ly, scan_z), "camera_pose": (cx, cy, cz)}
+
+
+def _driven(model, joint, topic, gain, cmd_max):
+    """A joint held at the position published on `topic` (velocity mode)."""
+    model.append(ET.fromstring(
+        "<plugin filename='gz-sim-joint-position-controller-system' "
+        f"name='gz::sim::systems::JointPositionController'><joint_name>{joint}</joint_name>"
+        f"<topic>{topic}</topic><use_velocity_commands>true</use_velocity_commands>"
+        f"<p_gain>{gain}</p_gain><cmd_max>{cmd_max}</cmd_max><cmd_min>-{cmd_max}</cmd_min>"
+        "</plugin>"))
+
+
+def add_claw(model, c, uri, detachable=True):
+    """The team's dropping mechanism as it is drawn: the spool on the motor's
+    axle, and the scissor claw on the line (sim_gazebo/claw.py).
+
+    The line is the prismatic winch_joint from the guide bar to the claw's
+    top pin (winch_hook, the hanger). The claw is a closed linkage, carried
+    as a tree of driven joints: the links turn on the top pin, and the jaws
+    turn on the centre pin, which slides up the hanger as they open. All are
+    held at 0 (the claw as drawn: shut) until something commands them; the
+    winch bench opens them from the line's slack. The payload hangs from the
+    jaws by contact with the payload's lifting tab in the close-up bench.
+    Each jaw's contact box sits at the tip measured from the CAD. The normal
+    mission model retains its legacy detachable payload joint until that
+    flight path can be migrated and qualified separately.
+    """
+    top, ctr, exit_ = c["top_pin"], c["centre_pin"], c["line_exit"]
+    mesh = lambda name, part: (                                     # noqa: E731
+        f"<visual name='{name}'><geometry><mesh><uri>{uri}/{c['meshes'][part]}</uri>"
+        f"</mesh></geometry></visual>")
+    # The mechanism's mass is in the body already (cad_to_gazebo.py); these
+    # links carry only enough for the solver.
+    tiny = inertial(0.001, 1e-8, 1e-8, 1e-8)
+
+    model.append(ET.fromstring(
+        f"<link name='winch_spool'><pose>{pose(*c['spool_centre'])}</pose>"
+        f"{inertial(0.003, 1e-7, 1e-7, 1e-7)}{mesh('spool', 'spool')}</link>"))
+    model.append(ET.fromstring(
+        "<joint name='spool_joint' type='revolute'><parent>base_link</parent>"
+        "<child>winch_spool</child><axis><xyz>1 0 0</xyz><limit><lower>-1e9</lower>"
+        "<upper>1e9</upper><effort>1e6</effort></limit></axis></joint>"))
+    _driven(model, "spool_joint", "/aerothon/winch/spool", 20, 100)
+
+    model.append(ET.fromstring(
+        f"<link name='winch_pulley'><pose>{pose(*exit_)}</pose>"
+        f"{inertial(0.005, 1e-7, 1e-7, 1e-7)}</link>"))
+    model.append(ET.fromstring(
+        "<joint name='winch_swing' type='universal'><parent>base_link</parent>"
+        "<child>winch_pulley</child><axis><xyz>1 0 0</xyz><dynamics><damping>0.02</damping>"
+        "</dynamics></axis><axis2><xyz>0 1 0</xyz><dynamics><damping>0.02</damping>"
+        "</dynamics></axis2></joint>"))
+    model.append(ET.fromstring(
+        f"<link name='winch_hook'><pose>{pose(*top)}</pose>"
+        f"{inertial(0.005, 1e-7, 1e-7, 1e-7)}{mesh('hanger', 'claw_hanger')}</link>"))
+    model.append(ET.fromstring(
+        "<joint name='winch_joint' type='prismatic'><parent>winch_pulley</parent>"
+        "<child>winch_hook</child><axis><xyz>0 0 -1</xyz><limit><lower>0</lower>"
+        "<upper>8</upper><effort>50</effort><velocity>2</velocity></limit>"
+        "<dynamics><damping>0.5</damping></dynamics></axis></joint>"))
+    _driven(model, "winch_joint", "/aerothon/winch/payout", 4, 1.0)
+
+    for side in ("a", "b"):
+        model.append(ET.fromstring(
+            f"<link name='claw_link_{side}'><pose>{pose(*top)}</pose>{tiny}"
+            f"{mesh('link', f'claw_link_{side}')}</link>"))
+        model.append(ET.fromstring(
+            f"<joint name='claw_link_{side}_joint' type='revolute'><parent>winch_hook</parent>"
+            f"<child>claw_link_{side}</child><axis><xyz>0 1 0</xyz><limit><lower>-1</lower>"
+            "<upper>1</upper><effort>1e6</effort></limit></axis></joint>"))
+        _driven(model, f"claw_link_{side}_joint", f"/aerothon/claw/link_{side}", 30, 20)
+    model.append(ET.fromstring(
+        f"<link name='claw_pivot'><pose>{pose(*ctr)}</pose>{tiny}</link>"))
+    model.append(ET.fromstring(
+        "<joint name='claw_pivot_joint' type='prismatic'><parent>winch_hook</parent>"
+        "<child>claw_pivot</child><axis><xyz>0 0 1</xyz><limit><lower>0</lower>"
+        "<upper>0.01</upper><effort>1e6</effort></limit></axis></joint>"))
+    _driven(model, "claw_pivot_joint", "/aerothon/claw/pivot", 30, 1)
+    for side in ("a", "b"):
+        bounds = c["jaw_tip_bounds"][side]
+        tip = [(bounds["min"][i] + bounds["max"][i]) / 2 for i in range(3)]
+        tip_local = [tip[i] - ctr[i] for i in range(3)]
+        tip_size = [bounds["max"][i] - bounds["min"][i] + 0.0002 for i in range(3)]
+        tip_collision = (
+            f"<collision name='contact_tip_{side}'><pose>{pose(*tip_local)}</pose>"
+            f"<geometry><box><size>{' '.join(map(str, tip_size))}</size></box></geometry>"
+            "<surface><friction><ode><mu>0.6</mu><mu2>0.6</mu2></ode>"
+            "</friction></surface></collision>")
+        model.append(ET.fromstring(
+            f"<link name='claw_jaw_{side}'><pose>{pose(*ctr)}</pose>{tiny}"
+            f"{mesh('jaw', f'claw_jaw_{side}')}{tip_collision}</link>"))
+        model.append(ET.fromstring(
+            f"<joint name='claw_jaw_{side}_joint' type='revolute'><parent>claw_pivot</parent>"
+            f"<child>claw_jaw_{side}</child><axis><xyz>0 1 0</xyz><limit><lower>-1</lower>"
+            "<upper>1</upper><effort>1e6</effort></limit></axis></joint>"))
+        _driven(model, f"claw_jaw_{side}_joint", f"/aerothon/claw/jaw_{side}", 30, 20)
+
+    if detachable:
+        model.append(ET.fromstring(
+            "<plugin filename='gz-sim-detachable-joint-system' "
+            "name='gz::sim::systems::DetachableJoint'><parent_link>claw_pivot</parent_link>"
+            "<child_model>aerothon_payload</child_model><child_link>body</child_link>"
+            "<detach_topic>/aerothon/payload/detach</detach_topic>"
+            "<attach_topic>/aerothon/payload/attach</attach_topic></plugin>"))
+
+
+
+def add_hook(model, af):
+    """A point hook (an airframe.json from before the claw was modelled)."""
     (dx, dy, _), _ = af["drop_mechanism"]
     hz = af["hook_z"]
     model.append(ET.fromstring(
@@ -250,20 +389,3 @@ def build(airframe_dir, upstream_models, out_root, camera_w=1280, camera_h=720,
         "name='gz::sim::systems::DetachableJoint'><parent_link>winch_hook</parent_link>"
         "<child_model>aerothon_payload</child_model><child_link>body</child_link>"
         "<detach_topic>/aerothon/payload/detach</detach_topic></plugin>"))
-
-    sdf = ET.Element("sdf", version="1.9")
-    sdf.append(model)
-    tree = ET.ElementTree(sdf)
-    ET.indent(tree, space="  ")
-    mdir = out_root / MODEL
-    (mdir / "meshes").mkdir(parents=True, exist_ok=True)
-    tree.write(mdir / "model.sdf", encoding="utf-8", xml_declaration=True)
-    for f in (airframe_dir / "meshes").iterdir():
-        (mdir / "meshes" / f.name).write_bytes(f.read_bytes())
-    (mdir / "model.config").write_text(
-        "<?xml version=\"1.0\"?>\n<model><name>AeroTHON quad (team airframe)</name>"
-        "<version>1.0</version><sdf version=\"1.9\">model.sdf</sdf>"
-        "<description>The team's airframe from CAD: 2312 980 KV on 9450, 4S2P Li-ion, "
-        "LD06 lidar, C270 on a tilt servo, gravity-hook winch.</description></model>\n")
-    return mdir, {"w_max_rad_s": w_max, "cp": cp, "area": area, "hfov": hfov,
-                  "lidar_pose": (lx, ly, scan_z), "camera_pose": (cx, cy, cz)}

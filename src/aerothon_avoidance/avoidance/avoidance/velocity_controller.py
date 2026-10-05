@@ -151,6 +151,21 @@ class VelocityController(Node):
         # (correctly) aborted. The loop has to be closed.
         p('alt_hold_gain', 0.8)       # m/s of vz per metre of error
         p('max_vz', 0.6)              # ceiling on the correction
+        # ---- wind: a disturbance observer on the lateral axis ----
+        # The navigator steers by choosing a heading; a gust pushes the
+        # airframe sideways without its knowledge until the next scan shows
+        # it off the strip. The observer compares the lateral velocity the
+        # airframe HAS with the one it was told to have, delayed by how it
+        # follows a command (`vel_response_s`, the lag test_slalom_traverse
+        # calibrates), and subtracts what is left. Lateral only: wind along
+        # the lane only changes speed, which the reach law already governs,
+        # and compensating it would wind up every time the navigator brakes.
+        # Capped, so a pinned airframe cannot be pushed harder into what
+        # pins it. sim/test_corridor_stress.py: gusty 8 m/s crosswind.
+        p('vel_response_s', 0.6)
+        p('drift_filter_s', 0.4)
+        p('drift_comp_gain', 0.8)
+        p('max_drift_comp', 0.5)
         p('backoff_ticks', 40)
         p('backoff_speed', 0.35)
         p('max_backoffs', 3)
@@ -180,6 +195,7 @@ class VelocityController(Node):
         # waypoint had been dragging it to the real zone and hiding this.
         self._enclosed_ticks = 0
         self._entered = False
+        self._reset_drift()
 
         scan_topic = self.get_parameter('scan_topic').value
         self.create_subscription(LaserScan, scan_topic, self._on_scan,
@@ -220,6 +236,7 @@ class VelocityController(Node):
             # on, square to the banner. Latched on the first steering tick.
             self._axis = None
             self._last_gap_bearing = None
+            self._reset_drift()
             # Latch the altitude to hold for this traversal. The mission can
             # override it on /avoidance/hold_alt; without that, whatever the
             # aircraft was flying at when avoidance was handed control is the
@@ -283,8 +300,13 @@ class VelocityController(Node):
         if (now - self._progress_t) < window:
             return False
         moved = math.dist(self._pos, self._progress_ref)
+        if moved < float(self._g('min_progress_m')):
+            # Keep this expired reference until movement earns a new window.
+            # Resetting it on every stall produced a single blocked tick per
+            # window; CRUISE cleared that tick before recovery could begin.
+            return True
         self._progress_ref, self._progress_t = self._pos, now
-        return moved < float(self._g('min_progress_m'))
+        return False
 
     def _on_scan(self, m: LaserScan):
         self.scan = m
@@ -608,7 +630,43 @@ class VelocityController(Node):
         rate = gain * wrap(self._axis + off - yaw)
         return max(-cap, min(cap, rate))
 
+    def _reset_drift(self):
+        self._drift = 0.0            # lateral disturbance, body left, m/s
+        self._expect_vy = 0.0        # lateral velocity the last commands imply
+        self._drift_prev = None      # (x, y) at the last pose that moved
+        self._drift_ticks = 0        # ticks since then
+
+    def _drift_comp(self, vy):
+        """`vy` with the observed lateral drift taken off; updates the observer.
+
+        Runs once per steering tick at `rate_hz`. The velocity is measured
+        between poses that differ, over however many ticks separate them, so
+        a pose stream slower than the tick reads as its true average rather
+        than as zero followed by a jump.
+        """
+        if self._pos is None or self._yaw is None:
+            return vy
+        dt = 1.0 / float(self._g('rate_hz'))
+        self._drift_ticks += 1
+        if self._drift_prev is None:
+            self._drift_prev, self._drift_ticks = self._pos, 0
+        elif self._pos != self._drift_prev:
+            span = self._drift_ticks * dt
+            dx = self._pos[0] - self._drift_prev[0]
+            dy = self._pos[1] - self._drift_prev[1]
+            meas = (-dx * math.sin(self._yaw) + dy * math.cos(self._yaw)) / span
+            f = min(1.0, span / float(self._g('drift_filter_s')))
+            self._drift += ((meas - self._expect_vy) - self._drift) * f
+            self._drift_prev, self._drift_ticks = self._pos, 0
+        cap = float(self._g('max_drift_comp'))
+        comp = max(-cap, min(cap, float(self._g('drift_comp_gain')) * self._drift))
+        out = vy - comp
+        self._expect_vy += (out - self._expect_vy) * min(
+            1.0, dt / float(self._g('vel_response_s')))
+        return out
+
     def _publish(self, vx, vy, front, bearing, extra):
+        vy = self._drift_comp(vy)
         sp = PositionTarget()
         sp.header.stamp = self.get_clock().now().to_msg()
         sp.coordinate_frame = FRAME_BODY_OFFSET_NED
@@ -637,7 +695,8 @@ class VelocityController(Node):
                   "hold_alt_m": (None if self._hold_alt is None
                                  else round(self._hold_alt, 2)),
                   "alt_m": (None if self._alt is None else round(self._alt, 2)),
-                  "backoffs": self._backoffs_done}
+                  "backoffs": self._backoffs_done,
+                  "drift_left_mps": round(self._drift, 2)}
         detail.update(extra)
         self._last_detail = detail
         self.pub_detail.publish(String(data=json.dumps(detail)))

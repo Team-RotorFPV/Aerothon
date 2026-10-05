@@ -14,7 +14,6 @@ import argparse
 import logging
 import select
 import socket
-import sys
 import time
 
 import serial

@@ -1,7 +1,9 @@
 # Mission-specific aliases layered on the official Iris bridge.
 # The upstream vehicle bridge owns clock, odometry and joint states. Camera is
 # bridged here because the competition webcam replaces upstream pitch_link.
-- ros_topic_name: "/camera/image"
+# Camera and lidar land on *_gz: sim_gazebo degrade_node republishes them on
+# /camera/image and /scan as the world's conditions would deliver them.
+- ros_topic_name: "/camera/image_gz"
   gz_topic_name: "/camera/image"
   ros_type_name: "sensor_msgs/msg/Image"
   gz_type_name: "gz.msgs.Image"
@@ -13,7 +15,7 @@
   gz_type_name: "gz.msgs.CameraInfo"
   direction: GZ_TO_ROS
 
-- ros_topic_name: "/scan"
+- ros_topic_name: "/scan_gz"
   gz_topic_name: "/lidar"
   ros_type_name: "sensor_msgs/msg/LaserScan"
   gz_type_name: "gz.msgs.LaserScan"

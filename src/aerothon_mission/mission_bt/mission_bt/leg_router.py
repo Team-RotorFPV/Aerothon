@@ -34,6 +34,8 @@ WHAT IT DOES NOT DO
     scoring a violation on purpose and calling it defence in depth.
 """
 
+import math
+
 from .search_planner import route_leg, path_hits_exclusion, routing_obstacles
 
 RUNNING = "RUNNING"
@@ -44,9 +46,18 @@ BLOCKED = "BLOCKED"
 class LegRouter:
     """One leg's worth of routing state. Own one per stage."""
 
-    def __init__(self, clearance_m=1.5, tol=0.6, waypoint_tol=None):
+    def __init__(self, clearance_m=1.5, tol=0.6, waypoint_tol=None,
+                 lead_m=0.0):
         self.clearance_m = float(clearance_m)
         self.tol = float(tol)
+        # FLY THROUGH THE CORNERS. A position target is a place to stop at:
+        # ArduPilot brakes to every one, so a detour of four legs was four
+        # stops, and a quarter of the delivery sweep was spent nearly
+        # stationary (my_world). With `lead_m` > 0 the command is a point that
+        # far along the route -- past the corner, onto the next leg -- so the
+        # aircraft only brakes for the real end of the leg. The chord to it is
+        # checked against the same inflated zones, or the corner is used.
+        self.lead_m = float(lead_m)
         # Intermediate corners are steering hints, not places to be precise
         # about. Holding them to the arrival tolerance makes the aircraft
         # settle on each one and spends the mission clock, which is 15 marks
@@ -107,6 +118,28 @@ class LegRouter:
                     f"to ({float(x):.1f}, {float(y):.1f})")
         return True
 
+    def _carrot(self, mav, wx, wy):
+        """The point `lead_m` ahead along the route from here, or the corner."""
+        if self.lead_m <= 0.0 or self._i >= len(self._wps) - 1:
+            return wx, wy
+        px, py = mav.pos()[:2]
+        left = self.lead_m - math.hypot(wx - px, wy - py)
+        if left <= 0.0:
+            return wx, wy
+        ax, ay = wx, wy
+        for bx, by in self._wps[self._i + 1:]:
+            seg = math.hypot(bx - ax, by - ay)
+            if seg >= left:
+                k = left / seg
+                ax, ay = ax + k * (bx - ax), ay + k * (by - ay)
+                break
+            left -= seg
+            ax, ay = bx, by
+        blocks = routing_obstacles(self._exclusions(mav), self.clearance_m)
+        if blocks and path_hits_exclusion([(px, py), (ax, ay)], 0.0, blocks):
+            return wx, wy
+        return ax, ay
+
     # ---- the tick ---- #
     def fly(self, mav, x, y, z, yaw=0.0):
         """Command one tick of this leg. RUNNING / ARRIVED / BLOCKED."""
@@ -128,7 +161,8 @@ class LegRouter:
                 break
 
         wx, wy = self._wps[self._i]
-        mav.goto(wx, wy, z, yaw)
+        cx, cy = self._carrot(mav, wx, wy)
+        mav.goto(cx, cy, z, yaw)
         last = self._i >= len(self._wps) - 1
         if last and mav.reached(wx, wy, z, self.tol):
             return ARRIVED

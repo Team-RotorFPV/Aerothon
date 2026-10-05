@@ -64,6 +64,30 @@ def _wrap(a):
     return math.atan2(math.sin(a), math.cos(a))
 
 
+def despeckle(ranges):
+    """Ranges with every lone return replaced by its neighbours' median.
+
+    A single short return between two longer ones is dust, an insect or sun
+    speckle, not a structure: every real obstacle the aircraft meets spans
+    more than one beam. One of them in front of the gate read as "something
+    standing at 1.3 m" and the aircraft refused a clear crossing (field
+    conditions, sim/fly_headless.py). Same 3-beam median as the corridor
+    navigator's conditioning, so the mission and the navigator agree on what
+    is there. Missing returns (None, NaN, +inf) count as infinitely far.
+    """
+    inf = float("inf")
+    r = [inf if (v is None or v != v) else float(v) for v in ranges]
+    n = len(r)
+    if n < 3:
+        return r
+    out = [sorted(r[:2])[1]]
+    for i in range(1, n - 1):
+        a, b, c = r[i - 1], r[i], r[i + 1]
+        out.append(max(min(a, b), min(max(a, b), c)))
+    out.append(sorted(r[-2:])[1])
+    return out
+
+
 def _fit_line(points):
     """Total-least-squares line through `points`.
 
@@ -230,6 +254,18 @@ def fit_surface(angle_min, angle_increment, ranges, bearing_rad,
     if len(inliers) >= len(chosen):
         chosen = inliers
     _, direction, normal, offset, rms = _fit_line(chosen)
+    if rms > max_residual_m:
+        # A face with something standing against it -- a post, the stub of
+        # a lane wall running away from the board -- is one continuous run
+        # of returns in the shape of an L, and no single line fits an L.
+        # Seen 53 deg off the return gate in my_world (sim/fly_headless.py)
+        # the board and its lane's wall end came back as one cluster, 29 cm
+        # off any line, from every vantage. The face being asked about is
+        # the straight run through the return the camera looks along.
+        along = _line_through_bearing(sector, bearing_rad, inlier_m=max_residual_m)
+        if along is not None:
+            chosen = along
+            _, direction, normal, offset, rms = _fit_line(chosen)
 
     span = _extent(chosen)
     if len(chosen) < min_points:
@@ -286,6 +322,33 @@ def fit_surface(angle_min, angle_increment, ranges, bearing_rad,
             "reason": ""}
 
 
+def _line_through_bearing(points, bearing_rad, inlier_m, min_len_m=0.5):
+    """The longest straight run of `points` through the one nearest the
+    bearing, or None.
+
+    Candidate lines are drawn through that anchor and every other return at
+    least `min_len_m` from it; the one with the most returns within
+    `inlier_m` wins. Anchoring on the bearing is what makes it the surface
+    the camera identified rather than whichever straight thing in the sector
+    happens to be longest.
+    """
+    if len(points) < 3:
+        return None
+    anchor = min(points, key=lambda p: abs(_wrap(math.atan2(p[1], p[0]) - bearing_rad)))
+    best = None
+    for q in points:
+        dx, dy = q[0] - anchor[0], q[1] - anchor[1]
+        length = math.hypot(dx, dy)
+        if length < min_len_m:
+            continue
+        nx, ny = -dy / length, dx / length
+        c = nx * anchor[0] + ny * anchor[1]
+        inliers = [p for p in points if abs(nx * p[0] + ny * p[1] - c) <= inlier_m]
+        if best is None or len(inliers) > len(best):
+            best = inliers
+    return best
+
+
 def gate_opening(angle_min, angle_increment, ranges, bearing_rad,
                  half_width_rad, need_clear_m=10.0, range_min=0.05,
                  range_max=12.0, gap_m=0.35, max_depth_m=0.75,
@@ -324,6 +387,8 @@ def gate_opening(angle_min, angle_increment, ranges, bearing_rad,
         clear_m     how far the flight line is clear, measured down a
                     corridor `corridor_m` wide -- the width the airframe
                     actually needs, not the width of the hole
+        centre_m    where the middle of that pair is across the flight line,
+                    + left; only when a pair was measured
         reason      why it is not open, empty when it is
 
     `open` is False both for a solid face and for a gap with something
@@ -440,6 +505,10 @@ def gate_opening(angle_min, angle_increment, ranges, bearing_rad,
 
     gate, a, b, ap, bp = min(pairs, key=lambda item: item[0])
     gap = math.hypot(bp[0] - ap[0], bp[1] - ap[1])
+    # Where the hole's middle is, across the flight line (+ left): the
+    # lidar's own answer to "am I lined up", which GPS cannot give to the
+    # half-metre a 3 m lane leaves.
+    centre = 0.5 * (_lat(ap) + _lat(bp))
 
     # Distance to the gate itself, separate from how far the centreline stays
     # clear behind it. The return corridor puts its first slalom obstacle only
@@ -466,15 +535,15 @@ def gate_opening(angle_min, angle_increment, ranges, bearing_rad,
 
     if gap < float(min_gap_m):
         return {"open": False, "clusters": len(groups), "gap_m": gap,
-                "gate_m": gate, "clear_m": clear,
+                "gate_m": gate, "clear_m": clear, "centre_m": centre,
                 "reason": (f"the hole between the two nearest surfaces is "
                            f"only {gap:.1f} m across; too narrow to fly")}
     if clear < float(need_clear_m):
         return {"open": False, "clusters": len(groups), "gap_m": gap,
-                "gate_m": gate, "clear_m": clear,
+                "gate_m": gate, "clear_m": clear, "centre_m": centre,
                 "reason": (f"a {gap:.1f} m hole with something standing "
                            f"{clear:.1f} m into it, against the "
                            f"{float(need_clear_m):.0f} m the aircraft means "
                            f"to fly")}
     return {"open": True, "clusters": len(groups), "gap_m": gap,
-            "gate_m": gate, "clear_m": clear, "reason": ""}
+            "gate_m": gate, "clear_m": clear, "centre_m": centre, "reason": ""}

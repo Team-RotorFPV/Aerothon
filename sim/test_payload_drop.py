@@ -9,9 +9,7 @@
     Grading     check_track reads the payload's true final position.
 """
 
-import json
 import math
-import os
 import sys
 import unittest
 from pathlib import Path
@@ -64,6 +62,15 @@ class DetectorTests(unittest.TestCase):
         img = frame()
         img[10:13, 10:13] = (10, 215, 255)
         self.assertFalse(detect_payload(img)["visible"])
+
+    def test_the_colour_band_is_the_real_payloads(self):
+        """The rulebook gives no colour: a blue payload needs its own band."""
+        img = frame()
+        img[400:430, 700:760] = (200, 90, 20)           # BGR blue, 10 x 5 cm
+        self.assertFalse(detect_payload(img)["visible"])
+        d = detect_payload(img, hsv_lo=(100, 120, 80), hsv_hi=(125, 255, 255))
+        self.assertTrue(d["visible"])
+        self.assertEqual((d["w_px"], d["h_px"]), (60, 30))
 
 
 class WinchGazeboBackendTests(unittest.TestCase):

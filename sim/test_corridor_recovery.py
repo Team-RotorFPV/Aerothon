@@ -112,6 +112,24 @@ class CorridorRecoveryTests(unittest.TestCase):
         self.assertNotEqual(states[-1], "BLOCKED",
                             "still merely BLOCKED after 200 ticks")
 
+    def test_a_stationary_aircraft_with_a_visible_gap_exhausts_recovery(self):
+        """my_world_offaxis: a stall pulse every window was cleared on the
+        next tick, so the backoff counter never reached its threshold."""
+        t = [0.0]
+        self.node._now = lambda: t[0]
+        self.node._pos = (0.0, 0.0)
+        scan = walled_in(distance=12.0)
+        states = []
+        for _ in range(1200):
+            t[0] += 0.1
+            self.tick(scan)
+            states.append(self.node.state)
+            if self.node.state == "STUCK":
+                break
+        self.assertIn("BACKOFF", set(states))
+        self.assertEqual(self.node.state, "STUCK",
+                         "a visible gap hid the lack of measured progress")
+
     def test_backoff_actually_reverses(self):
         scan = walled_in(0.6)
         for _ in range(200):
@@ -267,6 +285,20 @@ class ProgressWatchdogTests(unittest.TestCase):
         self.node.stalled()
         self._at(5.0, 0.0)
         self.assertFalse(self.node.stalled(), "normal flight flagged as stalled")
+
+    def test_progress_after_a_stall_starts_a_new_window(self):
+        t = [0.0]
+        self.node._now = lambda: t[0]
+        self._at(0.0, 0.0)
+        self.assertFalse(self.node.stalled())
+        t[0] = 13.0
+        self.assertTrue(self.node.stalled())
+        t[0] = 13.1
+        self.assertTrue(self.node.stalled(), "stall cleared without movement")
+        self._at(1.0, 0.0)
+        self.assertFalse(self.node.stalled())
+        t[0] = 14.0
+        self.assertFalse(self.node.stalled(), "recovery did not get a new window")
 
     def test_off_axis_gap_produces_forward_motion(self):
         """The exact deadlock: gap off to one side, dead ahead blocked."""

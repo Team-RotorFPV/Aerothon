@@ -199,6 +199,31 @@ if [ -f "$OFFICIAL_WS/src/ardupilot/Tools/autotest/sim_vehicle.py" ]; then
     export PATH="$OFFICIAL_WS/src/ardupilot/Tools/autotest:$OFFICIAL_WS/src/ardupilot/build/sitl/bin:$HOME/.local/bin:$PATH"
 fi
 
+# WSL APPENDS WINDOWS' PATH. A Windows Python's Scripts/mavproxy.py (no
+# shebang) was found first and run by /bin/sh: "from: not found", MAVProxy
+# dead, no heartbeat, and the harness waited 15 minutes for a stack that could
+# never become ready. Nothing in this stack runs Windows programs.
+PATH="$(printf '%s' "$PATH" | tr ':' '\n' | grep -v '^/mnt/' | paste -sd: -)"
+# MAVProxy often lives in the ArduPilot Python venv, which a non-login shell
+# has not activated. Expose that one script only: the venv's own python3 on
+# PATH would shadow the system one that ROS's cv_bridge is built against.
+if ! command -v mavproxy.py >/dev/null 2>&1; then
+    for d in "${AEROTHON_MAVPROXY_DIR:-}" "$HOME/venv-ardupilot/bin" "$HOME/.local/bin"; do
+        if [ -n "$d" ] && [ -x "$d/mavproxy.py" ]; then
+            mkdir -p "$HOME/.cache/aerothon/bin"
+            ln -sf "$d/mavproxy.py" "$HOME/.cache/aerothon/bin/mavproxy.py"
+            PATH="$HOME/.cache/aerothon/bin:$PATH"
+            break
+        fi
+    done
+fi
+export PATH
+if ! command -v mavproxy.py >/dev/null 2>&1; then
+    echo "[BLOCKED] mavproxy.py not found (set AEROTHON_MAVPROXY_DIR to the folder holding it)"
+    exit 1
+fi
+echo "[OK] MAVProxy: $(command -v mavproxy.py)"
+
 # package:// resources inside the official Iris model need the parent of the
 # package share directory when the model is preloaded directly by gz-server.
 ARDUPILOT_GAZEBO_PREFIX="$(ros2 pkg prefix ardupilot_gazebo 2>/dev/null || true)"
@@ -368,6 +393,9 @@ echo "[SIM] camera ${AEROTHON_CAMERA_W:-1280}x${AEROTHON_CAMERA_H:-720}" \
 # The mission launch reads the same two variables, so the camera the model
 # renders and the lens the perception stack assumes cannot disagree.
 export AEROTHON_AIRFRAME="${AEROTHON_AIRFRAME:-cad}"
+# The pad size the world is built with (materialize_world.py's default) is
+# the size the mission's sweep has to plan for.
+export AEROTHON_TARGET_QR_M="${AEROTHON_TARGET_QR_M:-3.0}"
 if [[ "$AEROTHON_AIRFRAME" == "iris" ]]; then
     export AEROTHON_CAMERA_HFOV="${AEROTHON_CAMERA_HFOV:-1.0472}"
 else
@@ -378,11 +406,18 @@ python3 "$SCRIPT_DIR/materialize_vehicle_model.py" \
     --source "$ARDUPILOT_GAZEBO_PREFIX/share/ardupilot_gazebo/models/iris_with_gimbal/model.sdf" \
     --output-root "$VEHICLE_MODELS_DIR"
 export GZ_SIM_RESOURCE_PATH="$VEHICLE_MODELS_DIR:${GZ_SIM_RESOURCE_PATH:-}"
+# The day's conditions (AEROTHON_CONDITIONS = calm|field|worst|random or a
+# JSON object; a world spec may carry its own) become the world's wind and
+# marker wear, SITL's sensor faults and degrade_node's camera and lidar.
+export AEROTHON_CONDITIONS_FILE=/tmp/aerothon_conditions.json
+export AEROTHON_CONDITIONS_PARM=/tmp/aerothon_conditions.parm
 python3 "$SCRIPT_DIR/materialize_world.py" \
     --source "$WORKSPACE_ROOT/src/aerothon_sim/sim_gazebo/worlds/mission2.sdf" \
     --assets "$WORKSPACE_ROOT/src/aerothon_sim/sim_gazebo/materials" \
     --output "$WORLD_RUNTIME" \
-    --layout-out /tmp/aerothon_arena_layout.json
+    --layout-out /tmp/aerothon_arena_layout.json \
+    --conditions-out "$AEROTHON_CONDITIONS_FILE" \
+    --sitl-params-out "$AEROTHON_CONDITIONS_PARM"
 
 # The organiser inputs for THIS arena. A randomised arena moves the delivery
 # field, and publishing the shipped arena's boundary for it sent the search
@@ -497,6 +532,16 @@ if [[ "${AEROTHON_SUPPLY_DELIVERY_ZONE:-1}" == "1" ]] && command -v ros2 >/dev/n
     echo "[4/5] Supplying the delivery-zone boundary (${AEROTHON_DELIVERY_ZONE:-32,0,40,30})..."
     python3 "$SCRIPT_DIR/publish_delivery_zone.py" &
     PIDS+=($!)
+fi
+
+# SITL's saved parameters (eeprom.bin, in the directory it starts in) beat
+# every --defaults file. A learned MOT_THST_HOVER of 0.324 -- the Iris's hover
+# throttle -- survived into every run on the team airframe, which hovers at
+# 0.48, and the airframe tuning could never take effect. Every simulated run
+# starts from the parameter files; AEROTHON_KEEP_EEPROM=1 keeps the old store.
+if [[ "${AEROTHON_KEEP_EEPROM:-0}" != "1" ]]; then
+    rm -f "$PWD/eeprom.bin" "$WORKSPACE_ROOT/eeprom.bin"
+    echo "[SIM] cleared SITL's saved parameters (eeprom.bin)"
 fi
 
 # 6. Launch Full Simulation Stack (SITL + ROS 2 + SLAM + RViz)

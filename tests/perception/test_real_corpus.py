@@ -42,6 +42,7 @@ WHAT IT ASSERTS
 import json
 import os
 import re
+import sys
 import unittest
 from collections import defaultdict
 
@@ -49,6 +50,10 @@ import cv2
 import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(HERE, "..", "..", "src", "aerothon_perception",
+                                "perception_qr"))
+from perception_qr.qr_decode import QrDecoder  # noqa: E402
+
 CORPUS = os.path.join(HERE, "corpus")
 EXPECTED_JSON = os.path.join(CORPUS, "expected.json")
 
@@ -104,13 +109,21 @@ def detect_green_banner(img, s_lo=90, v_lo=60):
             "aspect": (w / h) if h else 0.0}, mask
 
 
+def first_decode(decoder, img):
+    """(payload, marker px) of the first marker the flight decoder reads."""
+    for text, quad in decoder.read(img)[0]:
+        xs, ys = quad[:, 0], quad[:, 1]
+        return text, float(max(xs.max() - xs.min(), ys.max() - ys.min()))
+    return "", 0.0
+
+
 class RealCorpusTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
         cls.qr_files, cls.banner_files = corpus_files()
         cls.expected = load_expected()
-        cls.detector = cv2.QRCodeDetector()
+        cls.decoder = QrDecoder()
 
     def _skip_if_empty(self, files, kind):
         if not files:
@@ -127,16 +140,7 @@ class RealCorpusTests(unittest.TestCase):
         for name, meta in self.qr_files:
             img = cv2.imread(os.path.join(CORPUS, name))
             self.assertIsNotNone(img, f"unreadable image {name}")
-            retval, decoded, points, _ = self.detector.detectAndDecodeMulti(img)
-            text = ""
-            marker_px = 0.0
-            if retval and points is not None:
-                for t, quad in zip(decoded, points):
-                    if t:
-                        text = t
-                        xs, ys = quad[:, 0], quad[:, 1]
-                        marker_px = max(xs.max() - xs.min(), ys.max() - ys.min())
-                        break
+            text, marker_px = first_decode(self.decoder, img)
             want = self.expected.get(name)
             ok = bool(text) and (want is None or text == want)
             key = (meta["size_mm"], meta["dist_cm"], meta["angle"], meta["light"])
@@ -199,16 +203,7 @@ class RealCorpusTests(unittest.TestCase):
             if meta["angle"] != "0":
                 continue
             img = cv2.imread(os.path.join(CORPUS, name))
-            retval, decoded, points, _ = self.detector.detectAndDecodeMulti(img)
-            marker_px = 0.0
-            text = ""
-            if retval and points is not None:
-                for t, quad in zip(decoded, points):
-                    if t:
-                        text = t
-                        xs, ys = quad[:, 0], quad[:, 1]
-                        marker_px = max(xs.max() - xs.min(), ys.max() - ys.min())
-                        break
+            text, marker_px = first_decode(self.decoder, img)
             if text and marker_px:
                 good.append(px_per_module(marker_px))
             elif not text:

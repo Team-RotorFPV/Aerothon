@@ -66,17 +66,6 @@ def load_track(path):
     return rows
 
 
-def to_corridor(p, layout):
-    """Home-local track point -> the shipped corridor's own frame."""
-    hx, hy = layout.get("home_world", [0.0, 0.0])
-    gx, gy, gyaw = layout.get("gate", [BANNER_PIVOT[0], BANNER_PIVOT[1], 0.0])
-    wx, wy = p["x"] + hx, p["y"] + hy
-    dx, dy = wx - gx, wy - gy
-    c, s = math.cos(-gyaw), math.sin(-gyaw)
-    return (BANNER_PIVOT[0] + dx * c - dy * s,
-            BANNER_PIVOT[1] + dx * s + dy * c)
-
-
 def lanes(layout):
     """(outbound, return) lanes as (x, y, yaw, length, width, wall height),
     WORLD frame, origin at each lane's banner and +x down it.
@@ -118,8 +107,11 @@ def traversal(track, layout, start_i, outbound):
     enter_u, leave_u = 0.5, L - 0.5
     i, prev = start_i, None
     while i < len(track):
-        u, _ = to_lane(track[i], layout, lane)
-        if prev is not None and prev < enter_u <= u:
+        u, v = to_lane(track[i], layout, lane)
+        # Through the MOUTH: crossing the entry line anywhere along its
+        # infinite length -- a search lane at 10 m, 6.6 m to one side -- is
+        # not entering the corridor (editor_test, sim/fly_headless.py).
+        if prev is not None and prev < enter_u <= u and abs(v) <= W:
             break
         prev = u
         i += 1

@@ -53,6 +53,8 @@ from rclpy.node import Node
 import cv2
 import numpy as np
 
+from camera_ctrl.gate import CameraGate
+from perception_banner.photometry import normalise
 from perception_banner.word_reader import reads_banner
 from cv_bridge import CvBridge
 from geometry_msgs.msg import Vector3
@@ -174,6 +176,8 @@ class BannerNode(Node):
         self.bridge = CvBridge()
 
         self.create_subscription(Image, image_topic, self.on_image, 5)
+        # The banner is looked for with the camera level or 20 deg down.
+        self.gate = CameraGate(self, ("FORWARD", "BANNER"))
         self.pub = self.create_publisher(Vector3, '/percep/banner', 10)
         self.pub_detail = self.create_publisher(String, '/percep/banner/detail', 10)
         self.pub_annot = self.create_publisher(Image, '/percep/banner/annotated', 5)
@@ -611,8 +615,16 @@ class BannerNode(Node):
 
     # ------------------------------------------------------------------ #
     def on_image(self, msg: Image):
+        if not self.gate.open():
+            # Say so, rather than fall silent: the mission keeps the last
+            # message, and a stale "identified" would outlive the view.
+            self.pub.publish(Vector3())
+            self.pub_detail.publish(String(data=json.dumps(
+                {"identified": False, "reason": "camera not pointed ahead",
+                 "candidates": 0})))
+            return
         try:
-            frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+            frame = normalise(self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8'))
         except Exception as e:  # noqa: BLE001
             self.get_logger().warn(f"cv_bridge: {e}")
             return
@@ -638,6 +650,11 @@ class BannerNode(Node):
             detail["green_area_px"] = int(cv2.contourArea(big))
             detail["green_bearing"] = round(((gx + gw / 2.0) - w / 2.0) / (w / 2.0), 3)
             detail["image_wh"] = [int(w), int(h)]
+            # ...and the next few: the largest is often ground (a grassed
+            # delivery zone) beside the board the mission is looking for.
+            detail["green_regions"] = [
+                [*map(int, cv2.boundingRect(c)), int(cv2.contourArea(c))]
+                for c in sorted(cnts, key=cv2.contourArea, reverse=True)[:4]]
 
         best = None
         for c in sorted(cnts, key=cv2.contourArea, reverse=True)[:5]:

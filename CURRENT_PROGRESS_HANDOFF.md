@@ -1,5 +1,11 @@
 # AeroTHON Mission 2 — Current Progress and Honest Handoff
 
+> **Historical (2026-08-15).** Most defects below have since been fixed
+> (winch controller with camera-confirmed drops, banner alignment, red-zone
+> map, fail-closed stages). For the current state see
+> [docs/FIELD_READINESS.md](docs/FIELD_READINESS.md) and
+> [.scratch/rulebook-compliance/status.md](.scratch/rulebook-compliance/status.md).
+
 **Date:** 2026-08-15  
 **Workspace:** `/mnt/newvolume/MY DOCUMENTS/VIT/Team Rotor Fpv/AEROTHON`  
 **Intended reader:** Claude or the next engineer continuing this work

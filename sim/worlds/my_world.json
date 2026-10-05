@@ -2,9 +2,9 @@
   "schema": "aerothon-world/1",
   "name": "my_world",
   "takeoff": {
-    "x": -0.5,
-    "y": 10.5,
-    "yaw_deg": 0
+    "x": -4.2,
+    "y": 3.2,
+    "yaw_deg": -25
   },
   "corridor": {
     "x": 2,
@@ -56,10 +56,10 @@
         "yaw_deg": 0
       },
       {
-        "u": 2.55,
-        "v": -0.06,
+        "u": 2.6,
+        "v": 1.35,
         "w": 0.35,
-        "d": 1.2,
+        "d": 0.8,
         "h": 3.4,
         "yaw_deg": 0
       }

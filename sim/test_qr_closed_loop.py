@@ -174,12 +174,31 @@ class FindStartQRTests(unittest.TestCase):
         self.leaf.tick_once()
         self.assertEqual(self.leaf.status, py_trees.common.Status.SUCCESS)
 
-    def test_descends_when_nothing_visible(self):
+    def test_climbs_first_then_descends_when_nothing_visible(self):
+        """Up widens the view; down only shrinks it. The team airframe's C270
+        had the start marker at its frame edge and descended it out of view,
+        so the ladder now climbs first and descends only after."""
         self.mav.qr_offset = offset(0, 0, 0.0)
-        for _ in range(7):
+        for _ in range(30):
             self.leaf.tick_once()
         alts = [c[2] for c in self.mav.goto_calls]
+        self.assertGreater(max(alts), 5.0, f"never climbed: {alts}")
         self.assertLess(min(alts), 5.0, f"never descended: {alts}")
+        self.assertLess(alts.index(max(alts)), alts.index(min(alts)),
+                        "descended before it tried a wider view")
+
+    def test_the_ladder_stays_above_the_airborne_floor(self):
+        """It stepped down to 2.0 m against a 2.0 m airborne floor and the
+        abort fired at 1.99 m."""
+        self.mav.airborne_floor = 2.0
+        self.leaf.initialise()
+        self.mav.qr_offset = offset(0, 0, 0.0)
+        for _ in range(200):
+            self.leaf.tick_once()
+            if self.leaf.status != py_trees.common.Status.RUNNING:
+                break
+        alts = [c[2] for c in self.mav.goto_calls]
+        self.assertGreaterEqual(min(alts), 2.5 - 1e-9, f"too close to the floor: {alts}")
 
     def test_ladder_bottoms_out_and_FAILS(self):
         self.mav.qr_offset = offset(0, 0, 0.0)

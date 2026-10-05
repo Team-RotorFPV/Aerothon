@@ -53,6 +53,7 @@ from std_msgs.msg import Bool, Float32, String
 
 from collections import deque
 
+from perception_banner.photometry import normalise
 from perception_redzone.georef import (GroundGrid, bbox, footprint,
                                        ground_point_q)
 
@@ -67,6 +68,11 @@ class RedZoneNode(Node):
         p = self.declare_parameter
         p('image_topic', '/image_raw')
         p('min_area_frac', 0.002)      # smallest contour worth projecting
+        # Red narrower than this on the ground is not a red zone. Every
+        # feature of a QR code is: the rulebook's own drawing (Figure 3) prints
+        # delivery-pad codes in red ink, and without this their modules and
+        # finder squares were confirmed as restricted ground over the pad.
+        p('min_feature_m', 0.5)
         p('s_lo', 90)
         p('v_lo', 60)
         # ---- geometry ----
@@ -176,13 +182,35 @@ class RedZoneNode(Node):
         return True, ""
 
     def red_mask(self, frame):
-        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        hsv = cv2.cvtColor(normalise(frame), cv2.COLOR_BGR2HSV)
         s_lo, v_lo = int(self._g('s_lo')), int(self._g('v_lo'))
         # Red wraps the hue circle -> two bands.
         m1 = cv2.inRange(hsv, (0, s_lo, v_lo), (10, 255, 255))
         m2 = cv2.inRange(hsv, (170, s_lo, v_lo), (179, 255, 255))
         mask = cv2.bitwise_or(m1, m2)
-        return cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
+        return self._drop_narrow(mask)
+
+    def _drop_narrow(self, mask):
+        """Remove red narrower than `min_feature_m` on the ground.
+
+        An opening whose kernel is that width in pixels at the current
+        altitude. Run on a quarter-size mask (the kernel is tens of pixels at
+        full size) and ANDed back, so what survives keeps its full-resolution
+        outline. Without an altitude the scale is unknown and nothing is
+        dropped.
+        """
+        if self._pose is None or self._pose[2] <= 0.5:
+            return mask
+        h, w = mask.shape
+        px_per_m = (w / 2.0) / math.tan(self._hfov / 2.0) / self._pose[2]
+        k = int(round(float(self._g('min_feature_m')) * px_per_m / 4.0))
+        if k < 2:
+            return mask
+        small = cv2.resize(mask, (w // 4, h // 4), interpolation=cv2.INTER_AREA)
+        small = cv2.morphologyEx(small, cv2.MORPH_OPEN, np.ones((k, k), np.uint8))
+        keep = cv2.resize(small, (w, h), interpolation=cv2.INTER_NEAREST)
+        return cv2.bitwise_and(mask, keep)
 
     def project_polygon(self, contour, wh, pose):
         """The contour itself as a ground polygon, with full attitude.
@@ -212,14 +240,18 @@ class RedZoneNode(Node):
             return
 
         h, w = frame.shape[:2]
-        mask = self.red_mask(frame)
-        frac = float(np.count_nonzero(mask)) / mask.size
-        cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL,
-                                   cv2.CHAIN_APPROX_SIMPLE)
-        min_area = float(self._g('min_area_frac')) * w * h
-        cnts = [c for c in cnts if cv2.contourArea(c) >= min_area]
-
+        # Red found where it cannot be placed on the ground is a number with
+        # nowhere to go: skip the mask, keep publishing the map.
         ok, why = self.can_georeference()
+        cnts, frac = [], 0.0
+        if ok:
+            mask = self.red_mask(frame)
+            frac = float(np.count_nonzero(mask)) / mask.size
+            cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL,
+                                       cv2.CHAIN_APPROX_SIMPLE)
+            min_area = float(self._g('min_area_frac')) * w * h
+            cnts = [c for c in cnts if cv2.contourArea(c) >= min_area]
+
         detail = {"status": NOT_VISIBLE, "reason": why,
                   "red_frac": round(frac, 5), "blobs": len(cnts),
                   "exclusions": [], "confirmed_area_m2": 0.0,

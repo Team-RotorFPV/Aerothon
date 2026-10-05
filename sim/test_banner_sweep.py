@@ -466,6 +466,24 @@ class NearGateTests(unittest.TestCase):
             self.clock.advance(0.1)
         self.fail("never committed to a banner")
 
+    def test_a_near_green_board_outranks_a_far_banner(self):
+        """Blown to within 2.3 m of the entrance, the board would not fit the
+        frame; the one banner that read was the return gate over the walls."""
+        mav = TwoGateMav([self.FAR])
+        stage = AlignToBanner(mav, clock=self.clock)
+        stage.initialise()
+        for _ in range(6000):
+            if stage._target_yaw is not None and stage._green is None:
+                stage._green = {"x": 2.3, "y": 0.0, "range": 2.3, "area": 5e5,
+                                "heading": 0.0, "source": "lidar", "cut": False}
+            stage.update()
+            if stage._vantages:
+                break
+            self.clock.advance(0.1)
+        logs = " ".join(m for m, _ in mav.logs)
+        self.assertNotIn("taking the nearest one seen", logs)
+        self.assertTrue(stage._vantages, "never went round the green")
+
     def test_range_estimate_orders_the_gates(self):
         stage = AlignToBanner(TwoGateMav([]), clock=self.clock)
         self.assertGreater(stage.range_from_area(self.FAR[1]), stage.near_range_m)
@@ -965,6 +983,12 @@ class GateMav(LagMav):
             return no_surface(
                 f"the face lies {math.degrees(alpha):+.0f} deg off the nose, "
                 f"outside the sector the camera named")
+        # scan_geometry.find_surface's own refusal (range_tol_m 3.0): a face
+        # far from where the stage expects the banner is "something else".
+        if expected_range_m is not None and                 abs(self.standoff() - expected_range_m) > 3.0:
+            return no_surface(
+                f"the flat face stands at {self.standoff():.1f} m, not the "
+                f"{expected_range_m:.1f} m the camera puts the banner at")
         return {"ok": True, "angle_rad": alpha, "range_m": self.standoff(),
                 "points": 44, "residual_m": 0.005, "extent_m": 3.6,
                 "reason": ""}
@@ -1029,6 +1053,35 @@ class SquareOnWithTheLidarTests(unittest.TestCase):
             if status is py_trees.common.Status.FAILURE:
                 break
             self.clock.advance(0.1)
+        self.assertIs(status, py_trees.common.Status.SUCCESS, mav.abort_reason)
+
+    class Ranged(GateMav):
+        """The camera ranges the banner it reads at `cam_scale` times the
+        distance of the face the lidar measures."""
+        cam_scale = 1.0
+        focal_px = banner_area_m2 = None
+
+        @property
+        def banner_board_area(self):
+            r = self.cam_scale * math.hypot(*self._to_gate())
+            return self.focal_px ** 2 * self.banner_area_m2 / r ** 2
+
+    def _ranged(self, scale):
+        mav = self.Ranged(gate=(5.0, 0.0), face_rad=math.pi)
+        mav.cam_scale = scale
+        stage = self._stage(mav)
+        mav.focal_px, mav.banner_area_m2 = stage.focal_px, stage.banner_area_m2
+        return mav, stage, run(stage, mav, self.clock, ticks=1500)
+
+    def test_a_face_nearer_than_the_banner_read_is_not_squared_on(self):
+        """The return gate read down its lane, a structure 3 m ahead."""
+        mav, stage, status = self._ranged(3.0)
+        self.assertIsNot(status, py_trees.common.Status.SUCCESS)
+        self.assertIn("is not the banner", " ".join(m for m, _ in mav.logs))
+        self.assertTrue(stage._far_refused, "the far banner is still a fallback")
+
+    def test_a_face_where_the_camera_ranges_the_banner_is(self):
+        mav, _, status = self._ranged(1.3)          # oblique reads farther
         self.assertIs(status, py_trees.common.Status.SUCCESS, mav.abort_reason)
 
     def test_an_aircraft_already_square_finishes_without_moving(self):
@@ -1100,6 +1153,11 @@ class SquareOnWithTheLidarTests(unittest.TestCase):
                       stage.feedback_message)
         self.assertLessEqual(mav.standoff(), 6.5,
                              "never closed to a range the lidar works at")
+        # my_world, watched: squared up at 9.4 m, closed 4.4 m, found the
+        # board at exactly 5.0 m -- and refused it against the range from
+        # BEFORE the move, throwing the alignment away for a second orbit.
+        refused = [m for m, _ in mav.logs if "puts the banner at" in m]
+        self.assertEqual(refused, [])
 
     def test_the_standoff_correction_lands_INSIDE_the_band(self):
         """Seed 1001: at 6.0-6.1 m against a 6.0 m limit the correction was
@@ -1613,6 +1671,48 @@ class RecoverTheBannerByMovingTests(unittest.TestCase):
             (round(good[0], 3), round(good[1], 3)),
             "went back to the same pose twice instead of searching")
 
+    def test_a_board_too_close_to_frame_is_backed_away_from(self):
+        """2.4 m from a 3.7 m board: it reads on alternate frames, cut off."""
+        import random
+
+        class TooClose(GateMav):
+            coin = random.Random(0)
+
+            @property
+            def banner_clipped(self):
+                return math.hypot(*self._to_gate()) < 4.0
+
+            def banner_identified(self):
+                if not super().banner_identified():
+                    return False
+                return not self.banner_clipped or self.coin.random() < 0.5
+
+        mav = TooClose(gate=(2.4, 0.0), face_rad=math.pi)
+        mav._yaw = math.pi                  # facing away: it has to sweep
+        stage = self._stage(mav, dwell_s=2.0)
+        status = run(stage, mav, self.clock, ticks=9000)
+        self.assertIn("overflows the frame", " ".join(m for m, _ in mav.logs))
+        self.assertIs(status, py_trees.common.Status.SUCCESS, mav.abort_reason)
+        self.assertGreaterEqual(math.hypot(*mav._to_gate()), 3.3)
+
+    def test_the_pattern_never_steps_up_to_a_board_it_has_measured(self):
+        """Split arena, worst conditions: 2.5 m 'along the last bearing'
+        from a board measured at 3.6 m put the aircraft under its edge."""
+        mav = GateMav(gate=(3.6, 0.0), face_rad=math.pi)
+        stage = self._stage(mav)
+        for _ in range(3000):
+            if stage.update() is not py_trees.common.Status.RUNNING:
+                break
+            self.clock.advance(0.1)
+            if stage._standoff is not None:
+                break
+        self.assertIsNotNone(stage._standoff, "never measured the board")
+        for why in ("first loss", "second loss", "third loss"):
+            stage._relocate(why)
+            self.assertGreaterEqual(
+                math.dist(stage._anchor[:2], mav.gate), stage.min_standoff - 0.3,
+                f"{why}: relocated up to the board")
+
     def test_it_gives_up_inside_its_bound_and_says_where_it_stood(self):
         mav = GateMav(gate=(60.0, 0.0), face_rad=math.pi,
                       max_ident_range_m=1.0, lidar_blind=True)
@@ -1649,7 +1749,6 @@ class TheAspectGateIsGoneTests(unittest.TestCase):
     def test_the_stage_has_no_aspect_knobs_left_to_turn(self):
         """These parameters named a measurement that could not answer the
         question. A stage that still accepts them still has the code."""
-        import inspect
         args = inspect.signature(AlignToBanner.__init__).parameters
         for gone in ("min_square_aspect", "peak_min_aspect", "square_gain",
                      "max_strafes", "max_strafes_square", "stall_before_strafe"):

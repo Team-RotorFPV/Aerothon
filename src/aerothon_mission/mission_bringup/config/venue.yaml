@@ -1,0 +1,39 @@
+# What the rulebook leaves to the venue and the airframe, in one place.
+# mission2.launch.py loads this (params_file:=...) for the sim and the
+# aircraft alike. The values below are the simulated arena's and the sim
+# airframe's; measure the real ones and set them here before flying.
+# Camera FOV and pad QR size are launch arguments (camera_hfov,
+# target_marker_m) and are not repeated here.
+#
+# Keep the decimal point on metre values (4.0, not 4): ROS 2 refuses an
+# integer for a float parameter and the node will not start.
+
+mission_bt:
+  ros__parameters:
+    # The corridor banner's board, m. Range to the gate is estimated from
+    # its area in pixels. The rulebook gives no size.
+    banner_w_m: 3.7
+    banner_h_m: 1.15
+    # The return lane's centreline relative to the outbound one, m,
+    # port-positive facing out of the corridor.
+    return_lane_offset_m: -4.0
+    # Longest edge of the payload as seen from above, m (rulebook Fig. 1:
+    # 10 x 5 x 5 cm). The drop is confirmed on a blob of about this size.
+    payload_size_m: 0.10
+    # The highest release the line can make with slack for the gravity hook.
+    winch_reach_m: 5.5
+
+winch_ctrl:
+  ros__parameters:
+    # The node integrates payout from these; nothing reads the real line
+    # length back. Time the real winch over a known length.
+    payout_rate_mps: 0.30
+    stow_rate_mps: 0.45
+    max_payout_m: 6.0
+    hook: gravity            # gravity | command
+
+perception_payload:
+  ros__parameters:
+    # The payload's colour, OpenCV HSV (hue 0-180). Default: saturated yellow.
+    hsv_lo: [18, 120, 120]
+    hsv_hi: [38, 255, 255]

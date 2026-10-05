@@ -86,8 +86,16 @@ class FakeMav:
         self.surface_calls = []
         self.square_on = []
         self.camera_poses = []
+        self.state = type("State", (), {"armed": False})()
+        self.modes = []
 
     # ---- stage interface ---- #
+    def set_mode(self, mode):
+        self.modes.append(mode)
+
+    def land(self):
+        self.modes.append("LAND")
+
     def goto(self, *a, **k):
         self.gotos.append(a)
 
@@ -109,9 +117,6 @@ class FakeMav:
 
     def corridor_exited(self):
         return self.exited
-
-    def corridor_entered(self):
-        return bool((self.avoid_detail or {}).get("corridor_entered", False))
 
     def banner_identified(self):
         return self.banner_z >= 1.0
@@ -328,6 +333,44 @@ class DuckUnderBoardTests(unittest.TestCase):
         self.assertTrue(all(abs(g[0]) < 1e-9 and abs(g[1]) < 1e-9
                             for g in mav.gotos))
 
+    def test_it_lines_up_on_the_posts_before_crossing(self):
+        """0.8 m off the gate's middle in a 3 m lane: the wall is in the
+        strip the crossing keeps clear until it moves across."""
+        class OffCentre(_LaggedGateMav):
+            def opening_ahead(self, bearing_rad, half_width_rad, need_clear_m=10.0):
+                o = super().opening_ahead(bearing_rad, half_width_rad, need_clear_m)
+                if o.get("gate_m") is None:
+                    return o
+                off = -self._pos[1]                # the gap is at y = 0
+                o = dict(o, centre_m=off)
+                if abs(off) > 0.5:                 # the wall is in the strip
+                    o.update(open=False, clear_m=5.2,
+                             reason="gate at 5.00 m, something standing at 5.20 m")
+                return o
+
+        mav = OffCentre(opening_below_m=2.6)
+        mav._pos = (0.0, 0.8, 3.0)
+        leaf = self._fly(mav)
+        self.assertIs(leaf.status, py_trees.common.Status.SUCCESS, mav.abort_reason)
+        self.assertLess(abs(mav.pos()[1]), 0.3)
+
+    def test_an_edge_read_a_step_high_is_stepped_under(self):
+        """Baro noise: one look at 2.6 m finds the way open, and 0.6 m lower
+        the board is back in the scan; lower still it is open for good."""
+        class Noisy(_LaggedGateMav):
+            def opening_ahead(self, bearing_rad, half_width_rad, need_clear_m=10.0):
+                if 1.9 < self._alt < 2.3:
+                    self.opening_calls.append((self._alt, need_clear_m))
+                    return {"open": False, "clusters": 1, "gap_m": 0.0,
+                            "gate_m": None, "clear_m": 0.0,
+                            "reason": "one continuous board face"}
+                return super().opening_ahead(bearing_rad, half_width_rad, need_clear_m)
+
+        mav = Noisy(opening_below_m=2.65)
+        leaf = self._fly(mav)
+        self.assertIs(leaf.status, py_trees.common.Status.SUCCESS, mav.abort_reason)
+        self.assertLess(leaf.alt, 1.9)
+
     def test_no_transition_before_the_floor_is_refused_with_measurements(self):
         mav = _LaggedGateMav(never_opens=True)
 
@@ -338,6 +381,21 @@ class DuckUnderBoardTests(unittest.TestCase):
         self.assertIn("Altitudes tried", mav.abort_reason)
         self.assertIn("3.0 m", mav.abort_reason)
         self.assertGreaterEqual(len(mav.opening_calls), 3)
+
+    def test_already_under_an_unidentified_board_is_refused(self):
+        mav = _LaggedGateMav(opening_below_m=3.5)
+        leaf = self._fly(mav)
+        self.assertIs(leaf.status, py_trees.common.Status.FAILURE)
+        self.assertIn("without the board ever being seen", mav.abort_reason)
+
+    def test_already_under_the_board_the_square_up_fitted_goes_through(self):
+        """Baro drift puts the scan plane under the board from the first
+        look; the square-up's lidar fit is the sighting."""
+        mav = _LaggedGateMav(opening_below_m=3.5)
+        mav.board_face_t = 0.0
+        leaf = self._fly(mav)
+        self.assertIs(leaf.status, py_trees.common.Status.SUCCESS, mav.abort_reason)
+        self.assertLessEqual(leaf.alt, 3.0 - 0.6 + 1e-6)
 
     def test_the_advance_after_the_duck_never_uses_board_height(self):
         from mission_bt.mission_tree import GateAdvance
@@ -412,6 +470,7 @@ class CorridorAltitudeTests(unittest.TestCase):
         mav._pos = (20.0, 0.0, 3.0)
         mav.avoid_detail = {"state": "OBSERVING", "corridor_exited": True}
         mav.corridor_exited = lambda: Mav.corridor_exited(mav)
+        mav._avoid_current = lambda: True
         stage = Corridor("ReturnCorridor", mav, forward=False, alt=3.0)
         self.assertIs(stage.update(), py_trees.common.Status.RUNNING)
         mav.avoid_detail = {"state": "CRUISE", "corridor_exited": False}
@@ -458,6 +517,39 @@ class CorridorAltitudeTests(unittest.TestCase):
         self.mav.exited = True
         self.leaf.tick_once()
         self.assertEqual(self.leaf.status, py_trees.common.Status.FAILURE)
+
+    def test_walls_falling_away_at_the_mouth_is_not_the_exit(self):
+        """my_world: the navigator backed out of the return lane's mouth, the
+        walls fell away, and the stage called it the far end."""
+        self.mav._alt = 1.9
+        self.leaf.alt = 1.9
+        self.mav.gate_crossing = (0.0, 0.0, 0.0, 5.5)   # 5.5 m ahead, +x
+        self.mav._pos = (4.0, 5.4, 1.9)                 # back past the board
+        self.mav.exited = True
+        self.leaf.tick_once()
+        self.assertEqual(self.leaf.status, py_trees.common.Status.FAILURE)
+        self.assertIn("mouth", self.mav.abort_reason)
+        self.assertFalse(self.mav.avoidance)
+
+    def test_walls_falling_away_down_the_lane_is_the_exit(self):
+        self.mav._alt = 1.9
+        self.leaf.alt = 1.9
+        self.mav.gate_crossing = (0.0, 0.0, 0.0, 5.5)
+        self.mav._pos = (15.0, 0.3, 1.9)
+        self.mav.exited = True
+        self.leaf.tick_once()
+        self.assertEqual(self.leaf.status, py_trees.common.Status.SUCCESS)
+
+    def test_the_lane_is_flown_at_the_height_the_crossing_measured(self):
+        """Climbing back to 3.0 m under a 2.8 m board edge struck it."""
+        duck = {"alt": 1.8}
+        leaf = Corridor("ReturnCorridor", self.mav, forward=False,
+                        alt=lambda: duck["alt"] or 3.0)
+        self.mav._alt = 1.8
+        self.mav._pos = (1.0, 0.0, 1.8)
+        leaf.tick_once()
+        self.assertEqual(leaf.status, py_trees.common.Status.RUNNING)
+        self.assertEqual(self.mav.avoid_hold_alt, 1.8)
 
     def test_navigator_STUCK_fails_the_stage(self):
         """Three live runs hovered against an obstacle indefinitely."""
@@ -528,6 +620,23 @@ class MissionFailureLatchTests(unittest.TestCase):
         self.assertTrue(mav.mission_started)
         self.assertEqual(mav.results, [])
 
+    def test_a_failure_in_the_air_brings_the_aircraft_home(self):
+        mav = FakeMav()
+        mav.state.armed = True
+        latch_mission_failure(_StubRoot(py_trees.common.Status.FAILURE), mav)
+        self.assertEqual(mav.modes, ["RTL"])
+
+    def test_a_failure_near_the_ground_lands_where_it_is(self):
+        mav = FakeMav()
+        mav.state.armed, mav._alt = True, 1.0
+        latch_mission_failure(_StubRoot(py_trees.common.Status.FAILURE), mav)
+        self.assertEqual(mav.modes, ["LAND"])
+
+    def test_a_failure_on_the_ground_commands_nothing(self):
+        mav = FakeMav()
+        latch_mission_failure(_StubRoot(py_trees.common.Status.FAILURE), mav)
+        self.assertEqual(mav.modes, [])
+
     def test_idle_tree_failure_is_not_a_mission_failure(self):
         """Before START the root legitimately fails; that is not an outcome."""
         mav = FakeMav()
@@ -589,6 +698,36 @@ class CorridorExitIsRecordedTests(unittest.TestCase):
         self.mav._pos = (1.0, 0.0, 3.0)
         self.mav.record_corridor_exit()
         self.assertEqual(self.mav.corridor_exit_pose, first)
+
+
+class SearchSpeedTests(unittest.TestCase):
+    """The sweep flies as fast as it can still stop short of red ground it
+    has just seen: look-ahead, confirmation frames at the MEASURED rate,
+    braking, margin."""
+
+    def _stops_in_time(self, v, look, hz, frames=4, a=2.0, margin=1.2, react=0.3):
+        return v * (frames / hz + react) + v * v / (2 * a) <= look - margin + 1e-9
+
+    def test_the_speed_stops_inside_the_look_ahead(self):
+        from mission_bt.mission_tree import safe_search_speed
+        for look, hz in ((2.55, 2.1), (4.5, 2.1), (2.55, 10.0), (6.0, 5.0)):
+            v = safe_search_speed(look, hz, ceiling_mps=9.0)
+            self.assertTrue(self._stops_in_time(v, look, hz), (look, hz, v))
+            self.assertFalse(self._stops_in_time(v + 0.05, look, hz),
+                             "slower than it needs to be")
+
+    def test_the_simulators_slow_camera_flies_slowly(self):
+        """2.1 frames a simulated second, nose-first at 10 m: under 1 m/s.
+        The fixed 1.96 m/s crabbed sweep could not stop in its look-ahead,
+        and a lane ran to 0.19 m of a red zone (my_world)."""
+        from mission_bt.mission_tree import safe_search_speed
+        self.assertLess(safe_search_speed(2.55, 2.1), 1.0)
+        self.assertFalse(self._stops_in_time(1.96, 4.5, 2.1))
+
+    def test_the_aircrafts_camera_flies_near_the_ceiling(self):
+        from mission_bt.mission_tree import safe_search_speed
+        self.assertGreater(safe_search_speed(2.55, 10.0), 1.2)
+        self.assertEqual(safe_search_speed(10.0, 30.0), 2.5)
 
 
 # --------------------------------------------------------------------------- #
@@ -996,10 +1135,10 @@ class RulebookAltitudeTests(unittest.TestCase):
         params = {
             'takeoff_alt': 5.0, 'search_alt': 10.0, 'drop_alt': 5.0,
             'image_width_px': 1280, 'camera_hfov': 1.0472,
-            'target_marker_m': 2.2, 'qr_modules': 33,
+            'target_marker_m': 2.2,
             'px_per_module_floor': 5.3, 'lane_overlap': 0.30,
-            'zone_margin': 1.0, 'corridor_alt': 3.0,
-            'waypoint_tol': 0.8, 'drop_tol': 0.5, 'scan_floor_alt': 2.0,
+            'zone_boundary_clearance': 1.0, 'corridor_alt': 3.0,
+            'scan_floor_alt': 2.0,
             'land_commit_alt': 1.5, 'banner_sweep_limit': math.pi,
         }
         root = build_root(FakeMav(), MagicMock(), params)
@@ -1092,10 +1231,10 @@ class RulebookAltitudeTests(unittest.TestCase):
         params = {
             'takeoff_alt': 5.0, 'search_alt': 10.0, 'drop_alt': 5.0,
             'image_width_px': 1280, 'camera_hfov': 1.0472,
-            'target_marker_m': 2.2, 'qr_modules': 33,
+            'target_marker_m': 2.2,
             'px_per_module_floor': 5.3, 'lane_overlap': 0.30,
-            'zone_margin': 1.0, 'corridor_alt': 3.0,
-            'waypoint_tol': 0.8, 'drop_tol': 0.5, 'scan_floor_alt': 2.0,
+            'zone_boundary_clearance': 1.0, 'corridor_alt': 3.0,
+            'scan_floor_alt': 2.0,
             'land_commit_alt': 1.5, 'banner_sweep_limit': math.pi,
         }
         root = build_root(FakeMav(), MagicMock(), params)
@@ -1242,10 +1381,9 @@ class FrontierSearchTests(unittest.TestCase):
         params = {
             'takeoff_alt': 5.0, 'search_alt': 10.0, 'drop_alt': 5.0,
             'image_width_px': 1280, 'camera_hfov': 1.0472,
-            'target_marker_m': 2.2, 'qr_modules': 33,
+            'target_marker_m': 2.2,
             'px_per_module_floor': 5.3, 'lane_overlap': 0.30,
-            'zone_margin': 1.0, 'corridor_alt': 3.0,
-            'waypoint_tol': 0.8, 'drop_tol': 0.5,
+            'zone_boundary_clearance': 1.0, 'corridor_alt': 3.0,
             'scan_floor_alt': 2.0, 'land_commit_alt': 1.5,
         }
         root = build_root(self.mav, MagicMock(), params)
@@ -1432,6 +1570,8 @@ class FrontierSearchTests(unittest.TestCase):
                 x, y, z = self.mav.gotos[-1][:3]
                 self.mav._pos = (x, y, z)
                 self.mav._alt = z
+                if len(self.mav.gotos[-1]) > 3:     # ...and faces where told
+                    self.mav._yaw = self.mav.gotos[-1][3]
                 if abs(y - prev[1]) < 0.3 and abs(x - prev[0]) >= 2.0:
                     along_lane.add(round(y, 1))
         replans = [m for m, _ in self.mav.logs if "mid-sweep" in m]
@@ -1824,10 +1964,10 @@ class ReturnIdentificationAltitudeTests(unittest.TestCase):
         params = {
             'takeoff_alt': 5.0, 'search_alt': 10.0, 'drop_alt': 5.0,
             'image_width_px': 1280, 'image_height_px': 720,
-            'camera_hfov': 1.0472, 'target_marker_m': 2.2, 'qr_modules': 33,
+            'camera_hfov': 1.0472, 'target_marker_m': 2.2,
             'px_per_module_floor': 5.3, 'lane_overlap': 0.30,
-            'zone_margin': 1.0, 'corridor_alt': 3.0, 'waypoint_tol': 0.8,
-            'drop_tol': 0.5, 'scan_floor_alt': 2.0, 'land_commit_alt': 1.5,
+            'zone_boundary_clearance': 1.0, 'corridor_alt': 3.0,
+            'scan_floor_alt': 2.0, 'land_commit_alt': 1.5,
             'banner_sweep_limit': math.pi,
         }
         root = build_root(FakeMav(), MagicMock(), params)
@@ -2075,14 +2215,35 @@ class DeliveryMeasurementSurvivesTests(unittest.TestCase):
         return leaf, mav
 
     # ---- guard 1: the geometry has to permit a measurement ---- #
-    def test_a_drop_below_the_tracking_floor_is_raised_to_it(self):
+    def test_a_drop_below_the_tracking_floor_is_centred_from_it(self):
         """Below it the pad cannot fit in frame, so the offset cannot exist.
         A drop altitude that makes the scored quantity unmeasurable is not a
         trade-off anyone chose."""
         leaf, mav = self.build(drop_alt=2.0, marker_m=2.2)
         leaf.initialise()
-        self.assertGreater(leaf.drop_alt, 2.0)
-        self.assertGreaterEqual(leaf.drop_alt, leaf.tracking_floor())
+        self.assertGreater(leaf.servo_alt, 2.0)
+        self.assertGreaterEqual(leaf.servo_alt, leaf.tracking_floor())
+
+    def test_the_release_is_never_above_the_winchs_reach(self):
+        """A 3 m pad's floor is 6.8 m on the C270; 6 m of line cannot reach
+        the ground from there, and a gravity hook never opens."""
+        leaf, mav = self.build(drop_alt=5.0, marker_m=3.0, hfov_rad=0.851919)
+        leaf.initialise()
+        self.assertGreater(leaf.servo_alt, 5.5)
+        self.assertLessEqual(leaf.release_alt, leaf.winch_reach_m)
+
+    def test_the_pad_sighting_from_the_centred_hold_survives_the_descent(self):
+        """Below the floor the pad is not in frame; the aircraft has held the
+        centred point since, so that sighting still measures the release."""
+        leaf, mav = self.build(0.1, 0.0, alt=6.8)
+        leaf.initialise()
+        leaf._t = 100
+        leaf.observe_offset()
+        leaf._held_from = 100
+        mav.qr_off = None
+        leaf._t = 100 + leaf.max_offset_age_ticks + 50
+        leaf._record_delivery_offset()
+        self.assertIsNotNone(mav.delivery_offset_m)
 
     def test_raising_the_drop_altitude_is_LOGGED(self):
         leaf, mav = self.build(drop_alt=2.0, marker_m=2.2)
@@ -2093,7 +2254,8 @@ class DeliveryMeasurementSurvivesTests(unittest.TestCase):
     def test_a_drop_altitude_already_above_the_floor_is_left_alone(self):
         leaf, mav = self.build(drop_alt=5.0, marker_m=2.2)
         leaf.initialise()
-        self.assertAlmostEqual(leaf.drop_alt, 5.0)
+        self.assertAlmostEqual(leaf.servo_alt, 5.0)
+        self.assertAlmostEqual(leaf.release_alt, 5.0)
 
     def test_the_floor_is_derived_from_the_marker_and_the_camera(self):
         """Not a constant. A bigger pad needs more altitude to fit in frame."""
@@ -2225,10 +2387,10 @@ class BuiltTreeCarriesTheNewBehaviourTests(unittest.TestCase):
     PARAMS = {
         'takeoff_alt': 5.0, 'search_alt': 10.0, 'drop_alt': 5.0,
         'image_width_px': 1280, 'camera_hfov': 1.0472,
-        'target_marker_m': 2.2, 'qr_modules': 33,
+        'target_marker_m': 2.2,
         'px_per_module_floor': 5.3, 'lane_overlap': 0.30,
-        'zone_margin': 1.0, 'corridor_alt': 3.0,
-        'waypoint_tol': 0.8, 'drop_tol': 0.5, 'scan_floor_alt': 2.0,
+        'zone_boundary_clearance': 1.0, 'corridor_alt': 3.0,
+        'scan_floor_alt': 2.0,
         'land_commit_alt': 1.5, 'redzone_clearance': 1.5,
     }
 
@@ -2270,9 +2432,11 @@ class BuiltTreeCarriesTheNewBehaviourTests(unittest.TestCase):
         for s in self._of_type("ScanStartQR"):
             self.assertAlmostEqual(s.hover.hover_s, 5.0)
 
-    def test_the_flown_sweep_hovers_on_each_marker_it_reads(self):
+    def test_the_flown_sweep_does_not_hover_on_wrong_markers(self):
+        """The operator's call: a 5 s pause over every marker read cost the
+        15 minute clock a pause per pad for a code read in one frame."""
         for s in self._of_type("LawnmowerSearch"):
-            self.assertAlmostEqual(s.hover.hover_s, 5.0)
+            self.assertFalse(s.hover.enabled)
 
     def test_every_transit_stage_routes_around_red_ground(self):
         """The defect this round exists for: only the sweep clipped anything."""

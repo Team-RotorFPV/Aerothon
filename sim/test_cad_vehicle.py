@@ -4,8 +4,8 @@
 What is checked is what the physics and the perception stack depend on, not
 the mesh: rotors at the CAD motor hubs in ArduPilot's quad-X order and spin,
 thrust scaled to the flown prop, the LD06 and C270 at their CAD mounts with
-their own specs, the lidar blind to the props, the hook where a payload clears
-the ground, and the TF tree (uav.urdf.xacro) agreeing with the Gazebo model.
+their own specs, the lidar blind to the props, the claw where the CAD
+draws it, and the TF tree (uav.urdf.xacro) agreeing with the Gazebo model.
 
     source /opt/ros/jazzy/setup.bash
     python3 -m pytest sim/test_cad_vehicle.py -v
@@ -80,6 +80,17 @@ class CadVehicleTests(unittest.TestCase):
             total += 0.5 * 1.2041 * (w * cp) ** 2 * area * cla * a0
         self.assertAlmostEqual(total / 9.81 / 2.0, 2.34, delta=0.1)
 
+    def test_rotor_torque_per_thrust_is_a_real_props(self):
+        """(cda/cla)*cp is the rotor's yaw torque per newton of thrust. The
+        Iris's blade gives 0.0019 m, a sixth of a real 9x4.5, and the yaw
+        demand of every sweep step took the thrust with it."""
+        for p in self.model.findall("plugin"):
+            if "lift-drag" not in p.get("filename", ""):
+                continue
+            ratio = (float(p.find("cda").text) / float(p.find("cla").text)
+                     * abs(float(p.find("cp").text.split()[0])))
+            self.assertAlmostEqual(ratio, 0.0125, delta=0.0005)
+
     def test_mass_is_the_all_up_weight(self):
         m = sum(float(l.find("inertial/mass").text) for l in self.model.findall("link"))
         self.assertAlmostEqual(m, 2.0, delta=0.04)
@@ -118,10 +129,20 @@ class CadVehicleTests(unittest.TestCase):
         self.assertGreaterEqual(float(ctl.find("p_gain").text), 40)
         self.assertGreaterEqual(float(ctl.find("i_gain").text), 4)
 
-    def test_the_payload_clears_the_ground_on_the_hook(self):
-        hook_z = self.link_pose("winch_hook")[2]
-        payload_bottom = hook_z - 0.012 - 0.08
-        self.assertGreater(payload_bottom, self.af["gear_bottom_z"] + 0.005)
+    def test_the_claw_is_where_the_cad_draws_it(self):
+        """The line holds the claw's top pin and the payload hangs from its
+        jaws. (The hook used to be a point placed 3.3 cm above the CAD's, so
+        that a payload on it cleared the ground; on the drawn claw the
+        rulebook payload hangs below the skids -- see sim/winch_bench.py.)"""
+        claw = self.af["claw"]
+        for link, pin in (("winch_hook", "top_pin"), ("claw_pivot", "centre_pin"),
+                          ("claw_link_a", "top_pin"), ("claw_jaw_a", "centre_pin")):
+            for a, b in zip(self.link_pose(link)[:3], claw[pin]):
+                self.assertAlmostEqual(a, b, places=4, msg=link)
+        dj = next(p for p in self.model.findall("plugin")
+                  if "DetachableJoint" in p.get("name", ""))
+        self.assertEqual(dj.findtext("parent_link"), "claw_pivot")
+        self.assertTrue(dj.findtext("attach_topic"))
 
     def test_the_tf_tree_agrees_with_the_gazebo_model(self):
         xacro = ROOT / "src/aerothon_mission/uav_description/urdf/uav.urdf.xacro"
@@ -150,3 +171,42 @@ class CadVehicleTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AirframeTuningTests(unittest.TestCase):
+    """The team airframe flies on its own ArduCopter tuning, not the Iris's."""
+
+    def params(self):
+        out = {}
+        for line in (ROOT / "src/aerothon_sim/sim_gazebo/config/aerothon_quad.parm").read_text().splitlines():
+            line = line.split("#", 1)[0].split()
+            if len(line) == 2:
+                out[line[0]] = float(line[1])
+        return out
+
+    def test_it_hovers_at_its_own_throttle(self):
+        """The Iris's learned 0.324 against the ~0.48 this frame needs left the
+        altitude loop's integrator carrying 15 % of throttle all flight."""
+        self.assertAlmostEqual(self.params()["MOT_THST_HOVER"], 0.48, delta=0.03)
+
+    def test_rate_gains_are_raised_for_its_authority(self):
+        p = self.params()
+        self.assertGreater(p["ATC_RAT_RLL_P"], 0.135)
+        self.assertGreater(p["ATC_RAT_PIT_P"], 0.135)
+        self.assertLess(p["ATC_ACCEL_R_MAX"], 110000)
+
+    def test_yaw_is_capped_so_it_cannot_take_the_thrust(self):
+        """00000169.BIN: a 45 deg sweep step saturated a motor and the frame
+        sank 4.9 m to the ground. Yaw demand is limited to what 9.45 in props
+        can deliver, and thrust has priority."""
+        p = self.params()
+        self.assertLessEqual(p["ATC_ACCEL_Y_MAX"], 27000)
+        self.assertTrue(0 < p["ATC_RATE_Y_MAX"] <= 60)
+        self.assertLess(p["MOT_YAW_HEADROOM"], 200)
+        self.assertLessEqual(p["ATC_RAT_YAW_P"], 0.4)
+
+    def test_the_launch_loads_it_and_a_stale_eeprom_cannot_override_it(self):
+        launch = (ROOT / "src/aerothon_sim/sim_gazebo/launch/sim_full.launch.py").read_text()
+        self.assertIn("aerothon_quad.parm", launch)
+        sh = (ROOT / "scripts/launch_level6_sim.sh").read_text()
+        self.assertIn('rm -f "$PWD/eeprom.bin"', sh)

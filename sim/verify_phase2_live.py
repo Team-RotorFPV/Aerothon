@@ -22,8 +22,7 @@ import time
 
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy, \
-    qos_profile_sensor_data
+from rclpy.qos import qos_profile_sensor_data
 from geometry_msgs.msg import PoseStamped
 from sensor_msgs.msg import Image, LaserScan
 from std_msgs.msg import Float64, String

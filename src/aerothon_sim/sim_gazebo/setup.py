@@ -25,5 +25,6 @@ setup(
     license='MIT',
     entry_points={'console_scripts': [
         'odom_tf = sim_gazebo.odom_tf:main',
+        'degrade_node = sim_gazebo.degrade_node:main',
     ]},
 )

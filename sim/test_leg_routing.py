@@ -176,6 +176,42 @@ class DetouredLegTests(unittest.TestCase):
         self.assertEqual(len(detour_logs), 1, mav.logs)
 
 
+class FlyThroughTests(unittest.TestCase):
+    """A detour's corners are flown through, not stopped at (lead_m)."""
+
+    def _fly(self, lead_m, step=0.8, ticks=200):
+        mav = FlyingMav(exclusions=BOX)
+        r = LegRouter(lead_m=lead_m)
+        track, corners_commanded = [mav._pos[:2]], 0
+        for _ in range(ticks):
+            status = r.fly(mav, 30.0, 0.0, 5.0)
+            if status is ARRIVED:
+                break
+            gx, gy = mav.gotos[-1][:2]
+            if (gx, gy) in [tuple(w) for w in r._wps[:-1]]:
+                corners_commanded += 1
+            px, py, pz = mav._pos
+            d = math.hypot(gx - px, gy - py)
+            k = 1.0 if d <= step else step / d
+            mav._pos = (px + k * (gx - px), py + k * (gy - py), pz)
+            track.append(mav._pos[:2])
+        return status, track, corners_commanded, r
+
+    def test_the_command_runs_ahead_of_the_corners(self):
+        """my_world: every reroute leg was a stop -- a quarter of the sweep
+        spent nearly stationary. The command should rarely BE a corner."""
+        status, track, stops, _ = self._fly(lead_m=3.0)
+        self.assertIs(status, ARRIVED)
+        _, _, stops_before, _ = self._fly(lead_m=0.0)
+        self.assertLess(stops, stops_before)
+
+    def test_flying_through_never_cuts_onto_red_ground(self):
+        status, track, _, r = self._fly(lead_m=3.0)
+        self.assertIs(status, ARRIVED)
+        self.assertFalse(path_hits_exclusion(track, 0.0, BOX),
+                         f"cut a corner across red ground: {track}")
+
+
 class ReplanTests(unittest.TestCase):
 
     def test_a_zone_confirmed_mid_leg_diverts_the_leg_being_flown(self):

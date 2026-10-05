@@ -108,14 +108,28 @@ def min_track_altitude(marker_m, hfov_rad, image_w_px, image_h_px,
     return margin * marker_m / (2.0 * math.tan(v / 2.0))
 
 
-def lane_spacing(altitude_m, hfov_rad, overlap=0.30):
-    """Lane spacing giving `overlap` fractional overlap between passes.
+def lane_spacing(altitude_m, hfov_rad, overlap=0.30, marker_m=0.0,
+                 marker_margin=1.1):
+    """Lane spacing giving `overlap` fractional overlap between passes, and
+    no wider than puts every marker WHOLLY in frame on some lane.
 
     goal.md Q9 asserts 5.0 m and the code said 6.0 m. Neither is right in
     general: the correct spacing depends on how high you are and how wide the
     camera sees.
+
+    A QR is read whole or not at all. Its centre has to lie within
+    (swath - marker) / 2 of a lane for the entire code to be in frame, so
+    lanes further apart than swath - marker leave strips where a pad is only
+    ever half seen. With the C270 crabbed at 10 m that was a 5.1 m swath, a
+    3.1 m pad and lanes 3.6 m apart (my_world). `marker_margin` pads the
+    marker for the quiet zone and the aircraft's wander off the lane.
     """
-    return ground_width(altitude_m, hfov_rad) * (1.0 - overlap)
+    width = ground_width(altitude_m, hfov_rad)
+    spacing = width * (1.0 - overlap)
+    whole = width - float(marker_m) * float(marker_margin)
+    if marker_m > 0.0 and whole > 0.0:
+        spacing = min(spacing, whole)
+    return spacing
 
 
 def plan_lawnmower(zone, spacing, altitude_m, axis="x"):
@@ -215,7 +229,7 @@ def plan_search(zone, image_width_px, hfov_rad, marker_m, modules,
     # correctly reports False because no further descent is needed.
     if max_altitude is not None:
         sweep_alt = min(sweep_alt, max_altitude)
-    spacing = lane_spacing(sweep_alt, swath_fov, overlap)
+    spacing = lane_spacing(sweep_alt, swath_fov, overlap, marker_m=marker_m)
     if axis == "auto":
         axis = "x" if zone[1] - zone[0] >= zone[3] - zone[2] else "y"
     waypoints = plan_lawnmower(zone, spacing, sweep_alt, axis=axis)

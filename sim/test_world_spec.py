@@ -7,7 +7,6 @@ spec rebuilds the shipped arena exactly -- so a custom run and a shipped run
 differ only in what the person changed.
 """
 
-import copy
 import json
 import math
 import os
@@ -256,7 +255,6 @@ class SeparateCorridorTests(unittest.TestCase):
 
     def _track_along(self, lane, across, z=3.0):
         """A straight flight down a lane's centre (offset `across`)."""
-        from check_track import to_lane  # noqa: F401
         x0, y0, yaw, L = lane[:4]
         hx, hy = self.lay["home_world"]
         rows = []
@@ -294,10 +292,33 @@ class ValidationTests(unittest.TestCase):
             {"u": 5.0, "v": 0.0, "w": 0.3, "d": 3.2, "h": 3.0})
         self.assertRefused(s, "blocks the return corridor")
 
-    def test_an_obstacle_under_the_lidar_plane_but_in_the_way_is_refused(self):
-        """Live: a 3.2 m block under a 3.23 m scan plane, flown into at 3 m."""
+    def test_obstacles_that_close_the_lane_BETWEEN_them_are_refused(self):
+        """Each leaves a 1.6 m gap on its own; 0.8 m apart along the lane on
+        opposite sides, the slot between them is narrower than the airframe."""
         s = W.default_spec()
-        s["return_corridor"]["obstacles"][2]["h"] = 3.2
+        s["return_corridor"]["obstacles"] = [
+            {"u": 4.0, "v": 0.8, "w": 0.35, "d": 1.9, "h": 3.4},
+            {"u": 4.8, "v": -0.8, "w": 0.35, "d": 1.9, "h": 3.4}]
+        self.assertRefused(s, "no way through")
+
+    def test_the_shipped_slalom_keeps_a_metre_either_side(self):
+        room = W.lane_bottleneck(W.default_spec()["return_corridor"])
+        self.assertAlmostEqual(room, 1.0, delta=0.06)
+
+    def test_a_chicane_the_navigator_will_not_take_is_warned_about(self):
+        s = W.load(ROOT / "sim/worlds/my_world_offaxis.json")
+        errs, warns = W.validate(s)
+        self.assertTrue([w for w in warns if "will stop in front of it" in w], warns)
+
+    def test_an_obstacle_under_the_lidar_plane_but_in_the_way_is_refused(self):
+        """Live: a 3.2 m block under a 3.23 m scan plane, flown into at 3 m.
+        Under the shipped board the corridor is flown at ~2.1 m, so the
+        invisible band is now ~1.8-2.3 m, and it moves with the board."""
+        s = W.default_spec()
+        s["return_corridor"]["obstacles"][2]["h"] = 2.0
+        self.assertRefused(s, "cannot see it")
+        s["banner"] = {"board_bottom_m": 3.6}
+        s["return_corridor"]["obstacles"][2]["h"] = 2.8
         self.assertRefused(s, "cannot see it")
 
     def test_overlapping_corridors_are_refused(self):

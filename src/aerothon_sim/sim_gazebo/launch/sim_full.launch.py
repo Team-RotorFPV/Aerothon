@@ -60,14 +60,28 @@ def generate_launch_description():
     shutil.copyfile(os.path.join(pkg_sim, 'config', 'aerothon_failsafe.parm'),
                     failsafe_params)
 
+    # The team airframe's own tuning (hover throttle, rate gains), on top of
+    # the Iris baseline. Same space-free copy as the other two, for the same
+    # reason.
+    airframe_params = []
+    if os.environ.get('AEROTHON_AIRFRAME', 'cad') == 'cad':
+        quad = os.path.join(tempfile.gettempdir(), 'aerothon_quad.parm')
+        shutil.copyfile(os.path.join(pkg_sim, 'config', 'aerothon_quad.parm'), quad)
+        airframe_params = [quad]
+
     sitl_defaults = ','.join([
         os.path.join(pkg_ardupilot_sitl, 'config', 'default_params', 'copter.parm'),
         os.path.join(pkg_ardupilot_gazebo, 'config', 'gazebo-iris-gimbal.parm'),
+        *airframe_params,
         # Last wins: competition-representative battery and GPS, so the Q27
         # interlock sees what the real aircraft presents.
         sitl_params,
         # Rulebook 5.4 item 6 fail-safes, identical to the aircraft's file.
         failsafe_params,
+        # The world's sensor faults (materialize_world.py --sitl-params-out),
+        # when the master launcher generated them for this run.
+        *[p for p in [os.environ.get('AEROTHON_CONDITIONS_PARM', '')]
+          if p and os.path.isfile(p)],
     ])
 
     world_template = os.path.join(pkg_sim, 'worlds', 'mission2.sdf')
@@ -230,7 +244,20 @@ def generate_launch_description():
     # upstream create node starts. Starting every graphical and ROS process at
     # t=0 can starve Ogre/Gazebo initialization on this workstation.
     delayed_vehicle = TimerAction(period=5.0, actions=[vehicle])
-    delayed_ros = TimerAction(period=8.0, actions=[gz_bridge, odom_tf, mission_stack])
+    # The camera and lidar reach the stack through the world's conditions
+    # (gz_bridge.yaml bridges them to *_gz); calm conditions pass through.
+    degrade = Node(
+        package='sim_gazebo',
+        executable='degrade_node',
+        name='sim_degrade',
+        parameters=[{'use_sim_time': True,
+                     'conditions_file': os.environ.get('AEROTHON_CONDITIONS_FILE', ''),
+                     'seed': int(os.environ.get('AEROTHON_CONDITIONS_SEED', '0'))}],
+        output='screen',
+    )
+
+    delayed_ros = TimerAction(period=8.0, actions=[gz_bridge, degrade, odom_tf,
+                                                   mission_stack])
     delayed_rviz = TimerAction(period=15.0, actions=[rviz_node])
 
     return LaunchDescription(args + [

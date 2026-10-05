@@ -41,10 +41,10 @@ from mission_bt.mission_tree import (
 DEFAULT_PARAMS = {
     'takeoff_alt': 5.0, 'search_alt': 10.0, 'drop_alt': 5.0,
     'image_width_px': 1280, 'camera_hfov': 1.0472,
-    'target_marker_m': 2.2, 'qr_modules': 33,
+    'target_marker_m': 2.2,
     'px_per_module_floor': 5.3, 'lane_overlap': 0.30,
-    'zone_margin': 1.0, 'corridor_alt': 3.0,
-    'waypoint_tol': 0.8, 'drop_tol': 0.5, 'scan_floor_alt': 2.0,
+    'zone_boundary_clearance': 1.0, 'corridor_alt': 3.0,
+    'scan_floor_alt': 2.0,
 }
 
 
@@ -388,6 +388,152 @@ class TestAttitudeAbort(RailTestCase):
 # --------------------------------------------------------------------------- #
 # Rail 4: the tree actually returns to WAITING
 # --------------------------------------------------------------------------- #
+class TestBatteryAbort(RailTestCase):
+    """The pack is Li-ion: it sags under a climb and recovers."""
+
+    def battery(self, volts):
+        from sensor_msgs.msg import BatteryState
+        self.mav._on_battery(BatteryState(voltage=volts, percentage=-1.0))
+
+    def test_a_sag_is_not_a_flat_pack(self):
+        self.battery(11.6)
+        self.assertFalse(self.mav.battery_critical())
+        self.battery(14.2)                  # recovered: the clock restarts
+        self.assertIsNone(self.mav._battery_low_since)
+
+    def test_held_below_critical_trips(self):
+        self.battery(11.6)
+        self.mav._battery_low_since -= self.mav.critical_battery_hold_s
+        self.battery(11.7)
+        self.assertTrue(self.mav.battery_critical())
+
+    def test_a_half_charged_li_ion_pack_is_not_critical(self):
+        self.battery(14.0)                  # 3.5 V/cell: LiPo "empty"
+        self.assertIsNone(self.mav._battery_low_since)
+
+
+class TestMissionSequence(RailTestCase):
+
+    def test_repeated_start_messages_are_one_mission(self):
+        from std_msgs.msg import Bool
+        for _ in range(3):
+            self.mav._on_start(Bool(data=True))
+        self.assertEqual(self.mav.mission_seq, 1)
+        self.mav.mission_started = False        # latched COMPLETE / FAILED
+        self.mav._on_start(Bool(data=True))
+        self.assertEqual(self.mav.mission_seq, 2)
+
+
+class TestBannerClipped(RailTestCase):
+
+    def detail(self, box):
+        import json
+        from std_msgs.msg import String
+        self.mav._on_banner_detail(String(data=json.dumps(
+            {"identified": True, "board_px": box, "board_area_px": 1,
+             "image_wh": [1280, 720]})))
+        return self.mav.banner_clipped
+
+    def test_a_board_inside_the_frame_is_whole(self):
+        self.assertFalse(self.detail([300, 200, 500, 150]))
+
+    def test_a_board_against_any_edge_is_cut_off(self):
+        for box in ([0, 200, 500, 150], [300, 0, 500, 150],
+                    [900, 200, 380, 150], [300, 600, 500, 120]):
+            self.assertTrue(self.detail(box), box)
+
+
+class TestNewTraversal(RailTestCase):
+
+    def detail(self, exited):
+        import json
+        from std_msgs.msg import String
+        self.mav._on_avoid_detail(String(data=json.dumps(
+            {"state": "CRUISE", "corridor_exited": exited})))
+
+    def test_the_last_traversals_exit_does_not_end_the_next(self):
+        self.mav.enable_avoidance(True, hold_alt=2.0)
+        for _ in range(3):
+            self.detail(True)
+        self.assertTrue(self.mav.corridor_exited())      # outbound, genuinely
+        self.mav.enable_avoidance(False)
+        self.mav.enable_avoidance(True, hold_alt=2.0)    # the return lane
+        self.assertFalse(self.mav.corridor_exited())
+        self.detail(True)                                # in flight before the enable
+        self.assertFalse(self.mav.corridor_exited())
+        for _ in range(3):
+            self.detail(False)
+        self.assertFalse(self.mav.corridor_exited())
+
+
+class TestKeepOut(RailTestCase):
+    """A held position setpoint is only as good as the GPS; the lidar keeps
+    it off whatever is beside the aircraft."""
+
+    def scan(self, wall_bearing_deg=None, wall_m=None):
+        from sensor_msgs.msg import LaserScan
+        m = LaserScan()
+        m.angle_min, m.angle_increment = -math.pi, 2 * math.pi / 360
+        m.range_min, m.range_max = 0.05, 12.0
+        m.ranges = [float("inf")] * 360
+        if wall_m is not None:
+            i = int(round((math.radians(wall_bearing_deg) + math.pi)
+                          / m.angle_increment))
+            for k in range(i - 3, i + 4):
+                m.ranges[k % 360] = wall_m
+        self.mav._on_scan(m)
+
+    def stream(self, x, y):
+        self.arm()
+        self.mav._on_pose(pose_with(z=3.0))          # at the origin, facing +x
+        self.mav.goto(x, y, 3.0, 0.0)
+        self.mav._stream()
+        return self.published_setpoints[-1].pose.position
+
+    def test_open_air_setpoints_pass_untouched(self):
+        self.scan()
+        p = self.stream(2.0, 1.0)
+        self.assertEqual((p.x, p.y), (2.0, 1.0))
+
+    def test_a_wall_beyond_the_keep_out_changes_nothing(self):
+        self.scan(0.0, 1.5)
+        p = self.stream(0.4, 0.0)
+        self.assertEqual(p.x, 0.4)
+
+    def test_it_will_not_close_on_a_wall_inside_the_keep_out(self):
+        self.scan(90.0, 0.8)                         # wall 0.8 m to port
+        p = self.stream(1.0, 0.5)                    # asked to drift toward it
+        self.assertAlmostEqual(p.x, 1.0, delta=0.05, msg="along-wall motion kept")
+        self.assertLess(p.y, 0.0, "the setpoint must back away from the wall")
+        self.assertLessEqual(p.y, -(self.mav.keepout_m - 0.8) + 0.01,
+                             "not pushed back out to the keep-out range")
+        self.assertEqual(self.mav.keepout_events, 1)
+
+    def test_a_speck_of_dust_is_not_a_wall(self):
+        from sensor_msgs.msg import LaserScan
+        m = LaserScan()
+        m.angle_min, m.angle_increment = -math.pi, 2 * math.pi / 360
+        m.range_min, m.range_max = 0.05, 12.0
+        m.ranges = [float("inf")] * 360
+        m.ranges[200] = m.ranges[201] = 0.7     # two beams: survives the median
+        self.mav._on_scan(m)
+        p = self.stream(1.0, 1.0)
+        self.assertEqual((p.x, p.y), (1.0, 1.0))
+
+    def test_the_airframe_itself_is_not_an_obstacle(self):
+        self.scan(180.0, 0.3)
+        p = self.stream(-1.0, 0.0)
+        self.assertEqual(p.x, -1.0)
+
+    def test_on_the_ground_it_stands_down(self):
+        self.scan(0.0, 0.7)
+        self.arm()
+        self.mav._on_pose(pose_with(z=0.2))
+        self.mav.goto(1.0, 0.0, 0.2, 0.0)
+        self.mav._stream()
+        self.assertEqual(self.published_setpoints[-1].pose.position.x, 1.0)
+
+
 class TestTreeReset(RailTestCase):
 
     def _tick(self, root, n=1):

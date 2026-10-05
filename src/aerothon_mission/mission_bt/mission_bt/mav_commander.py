@@ -30,7 +30,8 @@ from rcl_interfaces.msg import ParameterType, ParameterValue
 from mission_bt.delivery_zone import (boundary_to_local_zone, inset_zone,
                                       parse_boundary, parse_polygon,
                                       polygon_to_local)
-from mission_bt.scan_geometry import (fit_surface, gate_opening,
+from mission_bt.banner_orbit import SELF_M
+from mission_bt.scan_geometry import (despeckle, fit_surface, gate_opening,
                                       no_surface as _no_surface)
 
 
@@ -88,11 +89,15 @@ class Mav:
         self.airborne_floor = None
         self._low_alt_samples = 0
         self.qr_offset = Vector3()
+        # Offsets received, so a stage can tell a frame taken since it began
+        # from the latched one: Vector3 carries no stamp.
+        self.qr_offset_seq = 0
         self.banner = Vector3()
         self.banner_reject_reason = ""
         self.banner_reject_counts = {}
         self.banner_board_aspect = 0.0
         self.banner_board_area = 0.0
+        self.banner_clipped = False
         self.banner_green = None       # largest green region in view, if any
         self.abort_requested = False
         self.abort_reason = ""
@@ -103,11 +108,30 @@ class Mav:
         # new START or a mission reset.
         self.abort_latched = False
         self.mission_started = False
+        self.mission_seq = 0               # counts STARTs; a new one resets memory
 
-        # Default matches the official Iris SITL 3S battery. Override this ROS
-        # parameter for a real airframe's battery chemistry / cell count.
+        # The team's 4S2P Li-ion pack: 3.0 V/cell under load is the last of
+        # its usable charge (Li-ion runs to 2.5 V; LiPo figures of 3.5 V/cell
+        # would call a Li-ion pack flat at half charge). Held below for
+        # `critical_battery_hold_s`, because a climb or a gust draws the pack
+        # down for a second or two and recovers.
         self.critical_battery_voltage = node.declare_parameter(
-            'critical_battery_voltage', 10.5).value
+            'critical_battery_voltage', 12.0).value
+        self.critical_battery_hold_s = node.declare_parameter(
+            'critical_battery_hold_s', 5.0).value
+        self._battery_low_since = None
+        self._logged = set()
+        # Keep-out round the airframe on every POSITION setpoint. ArduPilot's
+        # own proximity avoidance does not run in GUIDED, and a held setpoint
+        # beside a wall is exactly as good as the GPS: with a metre of wander
+        # and a gust, the square-up flew into the corridor wall it was
+        # standing 1.5 m from (sim/fly_headless.py, worst conditions).
+        # Returns nearer than the lidar sees its own airframe are ignored
+        # (banner_orbit.SELF_M), so the band is 0.55..keepout_m.
+        self.keepout_m = node.declare_parameter('keepout_m', 1.0).value
+        self.keepout_events = 0
+        self.board_face_t = None           # when a square-up last fitted the board
+        self._keepout_on = False
         # Beyond this roll/pitch the aircraft is not flying the mission any
         # more, it is falling into something. The last recorded live run sat at
         # 54 deg against a corridor wall and nothing in the stack objected.
@@ -228,6 +252,8 @@ class Mav:
         # Corridor navigator feedback: exit is DETECTED, not assumed from a
         # hardcoded x threshold (geometry audit A6/A10).
         self.avoid_detail = {}
+        self._avoiding = False
+        self._avoid_fresh = 0
         # Observed geometry, recorded in flight. These replace the asserted
         # zone_entry / zone_bounds / corridor_return_entry constants (audit
         # A7, A8, A9): everything here is measured during this mission.
@@ -262,13 +288,22 @@ class Mav:
         self.cli_land = node.create_client(CommandTOL, '/mavros/cmd/land')
         self.cli_command = node.create_client(CommandLong, '/mavros/cmd/command')
         self.speed_cmd = None               # last ground speed requested, m/s
+        # (x, y, heading, advance) of the last gate crossing, from GateAdvance
+        self.gate_crossing = None
 
         node.create_timer(0.1, self._stream)   # 10 Hz setpoint stream
 
     # ------------------------------------------------------------------ #
     # callbacks
     # ------------------------------------------------------------------ #
-    def _on_battery(self, m): self.battery = m
+    def _on_battery(self, m):
+        self.battery = m
+        low = ((m.voltage > 0.0 and m.voltage < self.critical_battery_voltage)
+               or (m.percentage > 0.0 and m.percentage < 0.15))
+        if not low:
+            self._battery_low_since = None
+        elif self._battery_low_since is None:
+            self._battery_low_since = self.node.get_clock().now().nanoseconds / 1e9
     def _on_match(self, m): self.qr_matched = m.data
 
     def _on_qr(self, m):
@@ -305,7 +340,7 @@ class Mav:
         if pts is not None:
             xs = [p[0] for p in pts]
             ys = [p[1] for p in pts]
-            self.node.get_logger().info(
+            self._log_once(
                 f"Arena geofence loaded: {len(pts)} vertices, "
                 f"x {min(xs):.1f}..{max(xs):.1f}, y {min(ys):.1f}..{max(ys):.1f}")
 
@@ -325,10 +360,17 @@ class Mav:
         self.delivery_zone_local = zone
         self.delivery_zone_reason = why or "four-corner boundary resolved in local ENU"
         if zone is not None:
-            self.node.get_logger().info(
+            self._log_once(
                 "Delivery-zone boundary loaded: "
                 f"x {zone[0]:.1f}..{zone[1]:.1f}, "
                 f"y {zone[2]:.1f}..{zone[3]:.1f}")
+
+    def _log_once(self, text):
+        """Log a line unless it repeats the last one: home arrives at 1 Hz
+        and the organiser's inputs are re-published, each re-resolving."""
+        if text not in self._logged:
+            self._logged.add(text)
+            self.node.get_logger().info(text)
 
     def delivery_search_zone(self, clearance_m):
         if self.delivery_zone_local is None:
@@ -366,7 +408,9 @@ class Mav:
     @property
     def qr_streak(self):
         return self._qr_streak
-    def _on_off(self, m): self.qr_offset = m
+    def _on_off(self, m):
+        self.qr_offset = m
+        self.qr_offset_seq += 1
 
     def qr_visible(self):
         """Any marker in frame, whether or not it is the delivery target.
@@ -400,6 +444,13 @@ class Mav:
         if d.get('identified'):
             self.banner_board_aspect = float(d.get('board_aspect') or 0.0)
             self.banner_board_area = float(d.get('board_area_px') or 0.0)
+            # A box against the frame's edge is a board cut off by it: its
+            # area understates the board, so a range from it reads long.
+            box = d.get('board_px')
+            iw, ih = (d.get('image_wh') or [1280, 720])[:2]
+            self.banner_clipped = bool(box) and (
+                box[0] <= 1 or box[1] <= 1 or box[0] + box[2] >= iw - 1
+                or box[1] + box[3] >= ih - 1)
 
         # Where the biggest green thing in view is, identified or not: the
         # lead an edge-on banner leaves (see banner_orbit.green_fix).
@@ -408,6 +459,8 @@ class Mav:
                 "px": d['green_px'], "area": float(d.get('green_area_px') or 0.0),
                 "bearing": float(d.get('green_bearing') or 0.0),
                 "wh": d.get('image_wh') or [1280, 720],
+                "regions": [{"px": r[:4], "area": float(r[4])}
+                            for r in d.get('green_regions') or []],
                 "t": self.node.get_clock().now().nanoseconds * 1e-9}
         else:
             self.banner_green = None
@@ -435,6 +488,9 @@ class Mav:
     # lidar
     # ------------------------------------------------------------------ #
     def _on_scan(self, m):
+        # Every consumer -- the square-up, the gate check, the orbit's leg
+        # check -- reads the despeckled scan (scan_geometry.despeckle).
+        m.ranges = despeckle(m.ranges)
         self._scan = m
         self._scan_t = self.node.get_clock().now().nanoseconds / 1e9
 
@@ -521,6 +577,8 @@ class Mav:
         self.abort_requested = m.data
 
     def _on_start(self, m):
+        if m.data and not self.mission_started:
+            self.mission_seq += 1
         self.mission_started = m.data
         if m.data:
             self._result = None
@@ -538,6 +596,7 @@ class Mav:
             self.corridor_exit_pose = None
             self.gate_heading = None
             self.outbound_banner_xy = None
+            self.board_face_t = None
             self.delivery_confirmed = None     # set by WinchDrop's camera check
             self.node.get_logger().info("Mission 2 start received from GCS")
 
@@ -702,8 +761,62 @@ class Mav:
         self.setpoint_block_reason = ""
         self._sp.header.stamp = self.node.get_clock().now().to_msg()
         self._sp.header.frame_id = 'map'
-        self.pub_sp.publish(self._sp)
+        self.pub_sp.publish(self._kept_out(self._sp))
         self._track_altitude_error()
+
+    def _nearest_return(self, beams=3, agree_m=0.15):
+        """(range, local-frame bearing) of the nearest fresh lidar return
+        beyond the airframe itself, or None.
+
+        Only a return with `beams` neighbours in a row agreeing within
+        `agree_m` counts. Dust and insects come back as one or two beams --
+        two in a row get through the 3-beam median several times a second
+        at 1% false returns, and the keep-out shoved the aircraft about on
+        each -- while anything solid within a metre spans dozens."""
+        age = self.scan_age_s()
+        if self._scan is None or age is None or age > 0.5:
+            return None
+        scan, best = self._scan, None
+        r = scan.ranges
+        lo = max(float(scan.range_min), SELF_M)
+        hi = float(scan.range_max)
+        half = beams // 2
+        for i in range(half, len(r) - half):
+            if not lo < r[i] < hi or (best is not None and r[i] >= best[0]):
+                continue
+            if all(abs(r[i + k] - r[i]) <= agree_m for k in range(-half, half + 1)):
+                best = (r[i], float(scan.angle_min) + i * float(scan.angle_increment))
+        return None if best is None else (best[0], best[1] + self.yaw())
+
+    def _kept_out(self, sp):
+        """`sp`, or a copy that neither closes on nor stays inside
+        `keepout_m` of the nearest return: the part of the move toward it is
+        dropped and the aircraft is pushed back out to the keep-out range."""
+        near = self._nearest_return() if self.alt() > 0.5 else None
+        inside = near is not None and near[0] < self.keepout_m
+        if inside != self._keepout_on:
+            self._keepout_on = inside
+            if inside:
+                self.keepout_events += 1
+                self.log(f"KEEP-OUT: return at {near[0]:.2f} m, bearing "
+                         f"{math.degrees(near[1]):.0f} deg; holding the "
+                         f"setpoint {self.keepout_m:.1f} m clear", warn=True)
+        if not inside:
+            return sp
+        r, b = near
+        ux, uy = math.cos(b), math.sin(b)
+        px, py, _ = self.pos()
+        dx = sp.pose.position.x - px
+        dy = sp.pose.position.y - py
+        toward = max(0.0, dx * ux + dy * uy)
+        back = self.keepout_m - r
+        out = PoseStamped()
+        out.header = sp.header
+        out.pose.orientation = sp.pose.orientation
+        out.pose.position.x = px + dx - (toward + back) * ux
+        out.pose.position.y = py + dy - (toward + back) * uy
+        out.pose.position.z = sp.pose.position.z
+        return out
 
     def _track_altitude_error(self):
         """Watch commanded z against measured z while position-streaming.
@@ -769,15 +882,13 @@ class Mav:
     def connected(self):
         return self.state.connected
 
-    def battery_critical(self, min_volt=None, min_pct=0.15):
-        """Returns True if battery is below safe critical threshold."""
-        if min_volt is None:
-            min_volt = self.critical_battery_voltage
-        if self.battery.voltage > 0.0 and self.battery.voltage < min_volt:
-            return True
-        if self.battery.percentage > 0.0 and self.battery.percentage < min_pct:
-            return True
-        return False
+    def battery_critical(self):
+        """True once the pack has been below its critical voltage (or 15 %)
+        for `critical_battery_hold_s`."""
+        if self._battery_low_since is None:
+            return False
+        now = self.node.get_clock().now().nanoseconds / 1e9
+        return now - self._battery_low_since >= self.critical_battery_hold_s
 
     def _note_mode_command(self, mode):
         self._commanded_modes[mode] = self.node.get_clock().now().nanoseconds / 1e9
@@ -856,6 +967,14 @@ class Mav:
             # already carries the correction rather than a zero.
             self.pub_hold_alt.publish(Float32(data=float(hold_alt)))
         self.pub_enable.publish(Bool(data=bool(on)))
+        if on and not self._avoiding:
+            # A new traversal: the last detail is the previous one's ending.
+            # Enabled and checked on the same tick, the return corridor read
+            # the outbound corridor's "exited" and ended at its own mouth
+            # (random conditions, rb_high_board).
+            self.avoid_detail = {}
+            self._avoid_fresh = 0
+        self._avoiding = bool(on)
         if on:
             self._sp = None    # stop position streaming; avoidance drives velocity
 
@@ -869,19 +988,26 @@ class Mav:
     # camera pointing (Phase 2)
     # ------------------------------------------------------------------ #
     def _on_avoid_detail(self, m):
+        self._avoid_fresh += 1
         try:
             self.avoid_detail = json.loads(m.data)
         except json.JSONDecodeError:
             self.avoid_detail = {}
 
+    def _avoid_current(self):
+        """Detail published since this traversal was handed over. The first
+        few can predate the navigator seeing the enable."""
+        return self._avoid_fresh >= 3
+
     def corridor_exited(self):
         # OBSERVING retains the last traversal's exit flag. It cannot end a
         # new traversal before the navigator has even taken control.
-        return (self.avoid_detail.get("state") == "CRUISE"
+        return (self._avoid_current()
+                and self.avoid_detail.get("state") == "CRUISE"
                 and bool(self.avoid_detail.get("corridor_exited")))
 
     def avoidance_stuck(self):
-        return self.avoid_detail.get("state") == "STUCK"
+        return self._avoid_current() and self.avoid_detail.get("state") == "STUCK"
 
     def _on_winch_status(self, m):
         try:
@@ -1038,6 +1164,8 @@ class Mav:
         except (ValueError, TypeError):
             return
         self.redzone_status = d.get("status", "NOT_VISIBLE")
+        # One detail per frame processed: the search paces itself on it.
+        self.redzone_seq = getattr(self, "redzone_seq", 0) + 1
         ex = d.get("exclusions") or []
         self.exclusions = [tuple(float(v) for v in r) for r in ex if len(r) == 4]
 
@@ -1052,14 +1180,6 @@ class Mav:
         """
         (self.node.get_logger().warning if warn
          else self.node.get_logger().info)(msg)
-
-    def corridor_entered(self):
-        """Has the navigator OBSERVED walls close in on both sides?
-
-        Published whether or not the navigator is steering, because the stage
-        that hands control to it has to know this before it does so.
-        """
-        return bool((self.avoid_detail or {}).get("corridor_entered", False))
 
     def open_extent(self):
         """(depth_ahead_m, width_m) of the open area, as the navigator sees it.

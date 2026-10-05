@@ -6,13 +6,18 @@
 # Nothing in the repo set any of these before, so all three inspection items
 # depended on whatever the flight controller happened to hold.
 
-# 6.1 RTL on low battery. 4S pack: 3.5 V/cell low, 3.3 V/cell critical.
-# The readiness interlock separately refuses to start below 15.0 V.
+# 6.1 RTL on low battery. The pack is 4S2P Li-ion, not LiPo: it delivers to
+# 2.5 V/cell and sags ~0.3 V/cell at hover current, so the LiPo figures (3.5 /
+# 3.3 V/cell) would RTL a half-charged pack in the first minutes. Li-ion:
+# 3.2 V/cell low, 3.0 V/cell critical, judged on the sag-compensated resting
+# voltage (VOLTSRC 1) and only when held for LOW_TIMER s. The readiness
+# interlock separately refuses to start below 15.0 V.
 # Low -> RTL (2); critical -> LAND (1).
 BATT_FS_LOW_ACT 2
 BATT_FS_CRT_ACT 1
-BATT_LOW_VOLT 14.0
-BATT_CRT_VOLT 13.2
+BATT_FS_VOLTSRC 1
+BATT_LOW_VOLT 12.8
+BATT_CRT_VOLT 12.0
 BATT_LOW_TIMER 10
 
 # 6.2 RTL on datalink loss: GCS heartbeat lost for FS_GCS_TIMEOUT seconds.

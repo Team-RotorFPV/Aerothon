@@ -71,8 +71,8 @@ VALID_COMMANDS = ("lower", "release", "stow", "stop")
 
 
 class WinchNode(Node):
-    def __init__(self):
-        super().__init__("winch_ctrl")
+    def __init__(self, **kwargs):
+        super().__init__("winch_ctrl", **kwargs)
         p = self.declare_parameter
         p("backend", "sim")                  # sim | gazebo | mavlink
         p("payout_rate_mps", 0.30)           # line speed
@@ -324,8 +324,13 @@ class WinchNode(Node):
             if not (lo <= self._alt <= hi):
                 blockers.append(
                     f"altitude {self._alt:.2f} m outside [{lo}, {hi}]")
+        # A gravity hook has let go by itself once the payload is down, so
+        # its "release" only records that: holding it for a still hover
+        # held the whole drop in a gusty wind with the payload already on
+        # the ground (worst conditions). An actuated hook drops what it
+        # holds, and a swinging aircraft throws it off the pad.
         need = int(self.get_parameter("hover_stable_samples").value)
-        if self._stable < need:
+        if self._stable < need and self.get_parameter("hook").value != "gravity":
             blockers.append(f"hover not stable ({self._stable}/{need})")
         return blockers
 

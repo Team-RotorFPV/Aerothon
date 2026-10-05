@@ -21,11 +21,7 @@ except ImportError:
 
 from mission_bt.mission_tree import (
     CheckAbortTriggered,
-    StageAwareAbort,
-    SetModeArm,
-    Takeoff,
     WinchDrop,
-    LawnmowerSearch,
     build_root,
 )
 import py_trees
@@ -183,10 +179,10 @@ class TestMissionBT(unittest.TestCase):
         self.defaults = {
             'takeoff_alt': 5.0, 'search_alt': 10.0, 'drop_alt': 5.0,
             'image_width_px': 1280, 'camera_hfov': 1.0472,
-            'target_marker_m': 2.2, 'qr_modules': 33,
+            'target_marker_m': 2.2,
             'px_per_module_floor': 5.3, 'lane_overlap': 0.30,
-            'zone_margin': 1.0, 'corridor_alt': 3.0,
-            'waypoint_tol': 0.8, 'drop_tol': 0.5, 'scan_floor_alt': 2.0,
+            'zone_boundary_clearance': 1.0, 'corridor_alt': 3.0,
+            'scan_floor_alt': 2.0,
         }
 
     def test_guard_healthy_does_not_abort(self):
@@ -275,6 +271,37 @@ class TestMissionBT(unittest.TestCase):
         self.mav.abort_requested = True
         root.tick_once()
         self.assertEqual(self.mav.last_mode, "LAND")  # low alt -> land
+
+    def test_every_mission_leaf_has_a_gcs_state_name(self):
+        """A leaf missing from STATE_NAMES shows as IDLE while it runs: the
+        four camera-pointing stages did, mid-flight."""
+        from mission_bt.mission_tree import STATE_NAMES
+        root = build_root(self.mav, self.node, self.defaults)
+        mission = [c for c in root.children if c.name == "Mission"][0]
+        missing = [b.name for b in mission.children if b.name not in STATE_NAMES]
+        self.assertEqual(missing, [])
+
+    def test_every_parameter_the_tree_reads_is_declared(self):
+        """A key build_root reads but nothing declares can never be set: the
+        zone boundary clearance was fixed at 1.0 m that way."""
+        import inspect
+        import re
+        from mission_bt import mission_tree
+
+        class Node:
+            def __init__(self):
+                self.values = {}
+
+            def declare_parameter(self, name, value):
+                self.values[name] = value
+
+            def get_parameter(self, name):
+                return MagicMock(value=self.values[name])
+
+        declared = set(mission_tree.declare_mission_params(Node()))
+        src = inspect.getsource(mission_tree.build_root)
+        read = set(re.findall(r"p(?:\.get\(|\[)'(\w+)'", src))
+        self.assertEqual(sorted(read - declared), [])
 
     def test_winch_drop_latches_coordinates(self):
         """Verify WinchDrop latches drop_x and drop_y upon initialise."""

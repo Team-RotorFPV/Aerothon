@@ -1,0 +1,34 @@
+# The Pixhawk settings the companion stack relies on, for the team airframe.
+# Load in Mission Planner (Config > Full Parameter List > Load from file)
+# AFTER aerothon_failsafe.parm, then reboot. Copter 4.5.
+#
+# Without these the stack's MAVLink commands are accepted and do nothing:
+# camera_ctrl's MAV_CMD_DO_MOUNT_CONTROL needs a mount, winch_ctrl's
+# MAV_CMD_DO_WINCH needs a winch, and MAVROS needs the port it is wired to.
+#
+# CHANNELS ARE WIRING. SERVO9 (AUX1) for the tilt servo and SERVO10 (AUX2) for
+# the winch are a guess at the build: set the SERVOn lines to the outputs the
+# servo and the winch ESC are actually on, and put the old function back on
+# any output these would take over.
+
+# Companion link: Pi 5 UART on TELEM2 at 921600 baud, MAVLink 2
+# (mission2.launch.py fcu_url:=/dev/ttyAMA0:921600).
+SERIAL2_PROTOCOL 2
+SERIAL2_BAUD 921
+
+# Camera tilt: a hobby servo as mount 1, pitch only, commanded over MAVLink.
+# The stack's poses run from -90 (NADIR) to 0 (FORWARD); the joint allows +30.
+MNT1_TYPE 1
+MNT1_PITCH_MIN -90
+MNT1_PITCH_MAX 30
+MNT1_DEFLT_MODE 2
+SERVO9_FUNCTION 7
+# Calibrate SERVO9_MIN / SERVO9_MAX so the commanded angles are the real
+# ones: command NADIR and FORWARD from the GCS and check with a protractor
+# (docs/FIELD_READINESS.md, bench check 5).
+
+# Winch: PWM-driven, no encoder; length is integrated from the commanded
+# rate, which winch_ctrl already assumes (payout_rate_mps).
+WNCH_TYPE 1
+WNCH_RATE_MAX 1.0
+SERVO10_FUNCTION 88

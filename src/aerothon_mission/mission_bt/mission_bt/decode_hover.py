@@ -17,6 +17,20 @@ WHY PER DISTINCT PAYLOAD RATHER THAN PER DECODE
     payload gives the operator the pause on every genuinely new marker and
     costs five seconds each.
 
+UNREADABLE MARKERS
+
+    A marker the camera can SEE but not READ -- motion blur from the sweep,
+    rolling-shutter jello from the props, a smeared lens -- is reported by
+    qr_node with offset z = UNREAD. Measured under the camera corruptions of
+    sim_gazebo/corruptions.py, the decoders lose a marker to motion blur and
+    vibration while its finder patterns still locate it, and a stationary
+    camera removes the motion blur. So such a marker gets one hold, over
+    where it is on the ground (`locate`), for up to `unread_s`: the sweep
+    stops, the frames stop smearing, and the hold ends the moment it reads.
+    Once per `unread_cell_m` of ground, so a marker that will never read (not
+    a competition marker, or genuinely illegible) costs one hold, not the
+    mission.
+
 WHY IT IS AN OBJECT RATHER THAN A STAGE
 
     A hover has to happen INSIDE stages that are doing something else -- the
@@ -27,16 +41,26 @@ WHY IT IS AN OBJECT RATHER THAN A STAGE
 
 import time
 
+# qr_node's offset z for a marker located but not decoded.
+UNREAD = 0.25
+
 
 class DecodeHover:
     """Own one per stage. Call tick() first; hold if it says to."""
 
-    def __init__(self, hover_s=5.0, clock=None, enabled=True):
+    def __init__(self, hover_s=5.0, clock=None, enabled=True, unread_s=0.0,
+                 locate=None, unread_cell_m=3.0):
         self.hover_s = float(hover_s)
         self.clock = clock or time.monotonic
         self.enabled = bool(enabled)
+        self.unread_s = float(unread_s)
+        self.locate = locate
+        self.unread_cell_m = float(unread_cell_m)
         self.seen = set()
+        self.seen_unread = set()
+        self._mission = None
         self._t0 = None
+        self._span = 0.0
         self._payload = ""
         self._hold = None
 
@@ -50,9 +74,19 @@ class DecodeHover:
         self._payload = ""
         self._hold = None
 
+    def begin(self, mission):
+        """A stage (re)starting: `reset` within the same mission, `forget`
+        when `mission` -- Mav.mission_seq -- says it is a new one."""
+        if mission != self._mission:
+            self._mission = mission
+            self.forget()
+        else:
+            self.reset()
+
     def forget(self):
         """Full reset, including history. For a new mission, not a new stage."""
         self.seen.clear()
+        self.seen_unread.clear()
         self.reset()
 
     @property
@@ -63,28 +97,65 @@ class DecodeHover:
         """True if the caller should hold station this tick.
 
         Commands the hold itself, so a caller cannot accidentally hover and
-        keep flying at the same time.
+        keep flying at the same time. `enabled` governs the hover over a
+        decoded payload; the hold over an unreadable marker is governed by
+        `unread_s` alone, because it is how a marker gets read at all.
         """
-        if not self.enabled:
-            return False
-
         if self._t0 is not None:
-            if self.clock() - self._t0 < self.hover_s:
+            reading = self._payload == "" and self._new_payload(mav)
+            if not reading and self.clock() - self._t0 < self._span:
                 mav.goto(*self._hold)
                 return True
+            # Time up -- or the unreadable marker being held over just read,
+            # which starts that payload's own hover below.
             self.reset()
-            return False
+            if not reading:
+                return False
 
-        payload = str(getattr(mav, "qr_decoded", "") or "")
-        if not payload or payload in self.seen:
-            return False
+        payload = self._new_payload(mav) if self.enabled else ""
+        if payload:
+            self.seen.add(payload)
+            x, y, z = mav.pos()
+            self._start(payload, (x, y, z, mav.yaw()), self.hover_s)
+            mav.goto(*self._hold)
+            if hasattr(mav, "log"):
+                mav.log(f"decoded '{payload}': holding {self.hover_s:.0f} s over it")
+            return True
 
-        self.seen.add(payload)
-        self._payload = payload
-        self._t0 = self.clock()
-        x, y, z = mav.pos()
-        self._hold = (x, y, z, mav.yaw())
+        spot = self._unread_spot(mav)
+        if spot is None:
+            return False
+        self.seen_unread.add(self._cell(spot))
+        _, _, z = mav.pos()
+        self._start("", (spot[0], spot[1], z, mav.yaw()), self.unread_s)
         mav.goto(*self._hold)
         if hasattr(mav, "log"):
-            mav.log(f"decoded '{payload}': holding {self.hover_s:.0f} s over it")
+            mav.log(f"marker at ({spot[0]:.1f}, {spot[1]:.1f}) seen but not "
+                    f"read: holding up to {self.unread_s:.0f} s over it")
         return True
+
+    def _start(self, payload, hold, span):
+        self._payload = payload
+        self._hold = hold
+        self._span = float(span)
+        self._t0 = self.clock()
+
+    def _new_payload(self, mav):
+        payload = str(getattr(mav, "qr_decoded", "") or "")
+        return payload if payload and payload not in self.seen else ""
+
+    def _cell(self, xy):
+        c = self.unread_cell_m
+        return (round(xy[0] / c), round(xy[1] / c))
+
+    def _unread_spot(self, mav):
+        """Ground (x, y) of an unreadable marker not yet held over, or None."""
+        if self.unread_s <= 0.0 or self.locate is None:
+            return None
+        off = getattr(mav, "qr_offset", None)
+        if off is None or not 0.0 < float(getattr(off, "z", 0.0)) <= UNREAD:
+            return None
+        spot = self.locate(mav)
+        if spot is None or self._cell(spot) in self.seen_unread:
+            return None
+        return spot

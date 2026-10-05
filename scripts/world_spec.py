@@ -22,8 +22,27 @@ WHAT A SPEC CAN MOVE, AND WHAT IT CANNOT
     five delivery pads, the green decoys, which pad the start QR names, and
     the QR edge lengths.
 
-    Fixed shape: the banners (the board and its posts) and the take-off
-    area's internal layout.
+    Fixed shape: the banners (the board and its posts; only the height the
+    board hangs at moves) and the take-off area's internal layout.
+
+CONDITIONS -- WHAT THE DAY THROWS AT IT
+
+    "conditions" sets the weather, the sensors and the state of the printed
+    markers the mission flies in (see conditions() and CONDITION_PRESETS):
+
+        wind    Gazebo WindEffects: mean speed and heading, sinusoidal gusts,
+                a meandering direction; drag calibrated to the airframe
+        camera  sim_gazebo/corruptions.py severities (0-5) on every frame,
+                plus dropped frames and delivery latency
+        lidar   range noise, missing returns, false short returns
+        wear    faded, dusty print on the banner and the QR pads (0-5)
+        fcu     ArduPilot SITL sensor faults: GPS noise, a timed GPS glitch,
+                baro noise and drift, IMU noise, a part-used battery
+
+    Either a preset -- {"preset": "worst"} -- with any field overridden, or
+    {"preset": "random"}: every factor drawn between calm and worst from the
+    run's seed (domain randomisation), so a campaign of seeds covers the
+    space instead of one point in it.
 
 CORRIDOR FRAMES
 
@@ -39,6 +58,13 @@ the spawn point, so the materialiser converts what it publishes.
 
 import json
 import math
+import os
+import random
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
+    __file__))), "src", "aerothon_sim", "sim_gazebo"))
+from sim_gazebo.corruptions import CAMERA_KEYS  # noqa: E402
 
 SCHEMA = "aerothon-world/1"
 PAD_LETTERS = ("a", "b", "c", "d", "e")
@@ -60,6 +86,12 @@ TAKEOFF_TEMPLATE_CENTRE = (-1.0, 0.0)
 TAKEOFF_PAD_SIZE = (5.0, 8.0)
 START_QR_OFFSET = (0.0, 2.0)
 SPAWN_OFFSET = (-1.0, 2.0)
+
+# The banner board: 3.7 x 1.15 m on two posts. Its height is the one thing
+# about it a spec moves (mission2.sdf hangs it at 2.805 m); the posts grow to
+# carry it.
+BOARD_BOTTOM_M = 2.805
+BOARD_BOTTOM_RANGE_M = (1.8, 4.5)
 
 HOME_FENCE_CLEARANCE_M = 2.0           # readiness: home >= 2 m inside the fence
 BANNER_NEAR_RANGE_M = 9.6              # AlignToBanner: 0.8 x the 12 m lidar range
@@ -93,6 +125,8 @@ def default_spec():
                    {"x": 34.0, "y": 9.0, "yaw_deg": math.degrees(1.2)}],
         "start_target": "random",
         "qr": {"start_m": 2.2, "target_m": 3.0},
+        "banner": {"board_bottom_m": BOARD_BOTTOM_M},
+        "conditions": {"preset": "calm"},
     }
 
 
@@ -107,7 +141,8 @@ def normalise(spec):
     out = dict(base)
     for key, val in (spec or {}).items():
         out[key] = val
-    for key in ("takeoff", "corridor", "return_corridor", "delivery_zone", "qr"):
+    for key in ("takeoff", "corridor", "return_corridor", "delivery_zone", "qr",
+                "banner"):
         merged = dict(base[key])
         merged.update(out.get(key) or {})
         out[key] = merged
@@ -127,7 +162,133 @@ def normalise(spec):
     for d in out["decoys"]:
         d.setdefault("yaw_deg", 0.0)
     out["start_target"] = str(out.get("start_target", "random")).lower()
+    out["conditions"] = dict(out.get("conditions") or {"preset": "calm"})
     return out
+
+
+# ---- conditions ---------------------------------------------------------------
+
+_CALM = {
+    "wind": {"speed": 0.0, "dir_deg": 0.0, "gust": 0.0, "gust_period_s": 6.0,
+             "veer_deg": 0.0},
+    "camera": {**{k: 0 for k in CAMERA_KEYS}, "frame_drop": 0.0, "latency_ms": 0},
+    "lidar": {"noise_m": 0.0, "dropout": 0.0, "spurious": 0.0},
+    "wear": {"banner": 0, "qr": 0},
+    "fcu": {"gps_noise_m": 0.0, "gps_glitch_m": 0.0, "glitch_at_s": 150.0,
+            "glitch_s": 5.0, "baro_noise_m": 0.0, "baro_drift_mps": 0.0,
+            "imu_noise": 0.0, "battery_v": 16.8},
+}
+
+# The worst credible day. Wind: above ~8 m/s mean with 4 m/s gusts flying
+# stops for every team. Camera: severity 2 of everything at once, the
+# envelope sim/test_perception_corruption.py holds every detector to one at
+# a time. GPS: a 5 m glitch for 5 s mid-search. Baro: 3 mm/s of drift, 2.7 m
+# over a full 15 min -- a weather front is ~2 mm/s, the rest is a flight
+# controller armed before it warmed up (docs/FIELD_READINESS.md). Battery: a
+# pack already flown once, at 3.85 V/cell.
+CONDITION_PRESETS = {
+    "calm": _CALM,
+    "field": {
+        "wind": {"speed": 4.0, "gust": 2.0, "veer_deg": 10.0},
+        "camera": {"noise": 1, "motion_blur": 1, "jpeg": 1, "vibration": 1,
+                   "frame_drop": 0.05, "latency_ms": 60},
+        "lidar": {"noise_m": 0.01, "dropout": 0.02, "spurious": 0.002},
+        "wear": {"banner": 1, "qr": 1},
+        "fcu": {"gps_noise_m": 0.5, "baro_noise_m": 0.2, "imu_noise": 0.5},
+    },
+    "worst": {
+        "wind": {"speed": 8.0, "gust": 4.0, "veer_deg": 20.0},
+        "camera": {"noise": 2, "motion_blur": 2, "defocus": 1, "haze": 2,
+                   "exposure": -2, "glare": 2, "jpeg": 2, "lens_dust": 2,
+                   "vibration": 2, "frame_drop": 0.2, "latency_ms": 150},
+        "lidar": {"noise_m": 0.03, "dropout": 0.10, "spurious": 0.01},
+        "wear": {"banner": 3, "qr": 3},
+        "fcu": {"gps_noise_m": 1.5, "gps_glitch_m": 5.0, "baro_noise_m": 0.5,
+                "baro_drift_mps": 0.003, "imu_noise": 1.0, "battery_v": 15.4},
+    },
+}
+
+
+def _merge(base, over):
+    out = {k: dict(v) for k, v in base.items()}
+    for group, fields in (over or {}).items():
+        if group in out and isinstance(fields, dict):
+            out[group].update(fields)
+    return out
+
+
+def _randomised(rng):
+    """Every factor uniform between calm and worst; wind from any heading."""
+    worst = _merge(_CALM, CONDITION_PRESETS["worst"])
+    out = {}
+    for group, fields in _CALM.items():
+        out[group] = {}
+        for k, calm in fields.items():
+            hi = worst[group][k]
+            if isinstance(calm, int) and isinstance(hi, int):
+                v = rng.randint(min(calm, hi), max(calm, hi))
+            else:
+                v = round(rng.uniform(min(calm, hi), max(calm, hi)), 3)
+            out[group][k] = v
+    out["wind"]["dir_deg"] = round(rng.uniform(0.0, 360.0), 1)
+    out["fcu"]["glitch_at_s"] = round(rng.uniform(60.0, 300.0), 1)
+    return out
+
+
+def conditions(spec, seed=0):
+    """The concrete conditions a spec asks for: every field filled in.
+
+    `seed` only matters for {"preset": "random"}; the same seed gives the
+    same day, so a failure can be flown again.
+    """
+    c = dict((spec or {}).get("conditions") or {})
+    name = str(c.pop("preset", "calm")).lower()
+    if name == "random":
+        base = _randomised(random.Random(seed))
+    else:
+        base = _merge(_CALM, CONDITION_PRESETS.get(name, {}))
+    return _merge(base, c)
+
+
+_CONDITION_LIMITS = {
+    ("wind", "speed"): (0.0, 15.0), ("wind", "gust"): (0.0, 10.0),
+    ("wind", "gust_period_s"): (1.0, 120.0), ("wind", "veer_deg"): (0.0, 90.0),
+    ("camera", "frame_drop"): (0.0, 0.9), ("camera", "latency_ms"): (0, 1000),
+    ("lidar", "noise_m"): (0.0, 0.5), ("lidar", "dropout"): (0.0, 0.9),
+    ("lidar", "spurious"): (0.0, 0.5),
+    ("wear", "banner"): (0, 5), ("wear", "qr"): (0, 5),
+    ("fcu", "gps_noise_m"): (0.0, 10.0), ("fcu", "gps_glitch_m"): (0.0, 50.0),
+    ("fcu", "glitch_at_s"): (0.0, 1200.0), ("fcu", "glitch_s"): (0.0, 120.0),
+    ("fcu", "baro_noise_m"): (0.0, 5.0), ("fcu", "baro_drift_mps"): (0.0, 0.5),
+    ("fcu", "imu_noise"): (0.0, 5.0), ("fcu", "battery_v"): (12.0, 16.8),
+}
+
+
+def _check_conditions(spec, errs):
+    c = spec.get("conditions") or {}
+    name = str(c.get("preset", "calm")).lower()
+    if name not in tuple(CONDITION_PRESETS) + ("random",):
+        errs.append(f"conditions preset '{name}' is not one of "
+                    f"{', '.join(tuple(CONDITION_PRESETS) + ('random',))}")
+        return
+    for group, fields in c.items():
+        if group == "preset":
+            continue
+        if group not in _CALM or not isinstance(fields, dict):
+            errs.append(f"conditions: unknown group '{group}'")
+            continue
+        for k in fields:
+            if k not in _CALM[group]:
+                errs.append(f"conditions.{group}: unknown field '{k}'")
+    resolved = conditions(spec)
+    for key in CAMERA_KEYS:
+        lo = -5 if key == "exposure" else 0
+        if not lo <= resolved["camera"][key] <= 5:
+            errs.append(f"conditions.camera.{key} must be {lo}..5")
+    for (group, k), (lo, hi) in _CONDITION_LIMITS.items():
+        v = resolved[group][k]
+        if not lo <= float(v) <= hi:
+            errs.append(f"conditions.{group}.{k} = {v} is outside {lo:g}-{hi:g}")
 
 
 # ---- geometry ---------------------------------------------------------------
@@ -317,8 +478,17 @@ def is_simple(poly):
 # ---- checks -----------------------------------------------------------------
 
 AIRFRAME_SPAN_M = 1.0        # Iris 0.8 m prop tip to tip, plus 0.1 m each side
-CORRIDOR_ALT_M = 3.0         # mission corridor_alt
-LIDAR_ABOVE_BODY_M = 0.235   # RPLidar C1 scan plane above base_link
+LIDAR_ABOVE_BODY_M = 0.0815  # the team airframe's LD06 scan plane above base_link
+# The corridors are flown under the board: DuckUnderBoard finds the altitude
+# where the scan plane drops below its bottom edge and flies DUCK_MARGIN_M
+# lower, never below DUCK_FLOOR_M (mission_tree.DuckUnderBoard).
+DUCK_MARGIN_M, DUCK_FLOOR_M = 0.6, 1.2
+
+
+def corridor_alt(spec):
+    """The altitude the corridors are flown at under this spec's banner."""
+    bottom = float(spec["banner"]["board_bottom_m"])
+    return max(DUCK_FLOOR_M, bottom - LIDAR_ABOVE_BODY_M - DUCK_MARGIN_M)
 AIRFRAME_BELOW_BODY_M = 0.35 # legs 0.195 m + sag/altitude error below base_link
 PASS_COMFORT_M = 1.6         # the corridor navigator's 1.4 m passage strip + margin
 
@@ -330,6 +500,68 @@ def _lane_inset(c, m):
     yaw = math.radians(c["yaw_deg"])
     return [_place(p, c["x"], c["y"], yaw) for p in
             ((-0.1 + m, -h), (L + 0.1 - m, -h), (L + 0.1 - m, h), (-0.1 + m, h))]
+
+
+TEAM_AIRFRAME_R_M = 0.36     # hub 0.242 m from centre + 0.12 m prop radius
+NAVIGATOR_HALF_STRIP_M = 0.7  # velocity_controller passage_half_width
+
+
+def lane_bottleneck(c, cell_m=0.05):
+    """The widest clearance any path through a lane keeps, in metres.
+
+    Obstacle by obstacle, every gap can be wide enough and the lane still be
+    closed: two blocks on opposite sides 1.2 m apart along the lane leave a
+    slot the airframe cannot turn through. So the lane is rasterised, every
+    cell given its distance to the nearest wall or obstacle, and the answer is
+    the best, over all paths from the banner end to the far end, of the
+    smallest clearance on the path (a maximin path: cells joined in order of
+    falling clearance until the two ends connect).
+    """
+    L, Wd = float(c["length"]), float(c["width"])
+    nu, nv = int(L / cell_m), int(Wd / cell_m)
+    polys = []
+    for o in c.get("obstacles") or []:
+        yaw = math.radians(o.get("yaw_deg", 0.0))
+        polys.append(rect_corners(float(o["u"]), float(o["v"]), float(o["w"]),
+                                  float(o["d"]), yaw))
+    clear = []
+    for i in range(nu):
+        u = (i + 0.5) * cell_m
+        row = []
+        for j in range(nv):
+            v = -Wd / 2 + (j + 0.5) * cell_m
+            d = Wd / 2 - abs(v)
+            for poly in polys:
+                d = 0.0 if point_in_polygon((u, v), poly) else \
+                    min(d, distance_to_edge((u, v), poly))
+            row.append(d)
+        clear.append(row)
+    parent = list(range(nu * nv + 2))
+    START, END = nu * nv, nu * nv + 1
+
+    def find(a):
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+
+    order = sorted(((clear[i][j], i, j) for i in range(nu) for j in range(nv)),
+                   reverse=True)
+    seen = set()
+    for d, i, j in order:
+        k = i * nv + j
+        seen.add(k)
+        links = [START] if i == 0 else []
+        links += [END] if i == nu - 1 else []
+        for di, dj in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            ii, jj = i + di, j + dj
+            if 0 <= ii < nu and 0 <= jj < nv and ii * nv + jj in seen:
+                links.append(ii * nv + jj)
+        for other in links:
+            parent[find(k)] = find(other)
+        if find(START) == find(END):
+            return d
+    return 0.0
 
 
 def _check_obstacles(spec, errs, warns):
@@ -362,22 +594,37 @@ def _check_obstacles(spec, errs, warns):
                          f"the corridor navigator passes reliably with "
                          f"{PASS_COMFORT_M:.1f} m or more")
         # THE LIDAR IS ONE PLANE. At the corridor altitude it scans at
-        # CORRIDOR_ALT_M + LIDAR_ABOVE_BODY_M; an obstacle whose top is below
-        # that plane but above the airframe's underside is invisible to the
-        # navigator and in the aircraft's way. Found live: a 3.2 m block,
-        # 3.23 m scan plane, flown into at 3 m (pitch 48 deg).
-        plane = CORRIDOR_ALT_M + LIDAR_ABOVE_BODY_M
-        belly = CORRIDOR_ALT_M - AIRFRAME_BELOW_BODY_M
+        # alt + LIDAR_ABOVE_BODY_M; an obstacle whose top is below that plane
+        # but above the airframe's underside is invisible to the navigator
+        # and in the aircraft's way. Found live: a 3.2 m block, 3.23 m scan
+        # plane, flown into at 3 m (pitch 48 deg).
+        alt = corridor_alt(spec)
+        plane = alt + LIDAR_ABOVE_BODY_M
+        belly = alt - AIRFRAME_BELOW_BODY_M
         if belly < h < plane + 0.1:
             errs.append(f"obstacle {i} is {h:g} m tall: its top is below the "
-                        f"lidar's scan plane ({plane:.2f} m at the {CORRIDOR_ALT_M:g} m "
-                        f"corridor altitude) but above the airframe's underside "
-                        f"({belly:.2f} m) -- the aircraft cannot see it and would "
-                        f"fly into it. Make it taller than {plane + 0.1:.2f} m or "
-                        f"shorter than {belly:.2f} m")
+                        f"lidar's scan plane ({plane:.2f} m at the {alt:.1f} m "
+                        f"corridor altitude under the board) but above the "
+                        f"airframe's underside ({belly:.2f} m) -- the aircraft "
+                        f"cannot see it and would fly into it. Make it taller "
+                        f"than {plane + 0.1:.2f} m or shorter than {belly:.2f} m")
         elif h <= belly:
             warns.append(f"obstacle {i} is {h:g} m tall; the corridor is flown "
-                         f"at {CORRIDOR_ALT_M:g} m, so the aircraft passes over it")
+                         f"at {alt:.1f} m, so the aircraft passes over it")
+    if r.get("obstacles") and not errs:
+        room = lane_bottleneck(r)
+        if room < TEAM_AIRFRAME_R_M + 0.05:
+            errs.append(f"the return corridor has no way through: the widest "
+                        f"path keeps {room:.2f} m from every wall and obstacle, "
+                        f"and the airframe needs {TEAM_AIRFRAME_R_M:.2f} m plus "
+                        f"flying margin -- the obstacles close it between them "
+                        f"even where each leaves a gap on its own")
+        elif room < NAVIGATOR_HALF_STRIP_M:
+            warns.append(f"the return corridor's tightest passage keeps "
+                         f"{room:.2f} m either side of the path; the corridor "
+                         f"navigator needs {NAVIGATOR_HALF_STRIP_M:.2f} m "
+                         f"(velocity_controller passage_half_width) and will "
+                         f"stop in front of it")
 
 def validate(spec):
     """(errors, warnings). An error is a world the mission cannot legally fly
@@ -385,6 +632,7 @@ def validate(spec):
     """
     spec = normalise(spec)
     errs, warns = [], []
+    _check_conditions(spec, errs)
     z = spec["delivery_zone"]
     if not (z["w"] > 0 and z["h"] > 0):
         errs.append("delivery zone needs a positive width and height")
@@ -397,6 +645,10 @@ def validate(spec):
         errs.append("missing delivery pad(s): " + ", ".join(m.upper() for m in missing))
     if spec["start_target"] not in PAD_LETTERS + ("random",):
         errs.append("start target must be a, b, c, d, e or random")
+    bottom = float(spec["banner"]["board_bottom_m"])
+    if not BOARD_BOTTOM_RANGE_M[0] <= bottom <= BOARD_BOTTOM_RANGE_M[1]:
+        errs.append(f"banner board bottom {bottom:g} m is outside "
+                    f"{BOARD_BOTTOM_RANGE_M[0]:g}-{BOARD_BOTTOM_RANGE_M[1]:g} m")
     for key in ("start_m", "target_m"):
         v = float(spec["qr"][key])
         if not 0.2 <= v <= 5.0:

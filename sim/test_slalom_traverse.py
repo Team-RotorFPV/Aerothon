@@ -118,13 +118,24 @@ class SlalomTraverseTests(unittest.TestCase):
     def tearDown(self):
         self.node.destroy_node()
 
-    def fly(self, x, y, yaw, goal_x, dt=0.05, max_t=120.0):
+    def fly(self, x, y, yaw, goal_x, dt=0.05, max_t=120.0, drift=None,
+            corrupt=None, scan_delay_s=0.0, vel_tau_s=VEL_TAU_S):
+        """Fly until x < goal_x; fail on contact or timeout.
+
+        The hooks are the real world the plain loop leaves out
+        (sim/test_corridor_stress.py): `drift(t)` is a world-frame velocity
+        the airframe does not command (wind the position controller has not
+        yet rejected), `corrupt(ranges)` degrades each scan, `scan_delay_s`
+        delivers each scan that much after it was taken, and `vel_tau_s` is
+        how sluggishly the airframe follows a velocity setpoint.
+        """
         rects = WALLS + BLOCKS
         closest = float("inf")
         t = 0.0
         track = []
         wvx = wvy = 0.0                 # the airframe's ACTUAL world velocity
         next_scan = 0.0
+        pending = []                    # (deliver_at, scan)
         while t < max_t:
             pose = PoseStamped()
             pose.pose.position.x, pose.pose.position.y = x, y
@@ -133,19 +144,25 @@ class SlalomTraverseTests(unittest.TestCase):
             pose.pose.orientation.w = math.cos(yaw / 2.0)
             self.node._on_pose(pose)
             if t >= next_scan:
-                self.node._on_scan(scan_at(x, y, yaw, rects))
+                scan = scan_at(x, y, yaw, rects)
+                if corrupt is not None:
+                    scan.ranges = [float(r) for r in corrupt(scan.ranges)]
+                pending.append((t + scan_delay_s, scan))
                 next_scan = t + SCAN_PERIOD_S
+            while pending and pending[0][0] <= t:
+                self.node._on_scan(pending.pop(0)[1])
             self.node._scan_t = self.node._now()     # never "stale" in a test
             self.node._tick()
             sp = self.sent[-1]
             vx, vy = sp.velocity.x, sp.velocity.y          # body FLU
             cvx = vx * math.cos(yaw) - vy * math.sin(yaw)
             cvy = vx * math.sin(yaw) + vy * math.cos(yaw)
-            a = dt / VEL_TAU_S
+            a = dt / vel_tau_s
             wvx += (cvx - wvx) * a
             wvy += (cvy - wvy) * a
-            x += wvx * dt
-            y += wvy * dt
+            dx, dy = drift(t) if drift is not None else (0.0, 0.0)
+            x += (wvx + dx) * dt
+            y += (wvy + dy) * dt
             yaw += sp.yaw_rate * dt
             t += dt
             track.append((round(t, 2), round(x, 2), round(y, 2)))
@@ -221,7 +238,6 @@ class CustomSlalomTests(SlalomTraverseTests):
     """
 
     def lane(self, L, W, obstacles):
-        global BLOCKS
         wy = W / 2 + 0.05
         WALLS[:] = [rect(L / 2, wy, L + 0.2, 0.1), rect(L / 2, -wy, L + 0.2, 0.1)]
         blocks = []

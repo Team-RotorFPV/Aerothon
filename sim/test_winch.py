@@ -122,13 +122,25 @@ class WinchTests(unittest.TestCase):
                          "released with the payload still hanging")
         self.assertIn("not down", self.node.fault)
 
-    def test_release_refused_while_drifting(self):
+    def test_an_actuated_hook_is_refused_while_drifting(self):
+        from rclpy.parameter import Parameter
+        self.node.set_parameters([Parameter("hook", Parameter.Type.STRING, "command")])
         self.lower_to_ground(4.0)
         for _ in range(10):
             self.node._on_vel(vel(3.0))      # moving fast
         ok, blockers = self.node.release_ok()
         self.assertFalse(ok)
         self.assertTrue(any("hover" in b for b in blockers), blockers)
+
+    def test_a_gravity_hook_is_not_held_up_by_a_gust(self):
+        """The payload is on the ground and off the hook; the wind moving
+        the aircraft cannot change that."""
+        self.lower_to_ground(4.0)
+        self.advance(30.0)
+        for _ in range(10):
+            self.node._on_vel(vel(3.0))
+        ok, blockers = self.node.release_ok()
+        self.assertTrue(ok, blockers)
 
     def test_release_refused_when_too_high(self):
         self.stabilise(50.0)

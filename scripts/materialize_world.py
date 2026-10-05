@@ -20,9 +20,29 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import world_spec  # noqa: E402
 
 
-WHITE = "<material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse></material>"
-BLACK = "<material><ambient>0.002 0.002 0.002 1</ambient><diffuse>0.002 0.002 0.002 1</diffuse></material>"
-GREEN = "<material><ambient>0.01 0.48 0.18 1</ambient><diffuse>0.01 0.62 0.24 1</diffuse></material>"
+def material(ambient, diffuse):
+    a = " ".join(f"{v:.3f}" for v in ambient)
+    d = " ".join(f"{v:.3f}" for v in diffuse)
+    return f"<material><ambient>{a} 1</ambient><diffuse>{d} 1</diffuse></material>"
+
+
+# Printed colours, as (ambient, diffuse) RGB.
+PRINT_WHITE = ((1.0, 1.0, 1.0), (1.0, 1.0, 1.0))
+PRINT_BLACK = ((0.002, 0.002, 0.002), (0.002, 0.002, 0.002))
+PRINT_GREEN = ((0.01, 0.48, 0.18), (0.01, 0.62, 0.24))
+# What a print weathers towards: sun-faded, dusty, a dry field's grey-brown.
+DUST = (0.62, 0.58, 0.50)
+WEAR_PER_LEVEL = 0.12      # wear 5 is 60% of the way to dust
+
+
+def worn(colour, wear):
+    """A printed colour after `wear` (0-5) levels of fading and dust."""
+    f = min(5, max(0, int(wear))) * WEAR_PER_LEVEL
+    return material(*[[c + (d - c) * f for c, d in zip(rgb, DUST)] for rgb in colour])
+
+
+WHITE = worn(PRINT_WHITE, 0)
+GREEN = worn(PRINT_GREEN, 0)
 
 # Compact 5x7 block font used for signs. Geometry, unlike synchronized PBR
 # textures, renders reliably in both the Gazebo GUI and simulated camera.
@@ -66,11 +86,13 @@ def box_collision(name: str, pose: str, size: str) -> str:
             f'<size>{size}</size></box></geometry></collision>')
 
 
-def qr_visuals(matrix: list[list[bool]], size: float, prefix: str) -> str:
+def qr_visuals(matrix: list[list[bool]], size: float, prefix: str,
+               wear: int = 0) -> str:
     """White plate plus horizontally merged black QR module runs."""
     n = len(matrix)
     cell = size / n
-    visuals = [box_visual(f"{prefix}_white_plate", "0 0 0", f"{size} {size} 0.04", WHITE)]
+    plate, ink = worn(PRINT_WHITE, wear), worn(PRINT_BLACK, wear)
+    visuals = [box_visual(f"{prefix}_white_plate", "0 0 0", f"{size} {size} 0.04", plate)]
     idx = 0
     for row, modules in enumerate(matrix):
         col = 0
@@ -86,7 +108,7 @@ def qr_visuals(matrix: list[list[bool]], size: float, prefix: str) -> str:
             y = size / 2 - (row + 0.5) * cell
             visuals.append(box_visual(
                 f"{prefix}_black_{idx}", f"{x:.6f} {y:.6f} 0.026",
-                f"{run * cell:.6f} {cell:.6f} 0.012", BLACK))
+                f"{run * cell:.6f} {cell:.6f} 0.012", ink))
             idx += 1
     return "\n".join(visuals)
 
@@ -123,7 +145,8 @@ def green_decoy_visuals() -> str:
     ])
 
 
-def banner_geometry() -> str:
+def banner_geometry(wear: int = 0,
+                    bottom: float = world_spec.BOARD_BOTTOM_M) -> str:
     """The lettered panel, as both a visual and a SOLID.
 
     WHY THE COLLISION IS PART OF THE BANNER AND NOT AN AFTERTHOUGHT
@@ -143,19 +166,20 @@ def banner_geometry() -> str:
     rows = bitmap_runs(text)
     cols = len(rows[0])
     cell_y, cell_z = 3.25 / cols, 0.115
-    center_z = 3.38
+    center_z = bottom + 1.15 / 2
+    green, white = worn(PRINT_GREEN, wear), worn(PRINT_WHITE, wear)
     visuals = [
         box_collision("banner_board_collision", f"0 0 {center_z}",
                       "0.12 3.7 1.15"),
-        box_visual("banner_board", f"0 0 {center_z}", "0.12 3.7 1.15", GREEN),
+        box_visual("banner_board", f"0 0 {center_z}", "0.12 3.7 1.15", green),
     ]
     # Raised white frame on both faces.
     for face, x in (("front", -0.071), ("back", 0.071)):
         visuals.extend([
-            box_visual(f"banner_{face}_frame_top", f"{x} 0 {center_z + 0.50}", "0.022 3.48 0.07", WHITE),
-            box_visual(f"banner_{face}_frame_bottom", f"{x} 0 {center_z - 0.50}", "0.022 3.48 0.07", WHITE),
-            box_visual(f"banner_{face}_frame_left", f"{x} 1.705 {center_z}", "0.022 0.07 1.07", WHITE),
-            box_visual(f"banner_{face}_frame_right", f"{x} -1.705 {center_z}", "0.022 0.07 1.07", WHITE),
+            box_visual(f"banner_{face}_frame_top", f"{x} 0 {center_z + 0.50}", "0.022 3.48 0.07", white),
+            box_visual(f"banner_{face}_frame_bottom", f"{x} 0 {center_z - 0.50}", "0.022 3.48 0.07", white),
+            box_visual(f"banner_{face}_frame_left", f"{x} 1.705 {center_z}", "0.022 0.07 1.07", white),
+            box_visual(f"banner_{face}_frame_right", f"{x} -1.705 {center_z}", "0.022 0.07 1.07", white),
         ])
     idx = 0
     for face, x, mirror in (("front", -0.071, False), ("back", 0.071, True)):
@@ -174,7 +198,7 @@ def banner_geometry() -> str:
                 z = center_z + (3 - row) * cell_z
                 visuals.append(box_visual(
                     f"banner_{face}_{idx}", f"{x:.3f} {y:.6f} {z:.6f}",
-                    f"0.022 {run * cell_y:.6f} {cell_z:.6f}", WHITE))
+                    f"0.022 {run * cell_y:.6f} {cell_z:.6f}", white))
                 idx += 1
     return "\n".join(visuals)
 
@@ -211,6 +235,67 @@ def red_zone_visuals(width: float, height: float, prefix: str) -> str:
                 f"{run * cell_x:.6f} {cell_y:.6f} 0.022", WHITE))
             idx += 1
     return "\n".join(visuals)
+
+
+# ---- conditions ----------------------------------------------------------------
+
+RHO = 1.2                  # air density, kg/m^3
+# Drag area of the team quad (frame, arms, props, payload) seen side-on.
+AIRFRAME_CDA_M2 = 0.05
+AIRFRAME_JSON = (Path(__file__).resolve().parent.parent / "src" / "aerothon_sim"
+                 / "sim_gazebo" / "models" / "aerothon_quad" / "airframe.json")
+
+
+def airframe_body_kg():
+    return float(json.loads(AIRFRAME_JSON.read_text())["body_mass_kg"])
+
+
+def wind_sdf(wind, body_kg):
+    """World wind and the WindEffects system for it, or "" in still air.
+
+    WindEffects pushes each wind-enabled link with mass * k * (wind - link
+    velocity): linear in the relative wind, where real drag is quadratic.
+    k is set so the push equals the quadratic drag at the GUST PEAK, so the
+    worst moment is modelled at full strength and the mean slightly over.
+    Gusts are its sinusoidal magnitude term; `veer_deg` swings the heading
+    on a period incommensurate with the gusts. Its noise terms are white
+    per physics step and average to nothing, so they are not used.
+    """
+    speed = float(wind["speed"])
+    if speed <= 0.0:
+        return ""
+    gust, period = float(wind["gust"]), float(wind["gust_period_s"])
+    k = 0.5 * RHO * AIRFRAME_CDA_M2 * (speed + gust) / body_kg
+    d = math.radians(float(wind["dir_deg"]))
+    return (f'<wind><linear_velocity>{speed * math.cos(d):.3f} '
+            f'{speed * math.sin(d):.3f} 0</linear_velocity></wind>\n'
+            f'    <plugin filename="gz-sim-wind-effects-system" '
+            f'name="gz::sim::systems::WindEffects">'
+            f'<force_approximation_scaling_factor>{k:.4f}'
+            f'</force_approximation_scaling_factor><horizontal>'
+            f'<magnitude><time_for_rise>2</time_for_rise><sin>'
+            f'<amplitude_percent>{gust / speed:.3f}</amplitude_percent>'
+            f'<period>{period:.1f}</period></sin></magnitude>'
+            f'<direction><time_for_rise>5</time_for_rise><sin>'
+            f'<amplitude>{float(wind["veer_deg"]):.1f}</amplitude>'
+            f'<period>{period * 2.7:.1f}</period></sin></direction>'
+            f'</horizontal></plugin>\n')
+
+
+def sitl_params(fcu):
+    """ArduPilot SITL sensor-fault parameters (Copter 4.5 names).
+
+    The timed GPS glitch is not here: a glitch present from boot is only an
+    offset. sim_gazebo/degrade_node.py sets SIM_GPS_GLITCH_X/Y in flight.
+    """
+    rows = [("SIM_GPS_NOISE", fcu["gps_noise_m"]),
+            ("SIM_BARO_RND", fcu["baro_noise_m"]),
+            ("SIM_BARO_DRIFT", fcu["baro_drift_mps"]),
+            ("SIM_ACC1_RND", fcu["imu_noise"]),          # m/s^2
+            ("SIM_GYR1_RND", 2.0 * fcu["imu_noise"]),    # deg/s
+            ("SIM_BATT_VOLTAGE", fcu["battery_v"])]
+    return ("# Generated by materialize_world.py from the world's conditions.\n"
+            + "".join(f"{n} {float(v):g}\n" for n, v in rows))
 
 
 def main() -> None:
@@ -274,6 +359,19 @@ def main() -> None:
                              "position, size and heading comes from this file. "
                              "Overrides --randomise-arena, the start target "
                              "and the QR sizes.")
+    # THE CONDITIONS. A preset name or a JSON object (world_spec.conditions);
+    # it overrides a world spec's own, so any arena can be flown on any day.
+    parser.add_argument("--conditions", default=os.environ.get("AEROTHON_CONDITIONS"),
+                        help="calm|field|worst|random, or a JSON conditions "
+                             "object; default: the world spec's, else calm")
+    parser.add_argument("--conditions-seed", type=int,
+                        default=int(os.environ.get("AEROTHON_CONDITIONS_SEED", 0)),
+                        help="seed for the 'random' preset")
+    parser.add_argument("--conditions-out", type=Path, default=None,
+                        help="write the resolved conditions as JSON (for "
+                             "sim_gazebo degrade_node)")
+    parser.add_argument("--sitl-params-out", type=Path, default=None,
+                        help="write the conditions' SITL fault parameters")
     args = parser.parse_args()
 
     # Ogre cannot resolve file:// URIs whose path contains spaces, even when
@@ -303,6 +401,27 @@ def main() -> None:
         arena = randomise_arena(world, random.Random(args.seed or None))
         world = arena.pop("world")
         print("RANDOMISED ARENA: " + json.dumps(arena, sort_keys=True))
+    cond_spec = {"conditions": spec["conditions"]} if spec else {}
+    if args.conditions:
+        text = args.conditions.strip()
+        cond_spec = {"conditions": json.loads(text) if text.startswith("{")
+                     else {"preset": text}}
+    errs = []
+    world_spec._check_conditions(cond_spec, errs)
+    if errs:
+        raise SystemExit("CONDITIONS refused:\n  " + "\n  ".join(errs))
+    cond = world_spec.conditions(cond_spec, args.conditions_seed)
+    print("CONDITIONS: " + json.dumps(cond, sort_keys=True))
+    if cond["wind"]["speed"] > 0 and os.environ.get("AEROTHON_AIRFRAME", "cad") != "cad":
+        print("CONDITIONS warning: wind acts only on the team airframe "
+              "(AEROTHON_AIRFRAME=cad); the Iris is flown in still air")
+    world = world.replace("</world>", wind_sdf(cond["wind"], airframe_body_kg())
+                          + "  </world>", 1)
+    if args.conditions_out:
+        args.conditions_out.write_text(json.dumps(cond, sort_keys=True),
+                                       encoding="utf-8")
+    if args.sitl_params_out:
+        args.sitl_params_out.write_text(sitl_params(cond["fcu"]), encoding="utf-8")
     layout = arena if arena is not None else shipped_layout()
     # WORLD -> HOME-LOCAL. The mission's local frame is anchored at the FCU
     # home, which is where the vehicle spawns -- (-2, 2) in the shipped world,
@@ -333,20 +452,18 @@ def main() -> None:
          if line.startswith(f"qr_target_{start_letter}.png")), "?")
     print(f"start pad names delivery target {start_letter.upper()} "
           f"({start_payload})")
+    bottom = (float(spec["banner"]["board_bottom_m"]) if spec
+              else world_spec.BOARD_BOTTOM_M)
+    post_h = max(4.0, bottom + 1.15)
     replacements = {
-        "@QR_START_VISUALS@": qr_visuals(start_matrix,
-                                        args.start_qr_size, "start_qr"),
-        "@QR_TARGET_A_VISUALS@": qr_visuals(matrices["qr_target_a.png"],
-                                            args.target_qr_size, "target_a"),
-        "@QR_TARGET_B_VISUALS@": qr_visuals(matrices["qr_target_b.png"],
-                                            args.target_qr_size, "target_b"),
-        "@QR_TARGET_C_VISUALS@": qr_visuals(matrices["qr_target_c.png"],
-                                            args.target_qr_size, "target_c"),
-        "@QR_TARGET_D_VISUALS@": qr_visuals(matrices["qr_target_d.png"],
-                                            args.target_qr_size, "target_d"),
-        "@QR_TARGET_E_VISUALS@": qr_visuals(matrices["qr_target_e.png"],
-                                            args.target_qr_size, "target_e"),
-        "@AEROTHON_BANNER_GEOMETRY@": banner_geometry(),
+        "@QR_START_VISUALS@": qr_visuals(start_matrix, args.start_qr_size,
+                                        "start_qr", cond["wear"]["qr"]),
+        **{f"@QR_TARGET_{l.upper()}_VISUALS@": qr_visuals(
+            matrices[f"qr_target_{l}.png"], args.target_qr_size, f"target_{l}",
+            cond["wear"]["qr"]) for l in "abcde"},
+        "@AEROTHON_BANNER_GEOMETRY@": banner_geometry(cond["wear"]["banner"], bottom),
+        "@BANNER_POST_H@": f"{post_h:g}",
+        "@BANNER_POST_Z@": f"{post_h / 2:g}",
         "@GREEN_DECOY_VISUALS@": green_decoy_visuals(),
         "@RED_ZONE_MAIN_VISUALS@": red_zone_visuals(10.0, 7.0, "red_main"),
         "@RED_ZONE_NW_VISUALS@": red_zone_visuals(6.0, 4.0, "red_nw"),

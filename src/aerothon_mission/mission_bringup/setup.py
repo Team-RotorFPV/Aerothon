@@ -21,5 +21,6 @@ setup(
     description='Launch files for Mission 2.',
     license='MIT',
     entry_points={'console_scripts': [
-        'stream_rate_keeper = mission_bringup.stream_rate_keeper:main']},
+        'stream_rate_keeper = mission_bringup.stream_rate_keeper:main',
+        'scan_mount = mission_bringup.scan_mount:main']},
 )

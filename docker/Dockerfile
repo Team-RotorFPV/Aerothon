@@ -13,6 +13,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       ros-jazzy-navigation2 ros-jazzy-nav2-costmap-2d \
       ros-jazzy-web-video-server \
       python3-vcstool python3-colcon-common-extensions python3-pip \
+      ros-jazzy-cv-bridge tesseract-ocr libzbar0 python3-pyzbar \
       git wget curl gz-harmonic \
     && rm -rf /var/lib/apt/lists/*
 
@@ -22,7 +23,7 @@ RUN wget -q https://raw.githubusercontent.com/mavlink/mavros/master/mavros/scrip
 
 # Python deps for perception / mission (CPU OpenCV, py_trees)
 RUN pip3 install --break-system-packages \
-      py_trees py_trees_ros opencv-python numpy pyproj
+      py_trees opencv-python numpy pyproj
 
 WORKDIR /aerothon_ws
 # Source ROS in every shell

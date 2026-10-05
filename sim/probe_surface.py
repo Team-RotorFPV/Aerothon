@@ -278,7 +278,7 @@ def main():
         p.scans.clear()
         p.ident.clear()
         p.spin(a.settle)
-        f = report(p, half, a.sweep_step_deg)
+        report(p, half, a.sweep_step_deg)
         rows.append({"station": [x, y, z, math.degrees(yaw)],
                      "pose": list(p.pose), "rate_hz": round(p.rate_hz(), 2),
                      "finite": len(p.finite()),

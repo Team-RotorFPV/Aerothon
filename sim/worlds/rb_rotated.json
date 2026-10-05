@@ -1,0 +1,108 @@
+{
+  "schema": "aerothon-world/1",
+  "name": "rb_rotated",
+  "takeoff": {
+    "x": -4.0,
+    "y": -3.0,
+    "yaw_deg": 30.0
+  },
+  "corridor": {
+    "x": 2.0,
+    "y": 2.0,
+    "yaw_deg": 30.0,
+    "length": 10.0,
+    "width": 3.5,
+    "wall_height": 3.6
+  },
+  "return_corridor": {
+    "linked": false,
+    "x": 22.0,
+    "y": -12.0,
+    "yaw_deg": 210.0,
+    "length": 10.0,
+    "width": 3.5,
+    "wall_height": 3.6,
+    "obstacles": [
+      {
+        "u": 3.0,
+        "v": 1.0,
+        "w": 0.4,
+        "d": 1.4,
+        "h": 3.4,
+        "yaw_deg": 20.0
+      },
+      {
+        "u": 6.5,
+        "v": -1.0,
+        "w": 0.4,
+        "d": 1.4,
+        "h": 3.4,
+        "yaw_deg": -20.0
+      }
+    ]
+  },
+  "delivery_zone": {
+    "x": 34.0,
+    "y": 8.0,
+    "w": 30.0,
+    "h": 26.0
+  },
+  "geofence": {
+    "mode": "auto",
+    "margin": 6.0
+  },
+  "red_zones": [
+    {
+      "x": 33.0,
+      "y": 12.0,
+      "w": 8.0,
+      "h": 4.0,
+      "yaw_deg": 35.0
+    },
+    {
+      "x": 43.0,
+      "y": 0.0,
+      "w": 5.0,
+      "h": 5.0,
+      "yaw_deg": 60.0
+    }
+  ],
+  "pads": {
+    "a": {
+      "x": 24.0,
+      "y": 16.0
+    },
+    "b": {
+      "x": 44.0,
+      "y": 16.0
+    },
+    "c": {
+      "x": 28.0,
+      "y": 2.0
+    },
+    "d": {
+      "x": 36.0,
+      "y": -3.0
+    },
+    "e": {
+      "x": 45.0,
+      "y": 9.0
+    }
+  },
+  "decoys": [
+    {
+      "x": 12.0,
+      "y": 14.0,
+      "yaw_deg": 30.0
+    }
+  ],
+  "start_target": "random",
+  "qr": {
+    "start_m": 1.5,
+    "target_m": 2.0
+  },
+  "conditions": {
+    "preset": "calm"
+  },
+  "_note": "Rulebook deviation: lanes rotated off the zone axis and apart, rotated red zones, smaller zone and QR codes."
+}

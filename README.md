@@ -5,9 +5,10 @@ Autonomous QR-guided delivery multirotor + custom control GCS for **SAEINDIA Aer
 - 🗺️ **[PHASE_PLAN.md](PHASE_PLAN.md)** — **the active plan.** 12 dependency-ordered phases from fail-closed rails to a randomised-arena regression. Start here.
 - ✅ **[VERIFICATION.md](VERIFICATION.md)** — append-only log of what has actually been *proven*, and how. Claim → method → raw output → verdict.
 - 🔍 **[docs/GEOMETRY_AUDIT.md](docs/GEOMETRY_AUDIT.md)** — every hardcoded arena assumption, and the phase that replaces it with perception.
-- 📋 **[CURRENT_PROGRESS_HANDOFF.md](CURRENT_PROGRESS_HANDOFF.md)** — honest defect inventory that the phase plan works through.
+- 📋 **[CURRENT_PROGRESS_HANDOFF.md](CURRENT_PROGRESS_HANDOFF.md)** — the 2026-08-15 defect inventory the phase plan worked through (historical).
 - 📘 **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — full system design (75 locked decisions, diagrams, node graph, GCS protocol).
 - ⚙️ **[docs/SETUP.md](docs/SETUP.md)** — version-locked environment + install.
+- ✈️ **[docs/FIELD_READINESS.md](docs/FIELD_READINESS.md)** — the adverse-conditions test pyramid (`sim/fly_headless.py`), bench checks, Pixhawk parameters and build-up flights before the first real flight.
 - 🚦 **[docs/STACK_AND_DEPLOYMENT.md](docs/STACK_AND_DEPLOYMENT.md)** — current qualification status, GCS connection, test ladder, and real-aircraft deployment gates.
 - 📦 **[aerothon.repos](aerothon.repos)** — vcstool workspace manifest.
 - 🐳 **[docker/](docker/)** — reproducible dev/sim containers.
@@ -83,12 +84,11 @@ Writes rosbag, topic census, camera frames, TF tree, graph inventory and a
 manifest to `evidence/<phase>/<timestamp>-<label>/`. Then write the verdict
 into [VERIFICATION.md](VERIFICATION.md).
 
-> **Status caveat.** Per [CURRENT_PROGRESS_HANDOFF.md](CURRENT_PROGRESS_HANDOFF.md),
-> this stack is a connected SITL demonstration, **not** a competition-ready
-> autonomous system. Perception is not yet integrated into flight guidance and
-> the mission can still advance after perception failure. Do not fly it
-> autonomously on a real aircraft. [PHASE_PLAN.md](PHASE_PLAN.md) is the route
-> from here to a qualified system.
+> **Status caveat.** The full mission flies in Gazebo and in the headless
+> closed loop under adverse conditions, with every stage failing closed. It
+> has **not** flown on the real aircraft. Work through
+> [docs/FIELD_READINESS.md](docs/FIELD_READINESS.md) (bench checks, the
+> venue file, build-up flights) before any autonomous flight.
 
 ## Build discipline
 - **Fallback-first:** get a scoring baseline flying with ArduPilot-native proximity avoidance before the full Nav2/SLAM stack.

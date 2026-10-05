@@ -28,9 +28,7 @@ sys.path.insert(0, os.path.join(
     "src", "aerothon_avoidance", "avoidance"))
 
 import rclpy
-from rclpy.node import Node
 from sensor_msgs.msg import LaserScan
-from mavros_msgs.msg import PositionTarget
 
 from avoidance.velocity_controller import (
     VelocityController,

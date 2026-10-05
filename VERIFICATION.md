@@ -3022,3 +3022,150 @@ one. Across three watched launches:
 
 The oscillation the operator reported is gone. What replaced it is a
 diagnosable failure with the data to act on.
+
+## 15. Custom-world reliability continuation, 2026-10-03
+
+Inspected the actual tree at `210daa7`, the uncommitted changes and the
+latest logs. The historical handoff above is not the current state.
+The saved `logs/campaign_spec/summary.json` had 7/9 missions completed and
+independently graded PASS. Existing banner recovery, detector-rate pacing,
+headless green-ground modelling and world edits were preserved.
+
+### Return-banner position from an incomplete board
+
+The rotated arena failed because `FindReturnBanner._sighting` clamped the
+range of a clipped board to the 5 m stand-off. `_found` treated that range
+as a measured board position. Alignment then ranged the real banner at
+about 14 m and tried to square up on nearer, unrelated lidar surfaces.
+
+The regression
+`test_a_clipped_distant_board_does_not_become_a_near_sighting` first failed
+with `(28.0, -3.0, -pi/2, 5.0)` as the fabricated sighting. The stage now
+waits for a complete board; the existing level sweep and subsequent
+vantages recover it. No identification, clearance or geometry limit was
+relaxed. Targeted return search, orbit and organiser-input tests passed.
+
+The original full headless repro was run before the fix:
+
+```sh
+source /opt/ros/jazzy/setup.bash
+/usr/bin/python3 sim/fly_headless.py sim/worlds/rb_rotated.json \
+  --seeds 1 --domain-base 170 --rtf 4 --out logs/continue_baseline_20261003
+```
+
+It reproduced FAILED/FAIL at 716 simulated seconds. The fixed run was:
+
+```sh
+/usr/bin/python3 sim/fly_headless.py \
+  sim/worlds/rb_rotated.json sim/worlds/shipped.json \
+  --seeds 1 --domain-base 180 --rtf 4 -j 2 --out logs/continue_fix_20261003
+```
+
+Both completed and passed every independent grading check. Rotated seed 1
+took 710.9 simulated seconds, delivered 0.16 m from the pad and landed
+0.16 m from home. Both runs had zero contacts and fence breaches. Rotated
+seeds 2 and 3 also completed and passed; full campaign results follow in
+`.scratch/simulation-reliability/status.md`.
+
+### A measured corridor stall lasts until movement
+
+`VelocityController.stalled` reset its reference after every stalled
+window. It reported one blocked tick per 12 s window, then CRUISE cleared
+the counter before the existing recovery threshold could be reached.
+
+The virtual-time regression
+`test_a_stationary_aircraft_with_a_visible_gap_exhausts_recovery` ran the
+real controller for 120 s against a visible gap and a stationary pose.
+Before the fix it never entered BACKOFF. Keeping the expired reference
+until displacement meets `min_progress_m` lets the existing recovery
+ladder run to STUCK. A second regression verifies that real movement
+starts a fresh window. Backoff speeds, attempt limits and outcomes were
+not changed.
+
+The final targeted set passed 95 tests, recorded in
+`logs/continue_targeted_20261003.log`. Corridor stress/yaw checks also
+passed in `sim/test_corridor_stress.py` and
+`sim/test_corridor_yaw_alignment.py`.
+
+Full headless `my_world_offaxis` seed 1 now attempts all three backoffs
+and reports `FAILED: ReturnCorridor: corridor navigator reported STUCK
+at x=12.76` at 766.6 simulated seconds, instead of waiting until the saved
+old run's battery-critical RTL at 1046.4 s. Its mission grade remains FAIL.
+Evidence: `logs/continue_stall_20261003`.
+
+### Final validation
+
+- `bash scripts/run_tests.sh --quick`: 1220 passed, 3 skipped; Python and
+  shell syntax, XML and YAML checks passed. Log:
+  `logs/continue_final_offline_20261003.log`. The unchanged frontend was not
+  rebuilt by this command.
+- `logs/continue_regression_20261003/summary.json`: rotated seeds 2-3 and
+  current `my_world` seeds 2-3 all COMPLETED/PASS, zero contacts or fence
+  breaches. With the rotated/shipped seed-1 pair, 6/6 successful missions
+  were independently graded in this continuation. The separate preserved
+  off-axis run remains FAILED/FAIL.
+- All six successful runs used the specs' own calm conditions. Changing
+  mission seeds tests target selection and trajectories; this is not a new
+  random/worst-conditions campaign.
+- Both current-world missions reported delivery UNMEASURED because the pad
+  was absent from the release frame. Ground-payload detection was confirmed
+  and independent ground-truth grading passed payload placement. The
+  telemetry's absent offset was not replaced with a made-up value.
+- `git diff --check` passed. Three regression tests and two production fixes
+  were added; the pre-existing working-tree edits were preserved.
+
+### Limits and next steps
+
+These are headless closed-loop results with a kinematic airframe and
+object-level perception. They do not qualify rendered Gazebo/SITL camera
+timing, the physical claw or a real aircraft. The last saved rendered
+`my_world` mission completed but failed restricted-zone grading. The
+interrupted detector-rate pacing change still needs that rendered rerun.
+
+The preserved off-axis world warns of only 1.21 m past obstacle 5 and
+0.45 m either side of its tightest passage, below the navigator's 0.70 m
+half-width requirement. Its geometry and required clearance were not
+changed. Further planner work is issue 03 under
+`.scratch/simulation-reliability/issues/`.
+
+Physical-mechanism evidence remains in `docs/hook_physics.md`. Uneven
+loading loses the payload; an evenly seated ring can be carried, but stow
+can close the jaws on it again. Simulated mission delivery does not prove
+that mechanism's loading or release. The new progress record, final
+offline checks and campaign results are in
+`.scratch/simulation-reliability/status.md`.
+
+### Recorded rendered off-axis seed 1 - 2026-10-03
+
+The requested rerun used the unchanged `sim/worlds/my_world_offaxis.json`
+(SHA256 `bd842c00f4918857094f6d669910142143903cf5c1385b686c98c011bc2b3537`),
+calm conditions, seed 1 and its specified target B. Command:
+
+```sh
+AEROTHON_START_TARGET=b AEROTHON_HEADLESS=1 AEROTHON_OPEN_GCS=0 \
+  AEROTHON_WATCH=5400 bash scripts/run_custom_world.sh \
+  sim/worlds/my_world_offaxis.json --conditions calm --seed 1 --record
+```
+
+Rendered Gazebo Harmonic and ArduPilot SITL reported FAILED at 796.8
+simulated seconds: the return recovery backed out of the mouth, which was
+correctly refused as a completed lane. RTL subsequently landed at home and
+FCU disarmed. The full trace grades FAIL: one restricted-zone entry during
+SEARCH_QR, incomplete return traversal, and RTL over the corridor. It has
+no obstacle contact, tilt events or fence exits. Independent payload error
+was 0.17 m, landing error 0.03 m, airborne time 780.0 s.
+
+`logs/custom/my_world_offaxis_calm_s1.mp4` is a continuous 789.367 s
+H.264 1280x720/30fps recording from preflight through the disarmed landing,
+corrected by the measured wall/sim ratio x3.597. It was remuxed for fast
+start, decoded completely with FFmpeg (exit 0, empty error log), and
+opening, flight and final landed frames were visually checked.
+
+The standard live runner saved its track shortly after FAILED, while RTL
+was still airborne. A separate read-only observer kept the recorder running
+until disarm and saved the tail. `*_full_track.csv` contains the original
+6701 samples plus 388 later samples, preserving the original trace.
+`*_full_grade.txt` independently grades all 7089 samples; the original
+`*_grade.txt` lacks the landing and must not be read as full-flight evidence.
+Configuration, outcome, video metadata and checks are captured in
+`logs/custom/my_world_offaxis_calm_s1_manifest.json`.

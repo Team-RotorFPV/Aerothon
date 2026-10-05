@@ -42,7 +42,18 @@ BACKENDS
     backend:=sim      publish radians to /gimbal/cmd_pitch (Gazebo
                       JointPositionController), read back from /joint_states
     backend:=mavlink  MAV_CMD_DO_MOUNT_CONTROL via /mavros/cmd/command, read
-                      back from the gimbal attitude status topic
+                      back from the flight controller's mount attitude
+                      (GIMBAL_DEVICE_ATTITUDE_STATUS) whenever it reports one.
+                      The aircraft's tilt is a hobby servo on the Pixhawk: it
+                      has no position feedback, and whether the flight
+                      controller streams a mount attitude for it depends on
+                      its configuration. Without one this backend used to
+                      read back from /joint_states -- which only Gazebo
+                      publishes -- so `settled` could never become true and
+                      the mission would have waited at its first camera
+                      command. Where no attitude arrives the servo is taken
+                      to be at a new angle `servo_settle_s` after it was
+                      commanded, and pose_state says so: readback "timed".
     Same topic interface either way, so the mission tree does not care which
     airframe it is flying.
 """
@@ -57,6 +68,7 @@ from sensor_msgs.msg import JointState
 from std_msgs.msg import Float64, String
 
 try:
+    from mavros_msgs.msg import GimbalDeviceAttitudeStatus
     from mavros_msgs.srv import CommandLong
     _HAVE_MAVROS = True
 except ImportError:                       # sim-only installs
@@ -88,8 +100,8 @@ def _sensor_qos(depth=10):
 
 
 class CameraCtrl(Node):
-    def __init__(self):
-        super().__init__("camera_ctrl")
+    def __init__(self, **kwargs):
+        super().__init__("camera_ctrl", **kwargs)
 
         p = self.declare_parameter
         p("backend", "sim")                 # sim | mavlink
@@ -101,6 +113,7 @@ class CameraCtrl(Node):
         p("publish_rate_hz", 10.0)
         p("command_repeat_s", 0.5)          # re-send until settled
         p("startup_pose", "FORWARD")
+        p("servo_settle_s", 1.0)            # mavlink, no attitude: time to angle
 
         self.backend = self.get_parameter("backend").value
         self.joint_name = self.get_parameter("joint_name").value
@@ -112,10 +125,14 @@ class CameraCtrl(Node):
         self._in_tolerance_count = 0
         self._in_tolerance_since = None
         self._last_command_t = None
+        self._target_t = None               # when the current target was set
+        self._prev_rad = 0.0                # the target before it
+        self._mount_t = None                # last mount attitude from the FC
 
         self.create_subscription(String, "/camera/set_pose", self._on_set_pose, 10)
-        self.create_subscription(JointState, "/joint_states",
-                                 self._on_joint_states, _sensor_qos())
+        if self.backend == "sim":
+            self.create_subscription(JointState, "/joint_states",
+                                     self._on_joint_states, _sensor_qos())
 
         self.pub_cmd = self.create_publisher(Float64, "/gimbal/cmd_pitch", 10)
         self.pub_state = self.create_publisher(String, "/camera/pose_state", 10)
@@ -127,6 +144,10 @@ class CameraCtrl(Node):
                     "backend=mavlink but mavros_msgs is unavailable")
             else:
                 self.cli_cmd = self.create_client(CommandLong, "/mavros/cmd/command")
+                self.create_subscription(
+                    GimbalDeviceAttitudeStatus,
+                    "/mavros/gimbal_control/device/attitude_status",
+                    self._on_mount_status, _sensor_qos())
 
         rate = float(self.get_parameter("publish_rate_hz").value)
         self.create_timer(1.0 / rate, self._tick)
@@ -167,7 +188,9 @@ class CameraCtrl(Node):
             return                                  # already commanding this
 
         self.requested_name = name
+        self._prev_rad = self.requested_rad if self.requested_rad is not None else 0.0
         self.requested_rad = new_rad
+        self._target_t = self._now()
         # A new target invalidates any previous settle: the joint has not been
         # measured at the NEW angle yet.
         self._in_tolerance_count = 0
@@ -210,6 +233,29 @@ class CameraCtrl(Node):
             return
         self._observe(float(msg.position[idx]))
 
+    def _on_mount_status(self, msg):
+        """Pitch from the flight controller's mount attitude (up positive,
+        so down is negative, as here)."""
+        q = msg.q
+        self._mount_t = self._now()
+        self._observe(math.asin(max(-1.0, min(1.0, 2.0 * (q.w * q.y - q.z * q.x)))))
+
+    def readback(self):
+        if self.backend == "sim":
+            return "joint"
+        fresh = (self._mount_t is not None and self._now() - self._mount_t
+                 <= float(self.get_parameter("stale_after_s").value))
+        return "mount" if fresh else "timed"
+
+    def _observe_timed(self):
+        """No feedback: at the new angle once the servo has had time to get
+        there, at the old one until then."""
+        if self.requested_rad is None or self._target_t is None:
+            return
+        late = self._now() - self._target_t >= float(
+            self.get_parameter("servo_settle_s").value)
+        self._observe(self.requested_rad if late else self._prev_rad)
+
     def _observe(self, rad):
         self.actual_rad = rad
         self.last_reading_t = self._now()
@@ -247,6 +293,8 @@ class CameraCtrl(Node):
         return (self._now() - self.last_reading_t) > stale_after
 
     def _tick(self):
+        if self.backend == "mavlink" and self.readback() == "timed":
+            self._observe_timed()
         # Keep re-issuing until the joint is measured in position. The Gazebo
         # position controller and a real servo can both miss a single command.
         if self.requested_rad is not None and not self.is_settled():
@@ -269,6 +317,7 @@ class CameraCtrl(Node):
             "settled": self.is_settled(),
             "stale": self.is_stale(),
             "age_s": age,
+            "readback": self.readback(),
         }
         self.pub_state.publish(String(data=json.dumps(payload)))
 

@@ -20,7 +20,8 @@ from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Image
 from std_msgs.msg import String
 
-from perception_redzone.payload import detect_payload
+from camera_ctrl.gate import CameraGate
+from perception_redzone.payload import YELLOW_HI, YELLOW_LO, detect_payload
 
 
 class PayloadNode(Node):
@@ -28,8 +29,15 @@ class PayloadNode(Node):
         super().__init__("perception_payload")
         self.declare_parameter("image_topic", "/camera/image")
         self.declare_parameter("max_rate_hz", 5.0)
+        # The payload's colour, OpenCV HSV (hue 0-180). Set it to the real
+        # payload's; the rulebook gives only its size.
+        self.declare_parameter("hsv_lo", [int(v) for v in YELLOW_LO])
+        self.declare_parameter("hsv_hi", [int(v) for v in YELLOW_HI])
+        self.declare_parameter("min_area_px", 20)
         self.bridge = CvBridge()
         self._last = 0.0
+        # The drop is confirmed looking straight down; nothing else needs it.
+        self.gate = CameraGate(self, ("NADIR",))
         topic = self.get_parameter("image_topic").value
         self.create_subscription(Image, topic, self.on_image, qos_profile_sensor_data)
         self.pub = self.create_publisher(String, "/percep/payload", 10)
@@ -43,12 +51,18 @@ class PayloadNode(Node):
         if now - self._last < 1.0 / float(self.get_parameter("max_rate_hz").value):
             return
         self._last = now
+        if not self.gate.open():
+            self.pub.publish(String(data=json.dumps(
+                {"visible": False, "stamp": now, "gated": True})))
+            return
         try:
             frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
         except Exception as e:                      # noqa: BLE001
             self.get_logger().warning(f"bad frame: {e}")
             return
-        det = detect_payload(frame)
+        g = lambda n: self.get_parameter(n).value
+        det = detect_payload(frame, min_area_px=int(g("min_area_px")),
+                             hsv_lo=g("hsv_lo"), hsv_hi=g("hsv_hi"))
         det["stamp"] = now
         self.pub.publish(String(data=json.dumps(det)))
 

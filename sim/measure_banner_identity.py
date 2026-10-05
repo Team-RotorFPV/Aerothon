@@ -154,12 +154,12 @@ def main():
     if best_bad:
         print(f"first failure at    {best_bad[1]:.1f} px/letter "
               f"(range {best_bad[0]:.1f} m)")
-    print(f"\nFor any banner and camera:")
+    print("\nFor any banner and camera:")
     print(f"    range_max = focal_px * letter_width_m / "
           f"{worst_ok[1]:.1f}")
-    print(f"\nDeclared max_detect_range_m is 25.0 m — the AREA gate. The "
-          f"IDENTITY\nrange measured here is the binding one, and it is much "
-          f"shorter.")
+    print("\nDeclared max_detect_range_m is 25.0 m — the AREA gate. The "
+          "IDENTITY\nrange measured here is the binding one, and it is much "
+          "shorter.")
     return 0
 
 

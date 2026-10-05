@@ -1,0 +1,4 @@
+# One working tree is shared by Git for Windows (core.autocrlf=true) and WSL.
+# CRLF breaks bash scripts and #! lines there, so text is always LF on disk.
+* text=auto eol=lf
+*.bat text eol=crlf

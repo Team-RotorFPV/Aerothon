@@ -16,7 +16,7 @@ The whole point of this file: **a known-good version matrix** so the team doesn'
 | Nav2 | **ros-jazzy-navigation2** | for `costmap_2d` (we don't use the full planner) |
 | rplidar driver | **rplidar_ros (ros2 branch)** | supports C1 |
 | web_video_server | **ros-jazzy-web-video-server** | MJPEG for GCS |
-| py_trees | **py_trees + py_trees_ros (jazzy)** | behavior tree |
+| py_trees | **py_trees** | behavior tree |
 | Rust | **stable (rustup)** | Tauri backend |
 | Tauri | **2.x** | desktop shell |
 | Node | **20 LTS** | React build |
@@ -46,6 +46,13 @@ sudo apt install -y \
   ros-jazzy-web-video-server ros-jazzy-ros-gz \
   python3-vcstool python3-colcon-common-extensions
 
+# Perception: the banner check reads its lettering with the tesseract binary,
+# and the QR reader's first pass is zbar. Without them the banner is never
+# identified and every QR goes through the slower OpenCV fallback; qr_node
+# warns at start-up when zbar is missing.
+sudo apt install -y ros-jazzy-cv-bridge tesseract-ocr libzbar0 python3-pyzbar
+pip3 install --break-system-packages py_trees
+
 # Tauri GCS dependencies (for native Linux build)
 sudo apt install -y \
   libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf \
@@ -54,6 +61,29 @@ sudo apt install -y \
 # MAVROS GeographicLib datasets (required, one-time)
 ros2 run mavros install_geographiclib_datasets.sh   # or the packaged script
 ```
+
+### 2a. On the aircraft's Pi 5: only what flies
+
+The list above is for a dev box. The Pi 5 runs no Gazebo, RViz, Nav2 or
+GCS build, and each of those costs disk, RAM and boot time. Install the
+flight set instead:
+
+```bash
+sudo apt install -y ros-jazzy-ros-base ros-dev-tools \
+  ros-jazzy-mavros ros-jazzy-mavros-extras ros-jazzy-cv-bridge \
+  ros-jazzy-web-video-server ros-jazzy-usb-cam ros-jazzy-xacro \
+  ros-jazzy-robot-state-publisher ros-jazzy-joint-state-publisher \
+  tesseract-ocr libzbar0 python3-pyzbar python3-colcon-common-extensions
+pip3 install --break-system-packages py_trees
+ros2 run mavros install_geographiclib_datasets.sh
+
+# Build everything except the simulator package (it pulls in Gazebo).
+colcon build --symlink-install --packages-skip sim_gazebo
+```
+
+Add `ldlidar_stl_ros2` to the workspace from source (see
+[FIELD_READINESS.md](FIELD_READINESS.md) §2). `use_sim:=false` already
+turns SLAM and RViz off and selects the mavlink camera and winch backends.
 
 ArduPilot SITL + Gazebo Harmonic + `ardupilot_gz` follow the upstream ROS 2 guide (pin a tested commit before flight). Prefer the **Docker path below** for reproducibility.
 
@@ -83,8 +113,8 @@ source install/setup.bash
 ## 5. Quick smoke tests
 
 ```bash
-# 1. SITL + Gazebo world
-ros2 launch sim_gazebo mission2_world.launch.py
+# 1. SITL + Gazebo world + the stack (materialises the world first)
+scripts/launch_level6_sim.sh
 
 # 2. MAVROS connected?
 ros2 topic echo /mavros/state          # expect connected: true

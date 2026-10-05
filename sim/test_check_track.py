@@ -64,6 +64,17 @@ class GradeTests(unittest.TestCase):
         self.assertFalse(res["checks"]["outbound lane flown THROUGH the corridor"])
         self.assertFalse(res["checks"]["never above the corridor"])
 
+    def test_crossing_a_lanes_entry_line_off_to_one_side_is_not_entering_it(self):
+        """A search lane at 10 m that crosses the line through the return
+        lane's mouth, 8 m to one side, is not a traversal -- and grading it
+        as one failed a clean return pass (editor_test, sim/fly_headless.py)."""
+        t = self._clean()
+        i = next(k for k, p in enumerate(t) if (p["x"], p["y"]) == (20, -12))
+        t[i + 1:i + 1] = track([(10, -12, 10), (20, -12, 10)])
+        res = grade(t, LAYOUT, target="b")
+        self.assertTrue(res["checks"]["return lane flown THROUGH the corridor"],
+                        res["corridor_return"])
+
     def test_flying_BESIDE_the_corridor_fails(self):
         t = self._clean()
         for p in t:

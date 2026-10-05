@@ -23,10 +23,8 @@ sys.path.insert(0, os.path.join(_ROOT, "src", "aerothon_perception", "camera_ctr
 sys.path.insert(0, os.path.join(_ROOT, "src", "aerothon_mission", "mission_bt"))
 
 import rclpy
-from rclpy.node import Node
 import py_trees
 from sensor_msgs.msg import JointState
-from std_msgs.msg import String
 
 from camera_ctrl.camera_ctrl_node import CameraCtrl, NAMED_POSES_DEG
 from mission_bt.mission_tree import SetCameraPose
@@ -184,6 +182,60 @@ class CameraCtrlTests(unittest.TestCase):
         self.assertTrue(self.node.is_settled())
         self.node._on_joint_states(joint_state(-math.pi / 4))   # servo slipped
         self.assertFalse(self.node.is_settled())
+
+    # ---- the flight servo: no joint, maybe a mount attitude ---- #
+
+    def mavlink_node(self, settle_s):
+        from rclpy.parameter import Parameter
+        node = CameraCtrl(parameter_overrides=[
+            Parameter("backend", Parameter.Type.STRING, "mavlink"),
+            Parameter("servo_settle_s", Parameter.Type.DOUBLE, settle_s),
+            Parameter("settle_hold_s", Parameter.Type.DOUBLE, 0.0)])
+        node.pub_state.publish = self.states.append
+        node._send = lambda: None
+        return node
+
+    def test_a_servo_without_feedback_settles_once_it_has_had_time(self):
+        """The real tilt servo reports nothing; waiting on /joint_states
+        would hold the mission at its first camera command for ever."""
+        import time
+        node = self.mavlink_node(0.2)
+        try:
+            node.request("NADIR")
+            node._tick()
+            self.assertFalse(node.is_settled(), "settled before it could have moved")
+            time.sleep(0.25)
+            need = int(node.get_parameter("settle_samples").value)
+            for _ in range(need + 1):
+                node._tick()
+            st = json.loads(self.states[-1].data)
+            self.assertTrue(st["settled"], st)
+            self.assertEqual(st["readback"], "timed")
+        finally:
+            node.destroy_node()
+
+    def test_a_mount_attitude_is_believed_over_the_clock(self):
+        from mavros_msgs.msg import GimbalDeviceAttitudeStatus
+        node = self.mavlink_node(0.0)
+        try:
+            node.request("NADIR")
+            stuck = GimbalDeviceAttitudeStatus()
+            stuck.q.w = 1.0                              # still level
+            need = int(node.get_parameter("settle_samples").value)
+            for _ in range(need + 2):
+                node._on_mount_status(stuck)
+                node._tick()
+            st = json.loads(self.states[-1].data)
+            self.assertEqual(st["readback"], "mount")
+            self.assertFalse(st["settled"], "timed read-back overrode the mount")
+            down = GimbalDeviceAttitudeStatus()
+            down.q.w, down.q.y = math.sqrt(0.5), -math.sqrt(0.5)   # 90 deg down
+            for _ in range(need + 2):
+                node._on_mount_status(down)
+                node._tick()
+            self.assertTrue(json.loads(self.states[-1].data)["settled"])
+        finally:
+            node.destroy_node()
 
     def test_wrong_joint_name_is_not_read(self):
         self.node.request("NADIR")

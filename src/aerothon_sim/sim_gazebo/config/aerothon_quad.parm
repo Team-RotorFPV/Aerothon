@@ -1,0 +1,56 @@
+# ArduCopter tuning for the TEAM AIRFRAME (AEROTHON_AIRFRAME=cad).
+#
+# Loaded after gazebo-iris-gimbal.parm, so these replace the Iris's values.
+# Every number here comes from the Iris baseline scaled by the team frame's
+# measured geometry (airframe.json) or from its own flight logs.
+#
+# WHY IT WAS NEEDED. On the Iris gains the team airframe flew the shipped
+# world, but on the custom world it lost 2.3 m of altitude with the throttle
+# at 100 %, roll/pitch errors of +-8 deg at the 95th percentile (+-2-4 on the
+# shipped run) and yaw errors of +-20 deg, then sank below the 2 m airborne
+# floor during the banner orbit and aborted (dataflash 00000167.BIN).
+#
+# HOVER THROTTLE. The Iris hovers at 0.324; this frame hovers at ~0.48
+# (mean ThO over the whole shipped flight, 00000166.BIN). MOT_HOVER_LEARN is 2
+# and yet ThH never moved from 0.324 in any flight, so the altitude loop's
+# integrator was supplying ~15 % throttle all the time: slow, and every
+# disturbance became a sag. Set it to what the aircraft measurably needs.
+MOT_THST_HOVER 0.48
+
+# RATE GAINS. Control authority over inertia, team frame vs Iris:
+#   roll   arm 0.17 m vs 0.22 m, thrust/motor 0.76x, Ixx 2.3x  -> ~0.25x
+#   pitch  arm 0.172 m vs 0.13 m, thrust/motor 0.76x, Iyy 1.7x -> ~0.6x
+#   yaw    real-prop torque 6.3x the Iris model's, thrust 0.76x,
+#          Izz 2x                                              -> ~2.4x
+# Matching the Iris's bandwidth would need 4x / 1.7x / 0.4x the gains. Half
+# the roll/pitch increase is taken, and yaw is brought down to ~0.5x: a soft
+# loop is recoverable, an oscillating one is not.
+ATC_RAT_RLL_P 0.30
+ATC_RAT_RLL_I 0.30
+ATC_RAT_RLL_D 0.008
+ATC_RAT_PIT_P 0.22
+ATC_RAT_PIT_I 0.22
+ATC_RAT_PIT_D 0.006
+ATC_RAT_YAW_P 0.15
+ATC_RAT_YAW_I 0.015
+# Do not command more angular acceleration than the props can produce: the
+# Iris's 1100 deg/s^2 on roll saturated the mixer on this frame.
+ATC_ACCEL_R_MAX 60000
+ATC_ACCEL_P_MAX 80000
+ATC_ACCEL_Y_MAX 18000
+
+# YAW IS THE AXIS THIS FRAME IS SHORT OF. Flight 00000169.BIN: on each 45 deg
+# step of the banner sweep one motor hit its 1860 us limit, throttle out went
+# to 1.0 and the barometer showed a real descent, 4.9 m to the ground in
+# 20 s; capping yaw at 60 deg/s^2 did not stop it (00000170.BIN, the caps
+# verified in its PARM records). The cause was the model: the Iris's blade
+# drag gives a sixth of a real prop's yaw torque, fixed in build_cad_vehicle.py
+# (PROP_TORQUE_PER_THRUST_M). The caps stay as margin -- 180 deg/s^2, 50 deg/s
+# -- and a small yaw headroom makes thrust win when both cannot fit.
+ATC_RATE_Y_MAX 50
+MOT_YAW_HEADROOM 50
+
+# 4S2P Li-ion, not the Iris's 3S LiPo: 4.2 V full, 3.0 V empty per cell.
+# (Voltage compensation of thrust; inert in SITL, right on the aircraft.)
+MOT_BAT_VOLT_MAX 16.8
+MOT_BAT_VOLT_MIN 12.0

@@ -1,10 +1,13 @@
 """Find the delivery payload in a camera frame.
 
-The payload is a bright yellow box (0.12 x 0.12 x 0.08 m in simulation). No
-other surface in the arena is in that hue band: the return lane is orange
-(OpenCV hue ~8), red zones sit at 0/180, the field is green (~50), the pads
-are black and white. So a saturated yellow blob in a nadir frame over the pad,
-after the winch has let go and wound back up, is the payload on the ground.
+The payload is a bright yellow box (0.12 x 0.12 x 0.08 m in simulation; the
+rulebook's is 10 x 5 x 5 cm and gives no colour, so the real one must be
+painted or wrapped to match, or payload_node's hsv_lo / hsv_hi set to its
+colour). No other surface in the arena is in the yellow band: the return lane
+is orange (OpenCV hue ~8), red zones sit at 0/180, the field is green (~50),
+the pads are black and white. So a saturated yellow blob in a nadir frame over
+the pad, after the winch has let go and wound back up, is the payload on the
+ground.
 
 Offsets use the QR detector's convention -- normalised to [-1, 1] of the half
 frame, +x right, +y down -- so the mission converts both to metres the same
@@ -20,11 +23,12 @@ YELLOW_LO = np.array([18, 120, 120], dtype=np.uint8)
 YELLOW_HI = np.array([38, 255, 255], dtype=np.uint8)
 
 
-def detect_payload(bgr, min_area_px=20):
-    """Largest yellow blob in a BGR frame, or {"visible": False}."""
+def detect_payload(bgr, min_area_px=20, hsv_lo=YELLOW_LO, hsv_hi=YELLOW_HI):
+    """Largest blob in the payload's HSV band, or {"visible": False}."""
     h, w = bgr.shape[:2]
     hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
-    mask = cv2.inRange(hsv, YELLOW_LO, YELLOW_HI)
+    mask = cv2.inRange(hsv, np.asarray(hsv_lo, dtype=np.uint8),
+                       np.asarray(hsv_hi, dtype=np.uint8))
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:

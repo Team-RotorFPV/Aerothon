@@ -208,10 +208,10 @@
     <model name="forward_aerothon_banner">
       <static>true</static>
       <link name="gate">
-        <collision name="left_post_collision"><pose>0 -1.92 2 0 0 0</pose><geometry><box><size>0.18 0.18 4</size></box></geometry></collision>
-        <collision name="right_post_collision"><pose>0 1.92 2 0 0 0</pose><geometry><box><size>0.18 0.18 4</size></box></geometry></collision>
-        <visual name="left_post"><pose>0 -1.92 2 0 0 0</pose><geometry><box><size>0.18 0.18 4</size></box></geometry><material><ambient>0.01 0.48 0.18 1</ambient><diffuse>0.01 0.62 0.24 1</diffuse></material></visual>
-        <visual name="right_post"><pose>0 1.92 2 0 0 0</pose><geometry><box><size>0.18 0.18 4</size></box></geometry><material><ambient>0.01 0.48 0.18 1</ambient><diffuse>0.01 0.62 0.24 1</diffuse></material></visual>
+        <collision name="left_post_collision"><pose>0 -1.92 @BANNER_POST_Z@ 0 0 0</pose><geometry><box><size>0.18 0.18 @BANNER_POST_H@</size></box></geometry></collision>
+        <collision name="right_post_collision"><pose>0 1.92 @BANNER_POST_Z@ 0 0 0</pose><geometry><box><size>0.18 0.18 @BANNER_POST_H@</size></box></geometry></collision>
+        <visual name="left_post"><pose>0 -1.92 @BANNER_POST_Z@ 0 0 0</pose><geometry><box><size>0.18 0.18 @BANNER_POST_H@</size></box></geometry><material><ambient>0.01 0.48 0.18 1</ambient><diffuse>0.01 0.62 0.24 1</diffuse></material></visual>
+        <visual name="right_post"><pose>0 1.92 @BANNER_POST_Z@ 0 0 0</pose><geometry><box><size>0.18 0.18 @BANNER_POST_H@</size></box></geometry><material><ambient>0.01 0.48 0.18 1</ambient><diffuse>0.01 0.62 0.24 1</diffuse></material></visual>
         @AEROTHON_BANNER_GEOMETRY@
       </link>
       <pose>2 2.0 0 0 0 0</pose>
@@ -219,10 +219,10 @@
     <model name="return_aerothon_banner">
       <static>true</static>
       <link name="gate">
-        <collision name="left_post_collision"><pose>0 -1.92 2 0 0 0</pose><geometry><box><size>0.18 0.18 4</size></box></geometry></collision>
-        <collision name="right_post_collision"><pose>0 1.92 2 0 0 0</pose><geometry><box><size>0.18 0.18 4</size></box></geometry></collision>
-        <visual name="left_post"><pose>0 -1.92 2 0 0 0</pose><geometry><box><size>0.18 0.18 4</size></box></geometry><material><ambient>0.01 0.48 0.18 1</ambient><diffuse>0.01 0.62 0.24 1</diffuse></material></visual>
-        <visual name="right_post"><pose>0 1.92 2 0 0 0</pose><geometry><box><size>0.18 0.18 4</size></box></geometry><material><ambient>0.01 0.48 0.18 1</ambient><diffuse>0.01 0.62 0.24 1</diffuse></material></visual>
+        <collision name="left_post_collision"><pose>0 -1.92 @BANNER_POST_Z@ 0 0 0</pose><geometry><box><size>0.18 0.18 @BANNER_POST_H@</size></box></geometry></collision>
+        <collision name="right_post_collision"><pose>0 1.92 @BANNER_POST_Z@ 0 0 0</pose><geometry><box><size>0.18 0.18 @BANNER_POST_H@</size></box></geometry></collision>
+        <visual name="left_post"><pose>0 -1.92 @BANNER_POST_Z@ 0 0 0</pose><geometry><box><size>0.18 0.18 @BANNER_POST_H@</size></box></geometry><material><ambient>0.01 0.48 0.18 1</ambient><diffuse>0.01 0.62 0.24 1</diffuse></material></visual>
+        <visual name="right_post"><pose>0 1.92 @BANNER_POST_Z@ 0 0 0</pose><geometry><box><size>0.18 0.18 @BANNER_POST_H@</size></box></geometry><material><ambient>0.01 0.48 0.18 1</ambient><diffuse>0.01 0.62 0.24 1</diffuse></material></visual>
         @AEROTHON_BANNER_GEOMETRY@
       </link>
       <pose>12 -2.0 0 0 0 0</pose>

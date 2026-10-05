@@ -42,6 +42,7 @@ sys.path.insert(0, os.path.join(
 
 from mission_bt.scan_geometry import (                        # noqa: E402
     bearing_to_angle,
+    despeckle,
     fit_surface,
     gate_opening,
 )
@@ -353,6 +354,21 @@ class TwoSurfacesTests(unittest.TestCase):
         self.assertAlmostEqual(math.degrees(f["angle_rad"]), 0.0, delta=2.0)
 
 
+    def test_a_wall_TOUCHING_the_face_does_not_hide_it(self):
+        """An L: the board, and its lane's wall leaving the board's near end
+        and running back behind it -- one continuous run of returns. This is
+        the my_world return gate as the aircraft saw it (aircraft frame,
+        sim/fly_headless.py): no single line fitted it, from any vantage,
+        and the mission gave up on a banner the camera had identified 25
+        times out of 25."""
+        board = ((2.18, -0.87), (5.44, 0.87))
+        near_wall = ((2.18, -0.76), (6.98, -9.76))
+        far_wall = ((5.35, 0.94), (10.15, -8.06))
+        f = fit(scan_of([board, near_wall, far_wall]))
+        self.assertTrue(f["ok"], f["reason"])
+        self.assertAlmostEqual(math.degrees(f["angle_rad"]), -61.9, delta=2.0)
+
+
 # --------------------------------------------------------------------------- #
 class BearingConversionTests(unittest.TestCase):
     """A camera bearing is a fraction of the half-FOV, not an angle."""
@@ -398,6 +414,33 @@ class PurityTests(unittest.TestCase):
                   for r in scan_of([wall(5.0, 0.0)])]
         f = fit(ranges)
         self.assertTrue(f["ok"], f["reason"])
+
+
+class DespeckleTests(unittest.TestCase):
+
+    def test_a_lone_short_return_is_dust_not_a_structure(self):
+        """In front of an open gate: 'something standing at 1.3 m', one
+        beam, refused the crossing on a field-conditions run."""
+        segs = [post(4.0, 0.0, -1.92), post(4.0, 0.0, 1.92)]
+        ranges = scan_of(segs)
+        ranges[SAMPLES // 2] = 1.3
+        before = gate_opening(ANGLE_MIN, ANGLE_INC, ranges, 0.0,
+                              math.radians(35.0), need_clear_m=0.0)
+        after = gate_opening(ANGLE_MIN, ANGLE_INC, despeckle(ranges), 0.0,
+                             math.radians(35.0), need_clear_m=0.0)
+        self.assertLess(before["clear_m"], 1.5)
+        self.assertGreater(after["clear_m"], 4.0)
+
+    def test_a_real_surface_survives(self):
+        ranges = scan_of([wall(3.0, 0.0)])
+        for a, b in zip(despeckle(ranges), ranges):
+            self.assertAlmostEqual(a, b, delta=0.001)
+
+    def test_missing_returns_are_far_and_a_lone_return_among_them_goes(self):
+        """The end windows are truncated and take the upper middle, as the
+        navigator's conditioning does."""
+        self.assertEqual(despeckle([None, 2.0, float("nan"), 2.0, 2.0]),
+                         [float("inf"), float("inf"), 2.0, 2.0, 2.0])
 
 
 # --------------------------------------------------------------------------- #
@@ -565,6 +608,20 @@ class GateOpeningTests(unittest.TestCase):
                          math.radians(20.0), math.radians(35.0),
                          need_clear_m=10.0)
         self.assertTrue(r["open"], r["reason"])
+
+
+
+class GapCentreTests(unittest.TestCase):
+    """Where the hole's middle is, from the posts alone."""
+
+    def test_the_middle_of_the_posts_across_the_flight_line(self):
+        from mission_bt.scan_geometry import gate_opening
+        for off in (0.0, 0.6, -0.8):
+            with self.subTest(off=off):
+                segs = [post(5.0, 0.0, -1.9 + off), post(5.0, 0.0, 1.9 + off)]
+                o = gate_opening(ANGLE_MIN, ANGLE_INC, scan_of(segs), 0.0,
+                                 math.radians(35.0), need_clear_m=0.0)
+                self.assertAlmostEqual(o["centre_m"], off, delta=0.1)
 
 
 if __name__ == "__main__":
