@@ -30,8 +30,9 @@ sys.path.insert(0, os.path.join(
     "src", "aerothon_avoidance", "avoidance"))
 
 import rclpy                                        # noqa: E402
-from geometry_msgs.msg import PoseStamped          # noqa: E402
+from geometry_msgs.msg import PoseStamped, TwistStamped  # noqa: E402
 from sensor_msgs.msg import LaserScan              # noqa: E402
+from rclpy.parameter import Parameter
 
 from avoidance.velocity_controller import VelocityController  # noqa: E402
 
@@ -77,6 +78,7 @@ def _ray_rect(ox, oy, dx, dy, r):
 
 def scan_at(x, y, yaw, rects):
     s = LaserScan()
+    s.header.frame_id = 'base_link'
     s.angle_min = -math.pi
     s.angle_increment = 2 * math.pi / N_BEAMS
     s.angle_max = s.angle_min + s.angle_increment * (N_BEAMS - 1)
@@ -110,6 +112,13 @@ class SlalomTraverseTests(unittest.TestCase):
 
     def setUp(self):
         self.node = VelocityController()
+        # Existing first-order aircraft fixtures have no transport delay.
+        # Delayed-command fixtures opt into and simulate the measured delay.
+        self.node.set_parameters([Parameter('vel_command_delay_s',value=0.0),
+                                  Parameter('motion_computation_budget_s',value=0.0)])
+        # fly() freezes time during computation. Live clock/deadline tests
+        # separately exercise the production budget; this plant queues the
+        # actual declared transport delay and response without extra CPU time.
         self.sent = []
         self.node.pub_sp.publish = self.sent.append
         self.node.enabled = True
@@ -119,7 +128,8 @@ class SlalomTraverseTests(unittest.TestCase):
         self.node.destroy_node()
 
     def fly(self, x, y, yaw, goal_x, dt=0.05, max_t=120.0, drift=None,
-            corrupt=None, scan_delay_s=0.0, vel_tau_s=VEL_TAU_S):
+            corrupt=None, scan_delay_s=0.0, vel_tau_s=VEL_TAU_S,world_rotation_rad=0.0,
+            command_delay_s=0.0):
         """Fly until x < goal_x; fail on contact or timeout.
 
         The hooks are the real world the plain loop leaves out
@@ -130,54 +140,80 @@ class SlalomTraverseTests(unittest.TestCase):
         how sluggishly the airframe follows a velocity setpoint.
         """
         rects = WALLS + BLOCKS
+        self.node.set_parameters([Parameter('vel_command_delay_s',value=float(command_delay_s))])
         closest = float("inf")
         t = 0.0
+        self.node._now = lambda: t
         track = []
         wvx = wvy = 0.0                 # the airframe's ACTUAL world velocity
         next_scan = 0.0
         pending = []                    # (deliver_at, scan)
+        commands = []
+        applied = (0.,0.,0.)
+        dx = dy = 0.0
         while t < max_t:
             pose = PoseStamped()
-            pose.pose.position.x, pose.pose.position.y = x, y
+            cs,sn=math.cos(world_rotation_rad),math.sin(world_rotation_rad)
+            pose.pose.position.x, pose.pose.position.y = cs*x-sn*y,sn*x+cs*y
             pose.pose.position.z = 3.0
-            pose.pose.orientation.z = math.sin(yaw / 2.0)
-            pose.pose.orientation.w = math.cos(yaw / 2.0)
+            pose.pose.orientation.z = math.sin((yaw+world_rotation_rad) / 2.0)
+            pose.pose.orientation.w = math.cos((yaw+world_rotation_rad) / 2.0)
             self.node._on_pose(pose)
+            # The physical fixture supplies the EKF velocity observation from
+            # its integrated aircraft motion, including the actual drift.
+            # Obstacle geometry remains confined to raycasting and grading.
+            velocity=TwistStamped()
+            velocity.header.stamp.sec=int(t)
+            velocity.header.stamp.nanosec=int(round((t-int(t))*1e9))
+            velocity.twist.linear.x=cs*(wvx+dx)-sn*(wvy+dy)
+            velocity.twist.linear.y=sn*(wvx+dx)+cs*(wvy+dy)
+            self.node._on_velocity(velocity)
             if t >= next_scan:
                 scan = scan_at(x, y, yaw, rects)
+                scan.header.stamp.sec = int(t)
+                scan.header.stamp.nanosec = int((t-int(t))*1e9)
                 if corrupt is not None:
                     scan.ranges = [float(r) for r in corrupt(scan.ranges)]
                 pending.append((t + scan_delay_s, scan))
                 next_scan = t + SCAN_PERIOD_S
             while pending and pending[0][0] <= t:
                 self.node._on_scan(pending.pop(0)[1])
-            self.node._scan_t = self.node._now()     # never "stale" in a test
             self.node._tick()
             sp = self.sent[-1]
             vx, vy = sp.velocity.x, sp.velocity.y          # body FLU
-            cvx = vx * math.cos(yaw) - vy * math.sin(yaw)
-            cvy = vx * math.sin(yaw) + vy * math.cos(yaw)
+            commands.append((t+command_delay_s,(vx,vy,sp.yaw_rate)))
+            while commands and commands[0][0]<=t+1e-9:
+                bvx,bvy,received_yaw_rate=commands.pop(0)[1]
+                # ArduPilot converts body velocity at receipt, then keeps
+                # that earth vector fixed. Yaw travels in the same packet.
+                applied=(bvx*math.cos(yaw)-bvy*math.sin(yaw),
+                         bvx*math.sin(yaw)+bvy*math.cos(yaw),received_yaw_rate)
+            cvx,cvy,received_yaw_rate=applied
             a = dt / vel_tau_s
             wvx += (cvx - wvx) * a
             wvy += (cvy - wvy) * a
             dx, dy = drift(t) if drift is not None else (0.0, 0.0)
             x += (wvx + dx) * dt
             y += (wvy + dy) * dt
-            yaw += sp.yaw_rate * dt
+            yaw += received_yaw_rate * dt
             t += dt
             track.append((round(t, 2), round(x, 2), round(y, 2)))
-            closest = min(closest, min(gap_to(x, y, r) for r in rects))
+            gap = min(gap_to(x, y, r) for r in rects)
+            if gap<closest:
+                self.closest_detail = dict(t=t,x=x,y=y,yaw=yaw,controller=self.node.last_detail)
+            closest = min(closest,gap)
             if closest < AIRFRAME_R:
                 self.fail(f"airframe touched something at ({x:.2f}, {y:.2f}) "
-                          f"t={t:.1f}s; track tail {track[-6:]}")
+                          f"t={t:.1f}s; detail {self.node.last_detail}; track tail {track[-6:]}")
             if x < goal_x:
                 return t, closest, track
         self.fail(f"did not get through in {max_t:.0f} s; "
-                  f"stuck near ({x:.2f}, {y:.2f}); track tail {track[-6:]}")
+                  f"stuck near ({x:.2f}, {y:.2f}), yaw {yaw:.3f}; "
+                  f"detail {self.node.last_detail}; track tail {track[-6:]}")
 
     # Contact is checked every step; clearance must also leave a margin for
     # the real airframe's overshoot beyond this model's.
-    MARGIN_M = 0.55
+    MARGIN_M = 0.70
 
     def test_the_return_slalom_is_flown_without_contact(self):
         # Where run 3's return gate crossing put it: just past the posts,
@@ -188,6 +224,17 @@ class SlalomTraverseTests(unittest.TestCase):
     def test_from_the_lane_centre_too(self):
         t, closest, _ = self.fly(13.8, -4.0, math.pi, goal_x=4.5)
         self.assertGreaterEqual(closest, self.MARGIN_M)
+
+    def test_return_with_measured_rendered_command_delay(self):
+        _,closest,_=self.fly(13.8,-4.0,math.pi,goal_x=4.5,command_delay_s=.4)
+        self.assertGreaterEqual(closest,.70)
+
+    def test_rotated_corridor_uses_the_same_full_clearance(self):
+        for angle in (.49,-math.pi/2):
+            with self.subTest(rotation=angle):
+                self.tearDown();self.setUp()
+                _,closest,_=self.fly(13.8,-4.0,math.pi,goal_x=4.5,world_rotation_rad=angle)
+                self.assertGreaterEqual(closest,.70)
 
     def test_the_forward_lane_with_no_blocks_goes_straight_through(self):
         walls = [rect(9.0, 0.2 - 2.0 + 2.0, 10.2, 0.1)]  # placeholder
@@ -200,8 +247,12 @@ class SlalomTraverseTests(unittest.TestCase):
             BLOCKS = []
             WALLS[:] = [rect(9.0, 1.8, 10.2, 0.1), rect(9.0, -1.8, 10.2, 0.1)]
             x, y, yaw = 4.5, 0.1, 0.0
+            wvx=wvy=0.0
             rects = WALLS
+            t = 0.0
+            self.node._now = lambda: t
             for _ in range(600):
+                t += 0.05
                 pose = PoseStamped()
                 pose.pose.position.x, pose.pose.position.y = x, y
                 pose.pose.position.z = 3.0
@@ -212,8 +263,13 @@ class SlalomTraverseTests(unittest.TestCase):
                 self.node._tick()
                 sp = self.sent[-1]
                 vx, vy = sp.velocity.x, sp.velocity.y
-                x += (vx * math.cos(yaw) - vy * math.sin(yaw)) * 0.05
-                y += (vx * math.sin(yaw) + vy * math.cos(yaw)) * 0.05
+                # Match the FCU response used by the closed-loop return test.
+                # Instant actuator response mislabels normal command lag as wind.
+                cvx=vx*math.cos(yaw)-vy*math.sin(yaw)
+                cvy=vx*math.sin(yaw)+vy*math.cos(yaw)
+                wvx+=(cvx-wvx)*.05/VEL_TAU_S
+                wvy+=(cvy-wvy)*.05/VEL_TAU_S
+                x+=wvx*.05;y+=wvy*.05
                 yaw += sp.yaw_rate * 0.05
                 self.assertLess(abs(y), 1.8 - AIRFRAME_R)
                 if x > 14.0:
@@ -259,7 +315,7 @@ class CustomSlalomTests(SlalomTraverseTests):
 
     def through(self, v0=0.0):
         t, closest, _ = self.fly(self.L - 0.7, -v0, math.pi, goal_x=0.3, max_t=120)
-        self.assertGreaterEqual(closest, AIRFRAME_R + 0.1)
+        self.assertGreaterEqual(closest, 0.70)
 
     def test_the_split_corridor_arena_that_stuck_live(self):
         self.lane(9.0, 3.2, [(2.0, 0.9, 0.4, 1.3, 0), (4.5, -0.8, 0.4, 1.4, 15),

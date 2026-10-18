@@ -1,0 +1,33 @@
+{
+  "initial": {
+    "center": [
+      79.1559,
+      12.9692
+    ],
+    "zoom": 16
+  },
+  "regions": [
+    {
+      "name": "VIT Vellore",
+      "bounds": [
+        79.1374,
+        12.9512,
+        79.1744,
+        12.9872
+      ],
+      "minzoom": 0,
+      "maxzoom": 19
+    },
+    {
+      "name": "Simulator site (bundled)",
+      "bounds": [
+        149.12841796875,
+        -35.38904996691167,
+        149.1943359375,
+        -35.33529320309328
+      ],
+      "minzoom": 14,
+      "maxzoom": 19
+    }
+  ]
+}

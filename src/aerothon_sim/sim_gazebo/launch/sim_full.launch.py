@@ -23,7 +23,56 @@ from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
 
 
+def _port_shift():
+    """AEROTHON_SITL_PORT_SHIFT, the temporary offset on every simulator
+    MAVLink UDP port (scripts/launch_level6_sim.sh). 0 when unset."""
+    try:
+        return int(os.environ.get('AEROTHON_SITL_PORT_SHIFT', '0') or 0)
+    except ValueError:
+        return 0
+
+
+def _shift_mavproxy_outputs(shift):
+    """Move MAVProxy's two UDP outputs off 14550/14551.
+
+    The upstream bringup (ardupilot_sitl.launch.MAVProxyLaunch) starts
+    MAVProxy with `--out <out>` and a HARD-CODED `--out 127.0.0.1:14551`.
+    With WSL in mirrored networking that reaches Windows' localhost, where a
+    Mission Planner flying a real drone listens on 14551 -- and would show
+    the simulated aircraft as well. The included launch files are built in
+    this same process after this runs, so rewriting the two ports here moves
+    them without editing the upstream install.
+    """
+    if not shift:
+        return
+    try:
+        from ardupilot_sitl import launch as sitl_launch
+    except ImportError:
+        return
+    original = sitl_launch.MAVProxyLaunch.generate_action
+    if getattr(original, '_aerothon_shifted', False):
+        return
+    from launch.substitutions import TextSubstitution
+    moved = {f'127.0.0.1:{port}': f'127.0.0.1:{port + shift}' for port in (14550, 14551)}
+
+    def generate_action(context, *args, **kwargs):
+        action = original(context, *args, **kwargs)
+        for piece in action.cmd:
+            for i, sub in enumerate(piece):
+                if isinstance(sub, TextSubstitution):
+                    text = sub.text
+                    for old, new in moved.items():
+                        text = text.replace(old, new)
+                    if text != sub.text:
+                        piece[i] = TextSubstitution(text=text)
+        return action
+
+    generate_action._aerothon_shifted = True
+    sitl_launch.MAVProxyLaunch.generate_action = staticmethod(generate_action)
+
+
 def generate_launch_description():
+    _shift_mavproxy_outputs(_port_shift())
     pkg_sim = get_package_share_directory('sim_gazebo')
     pkg_mission = get_package_share_directory('mission_bringup')
 
@@ -64,6 +113,11 @@ def generate_launch_description():
     # the Iris baseline. Same space-free copy as the other two, for the same
     # reason.
     airframe_params = []
+    remote_params = []
+    if os.environ.get('AEROTHON_LAPTOP_SERVICES_ONLY') == '1':
+        remote_file = os.path.join(tempfile.gettempdir(), 'aerothon_remote_devices.parm')
+        shutil.copyfile(os.path.join(pkg_sim, 'config', 'remote_devices.parm'), remote_file)
+        remote_params = [remote_file]
     if os.environ.get('AEROTHON_AIRFRAME', 'cad') == 'cad':
         quad = os.path.join(tempfile.gettempdir(), 'aerothon_quad.parm')
         shutil.copyfile(os.path.join(pkg_sim, 'config', 'aerothon_quad.parm'), quad)
@@ -73,6 +127,7 @@ def generate_launch_description():
         os.path.join(pkg_ardupilot_sitl, 'config', 'default_params', 'copter.parm'),
         os.path.join(pkg_ardupilot_gazebo, 'config', 'gazebo-iris-gimbal.parm'),
         *airframe_params,
+        *remote_params,
         # Last wins: competition-representative battery and GPS, so the Q27
         # interlock sees what the real aircraft presents.
         sitl_params,
@@ -115,6 +170,7 @@ def generate_launch_description():
         DeclareLaunchArgument('start_gz_server', default_value='true', description='Launch Gazebo server (disable when master shell owns it)'),
         DeclareLaunchArgument('rviz', default_value='true', description='Launch RViz 2 visualizer'),
         DeclareLaunchArgument('slam', default_value='true', description='Launch slam_toolbox 2D SLAM'),
+        DeclareLaunchArgument('mission_stack', default_value='true', description='Run production controller locally; false for Pi-hosted runtime'),
         DeclareLaunchArgument('spawn_vehicle', default_value='true', description='Spawn official ArduPilot Gazebo vehicle'),
         # Declare this in the outer launch scope. The upstream vehicle launch
         # evaluates it from a deferred OnProcessStart callback after spawning.
@@ -184,7 +240,7 @@ def generate_launch_description():
             # setpoint loop asks for, GPS_RAW_INT never arrived, and the Q27
             # interlock could not see HDOP. SERIAL1 is a separate channel with
             # its own stream-rate state, so the two no longer fight.
-            'serial1': 'udpclient:127.0.0.1:14560',
+            'serial1': f'udpclient:127.0.0.1:{14560 + _port_shift()}',
             # Use MAVLink SITL/MAVROS. DDS agent is an optional deployment
             # path and is not required for this competition loop.
             'use_dds_agent': 'false',
@@ -199,6 +255,7 @@ def generate_launch_description():
     mission_stack = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(PathJoinSubstitution([
             FindPackageShare('mission_bringup'), 'launch', 'mission2.launch.py'])),
+        condition=IfCondition(LaunchConfiguration('mission_stack')),
         launch_arguments={
             'use_sim': 'true',
             # RViz is launched explicitly below; keeping it out of the nested
@@ -256,7 +313,9 @@ def generate_launch_description():
         output='screen',
     )
 
-    delayed_ros = TimerAction(period=8.0, actions=[gz_bridge, degrade, odom_tf,
+    contact_release = Node(package='sim_gazebo', executable='contact_release',
+                           output='screen')
+    delayed_ros = TimerAction(period=8.0, actions=[gz_bridge, degrade, odom_tf, contact_release,
                                                    mission_stack])
     delayed_rviz = TimerAction(period=15.0, actions=[rviz_node])
 

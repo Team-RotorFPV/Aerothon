@@ -1,0 +1,19 @@
+{
+ "problem": "Pi runs bundle 20261015d, which predates the six-point geofence, judges'-points role detection, search deadline, 3 m arena lane margin and the device-link reopen fix",
+ "scope": "build runtime bundle e from the tested working tree; install and the Pi-GCS simulated mission need the user's go-ahead",
+ "status": "built, not installed; on hold: the user confirmed the six points enclose the whole arena, and the original session is changing the arena-reading lane overlap, which supersedes this bundle",
+ "bundle": "logs/pi-runtime-rulebook-20261015e.zip",
+ "sha256": "02f13df047bb98faeeefe97facdacd58a7a89a8beff372022d1062e1c40a813f",
+ "files": 256,
+ "evidence": {
+  "offline_python": "logs/offline_fence6_final_20261015.log: 2011 passed, 18 skipped; syntax, shell, XML/YAML, frontend ok",
+  "offline_native": "logs/offline_fence6_final_native_rerun_20261015.log: 12 passed (the suite's native stage hung on a test expecting the old one-shot stream; test updated to stream_once)",
+  "rendered_arena_fence": "logs/s3_fence6_calm_h115_both_appearance_s20261003: DELIVERY_SKIPPED by search deadline, 18/21, flight 887 s",
+  "rendered_delivery_zone": "logs/s3_zone6_calm_h115_both_appearance_s20261003: COMPLETED, 22/22, flight 880.1 s, payload 0.15 m"
+ },
+ "blockers": [
+  "user go-ahead for the Pi install and the Pi-GCS simulated mission",
+  "hardware: winch encoder counts/spool radius, loaded/unloaded hover calibration, camera tilt travel"
+ ],
+ "completion": "installed on the Pi with check_pi_runtime passing and one full simulated mission flown through the Pi GCS"
+}

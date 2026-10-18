@@ -21,9 +21,23 @@ sys.path.insert(0, os.path.join(ROOT, "src", "aerothon_mission", "mission_bringu
 from sensor_msgs.msg import LaserScan                       # noqa: E402
 
 from check_sensors import nearest_bearing, solve_mount      # noqa: E402
-from mission_bringup.scan_mount import mount                # noqa: E402
+from mission_bringup.scan_mount import device_frame, mount  # noqa: E402
 
 N = 450
+
+
+def sllidar_scan(device_cw_deg, n=720):
+    """sllidar_ros2 publish_scan (angle_compensate, inverted false) of one box
+    1 m away, `device_cw_deg` clockwise from the C1's marked 0 deg. The driver
+    writes device beam i to slot n-1-i over angle_min = pi - 2pi = -pi."""
+    s = LaserScan()
+    s.range_min, s.range_max = 0.05, 12.0
+    s.angle_min, s.angle_max = math.pi - 2 * math.pi, math.pi
+    s.angle_increment = (s.angle_max - s.angle_min) / (n - 1)
+    s.ranges = [float("inf")] * n
+    i = round(device_cw_deg % 360.0 * n / 360.0) % n
+    s.ranges[n - 1 - i] = 1.0
+    return s
 
 
 def raw_scan(body_bearing_deg, yaw_deg, mirrored):
@@ -55,6 +69,25 @@ class ScanMountTests(unittest.TestCase):
                         s = mount(raw_scan(body, yaw, mirrored),
                                   math.radians(got_yaw), got_mirrored)
                         self.assertAlmostEqual(nearest_bearing(s)[0], body, delta=1.0)
+
+    def test_c1_front_is_bearing_zero_before_any_calibration(self):
+        """18 Oct: an object at the C1's nose drew behind the GCS arrow.
+        sllidar_ros2 puts the C1's 0 deg at pi; the driver correction undoes
+        that, so yaw 0 means the lidar's marked front faces the airframe nose."""
+        for device_cw, body_ccw in ((0.0, 0.0), (90.0, -90.0), (180.0, 180.0),
+                                    (270.0, 90.0), (30.0, -30.0)):
+            with self.subTest(device_cw=device_cw):
+                raw = device_frame(sllidar_scan(device_cw), math.pi)
+                got = nearest_bearing(raw)[0]
+                self.assertAlmostEqual((got - body_ccw + 180) % 360 - 180, 0.0, delta=1.0)
+                body = mount(raw, 0.0, False)
+                got = nearest_bearing(body)[0]
+                self.assertAlmostEqual((got - body_ccw + 180) % 360 - 180, 0.0, delta=1.0)
+
+    def test_uncorrected_c1_scan_is_reversed(self):
+        """The fault itself: without the correction the nose reads 180 deg."""
+        got = nearest_bearing(sllidar_scan(0.0))[0]
+        self.assertAlmostEqual(abs((got + 180) % 360 - 180), 180.0, delta=1.0)
 
 
 if __name__ == "__main__":

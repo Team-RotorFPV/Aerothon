@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""MAVROS commander — thin wrapper the behaviour tree calls into.
+"""MAVROS commander â€” thin wrapper the behaviour tree calls into.
 
 Holds the MAVROS clients/pubs/subs and a 10 Hz setpoint streamer so the
 py_trees leaves stay simple (they poll state + issue intents; this object
@@ -15,22 +15,31 @@ Phase 0 fail-closed rails live here:
 
 import json
 import math
+import time
+from collections import deque
+from pathlib import Path
 from rclpy.node import Node
 from rclpy.qos import (QoSProfile, QoSDurabilityPolicy, QoSHistoryPolicy,
                        qos_profile_sensor_data)
-from geometry_msgs.msg import PoseStamped, Vector3
-from sensor_msgs.msg import BatteryState, LaserScan
+from geometry_msgs.msg import PoseStamped, Vector3, TwistStamped
+from sensor_msgs.msg import BatteryState, LaserScan, Imu
 from std_msgs.msg import Bool, Float32, String
-from mavros_msgs.msg import HomePosition, State, WaypointList
+from mavros_msgs.msg import HomePosition, State, WaypointList, RCOut
 from mavros_msgs.srv import WaypointPush as _WaypointPush
 from mavros_msgs.srv import (CommandBool, CommandLong, ParamSetV2, SetMode,
                              CommandTOL)
 from rcl_interfaces.msg import ParameterType, ParameterValue
 
-from mission_bt.delivery_zone import (boundary_to_local_zone, inset_zone,
-                                      parse_boundary, parse_polygon,
-                                      polygon_to_local)
+from mission_bt.delivery_zone import (ARENA_FENCE_LANE_MARGIN_M,
+                                      ROLE_DELIVERY_ZONE, ZONE_LANE_MARGIN_M,
+                                      boundary_to_local_zone, bounding_zone,
+                                      clip_beyond, inset_zone,
+                                      judges_polygon_role, parse_boundary,
+                                      parse_polygon, polygon_area,
+                                      polygon_to_local, safety_fence)
 from mission_bt.banner_orbit import SELF_M
+from mission_bt.banner_captures import BannerCaptures
+from mission_bt.detector_timing import DetectorTiming
 from mission_bt.scan_geometry import (despeckle, fit_surface, gate_opening,
                                       no_surface as _no_surface)
 
@@ -71,6 +80,12 @@ class Mav:
         # unreadable the mission can still run, but the substitution is
         # explicit and logged rather than a silent empty string.
         self.target_override = ""
+        # Why the delivery was skipped and the return flown without it.
+        self.delivery_skipped = None
+        # The start marker's PATTERN as perception holds it (qr_node's
+        # /percep/qr/detail), for a start QR that decodes to nothing.
+        self.qr_reference_captured = False
+        self.qr_reference_kind = None
         # Latched terminal failure of the mission sequence, distinct from an
         # abort. Cleared only by an explicit new START.
         self.mission_failed = False
@@ -93,6 +108,7 @@ class Mav:
         # from the latched one: Vector3 carries no stamp.
         self.qr_offset_seq = 0
         self.banner = Vector3()
+        self.banner_captures = BannerCaptures()
         self.banner_reject_reason = ""
         self.banner_reject_counts = {}
         self.banner_board_aspect = 0.0
@@ -109,6 +125,9 @@ class Mav:
         self.abort_latched = False
         self.mission_started = False
         self.mission_seq = 0               # counts STARTs; a new one resets memory
+        # Node-clock seconds of the FCU's arm, when the rulebook's 15 minutes
+        # start (throttle-up). The sweep stops in time for the return lap.
+        self.armed_at = None
 
         # The team's 4S2P Li-ion pack: 3.0 V/cell under load is the last of
         # its usable charge (Li-ion runs to 2.5 V; LiPo figures of 3.5 V/cell
@@ -168,9 +187,35 @@ class Mav:
         node.create_subscription(State, '/mavros/state', self._on_state, qos)
         node.create_subscription(BatteryState, '/mavros/battery', self._on_battery,
                                  qos_profile_sensor_data)
+        self.delivery_inputs = {}
+        self.delivery_velocity_samples = deque(maxlen=40)
+        self.ground_velocity_samples = deque(maxlen=80)
+        self.delivery_load_profile = None
+        profile_path = node.declare_parameter('delivery_load_calibration', '').value
+        if profile_path:
+            try:
+                self.delivery_load_profile = json.loads(Path(profile_path).read_text())
+            except (OSError, ValueError) as exc:
+                node.get_logger().error(f'delivery load calibration unavailable: {exc}')
+        self.motor_channels = node.declare_parameter('delivery_motor_channels', [0, 1, 2, 3]).value
+        self.motor_pwm_min = float(node.declare_parameter('delivery_motor_pwm_min', 1000.0).value)
+        self.motor_pwm_max = float(node.declare_parameter('delivery_motor_pwm_max', 2000.0).value)
+        if self.delivery_load_profile is not None and self.delivery_load_profile.get('motor_config') != dict(
+                motor_channels=list(self.motor_channels), pwm_min=self.motor_pwm_min,
+                pwm_max=self.motor_pwm_max):
+            node.get_logger().error('delivery load profile motor configuration mismatch')
+            self.delivery_load_profile = None
+        node.create_subscription(RCOut, '/mavros/rc/out', self._delivery_motors, qos_profile_sensor_data)
+        node.create_subscription(Imu, '/mavros/imu/data', self._delivery_imu, qos_profile_sensor_data)
+        node.create_subscription(TwistStamped, '/mavros/local_position/velocity_local',
+                                 self._delivery_velocity, qos_profile_sensor_data)
+        self.pub_delivery_observation = node.create_publisher(String, '/mission/delivery_observation', 10)
         node.create_subscription(PoseStamped, '/mavros/local_position/pose',
                                  self._on_pose, qos_profile_sensor_data)
         node.create_subscription(String, '/percep/qr/decoded', self._on_qr, qos)
+        self.detector_timing = {'qr':DetectorTiming(),'red':DetectorTiming()}
+        node.create_subscription(String,'/percep/qr/detail',self._on_qr_detail,qos)
+        self.pub_search_timing = node.create_publisher(String,'/mission/search_timing',10)
         node.create_subscription(Bool, '/percep/qr/matched', self._on_match, qos)
         node.create_subscription(Vector3, '/percep/qr/target_offset', self._on_off, qos)
         node.create_subscription(Vector3, '/percep/banner', self._on_banner, qos)
@@ -210,7 +255,7 @@ class Mav:
         node.create_subscription(String, '/mission/target_override',
                                  self._on_target_override, qos)
         # Home is the ONE legitimate global reference (audit A11). It was
-        # assumed to be local (0,0) — true only because the EKF origin happens
+        # assumed to be local (0,0) â€” true only because the EKF origin happens
         # to be set at the arming point. Read it from the FC instead.
         self.home = None
         node.create_subscription(HomePosition, '/mavros/home_position/home',
@@ -227,6 +272,10 @@ class Mav:
         self.geofence_global = None
         self.geofence_local = None
         self.geofence_reason = "arena geofence boundary is missing"
+        # The judges' points read as the delivery zone when take-off lies
+        # outside them; geofence_local is then the derived safety fence.
+        self.judges_role = None
+        self.judges_zone_local = None
         node.create_subscription(String, '/mission/geofence',
                                  self._on_geofence, _latched_qos())
         # Geofence: pushed, then READ BACK. An unverified fence is worse than
@@ -274,6 +323,7 @@ class Mav:
         # Winch feedback. Until winch_ctrl existed this stayed empty and
         # WinchDrop released on a fixed timer instead.
         self.winch_status = {}
+        self.winch_status_t = None
         node.create_subscription(String, '/winch/status',
                                  self._on_winch_status, qos)
 
@@ -335,6 +385,28 @@ class Mav:
         pts, why = polygon_to_local(
             self.geofence_global,
             float(self.home.geo.latitude), float(self.home.geo.longitude))
+        self.judges_role = None
+        self.judges_zone_local = None
+        if pts is not None:
+            # polygon_to_local is about home, so take-off is the origin.
+            self.judges_role = judges_polygon_role(pts)
+            if self.judges_role == ROLE_DELIVERY_ZONE:
+                self.judges_zone_local = pts
+                pts = safety_fence(pts)
+                why = ("the judges' points are the delivery zone (take-off "
+                       "lies outside them); the enforced fence is derived "
+                       "round the zone and take-off")
+                self._log_once(
+                    f"Judges' points read as the delivery zone; safety fence "
+                    f"of {len(pts)} vertices round it and take-off")
+        if pts is not None:
+            # polygon_to_local is about HOME; mav.pos() is about the EKF
+            # origin. On hardware these differ (origin at first GPS fix, home
+            # at arming), so move the fence into the frame it is checked in.
+            hx, hy = self.home_local_xy()
+            pts = [(x + hx, y + hy) for x, y in pts]
+            if self.judges_zone_local is not None:
+                self.judges_zone_local = [(x + hx, y + hy) for x, y in self.judges_zone_local]
         self.geofence_local = pts
         self.geofence_reason = why or "geofence polygon resolved in local ENU"
         if pts is not None:
@@ -357,6 +429,10 @@ class Mav:
         zone, why = boundary_to_local_zone(
             self.delivery_zone_global,
             float(self.home.geo.latitude), float(self.home.geo.longitude))
+        if zone is not None:
+            # About home -> about the EKF origin (see _resolve_geofence).
+            hx, hy = self.home_local_xy()
+            zone = (zone[0] + hx, zone[1] + hx, zone[2] + hy, zone[3] + hy) + tuple(zone[4:])
         self.delivery_zone_local = zone
         self.delivery_zone_reason = why or "four-corner boundary resolved in local ENU"
         if zone is not None:
@@ -372,11 +448,71 @@ class Mav:
             self._logged.add(text)
             self.node.get_logger().info(text)
 
-    def delivery_search_zone(self, clearance_m):
-        if self.delivery_zone_local is None:
+    @property
+    def fence_only(self):
+        """The judges gave the geofence and no delivery-zone corners."""
+        return self.delivery_zone_global is None and self.geofence_local is not None
+
+    @property
+    def arena_search(self):
+        """The search field is the judges' arena fence beyond the corridor."""
+        return self.fence_only and getattr(self, "judges_zone_local", None) is None
+
+    @property
+    def search_margin_m(self):
+        """How far sweep lanes keep inside search_polygon()."""
+        if getattr(self, "judges_zone_local", None) is not None:
+            return ZONE_LANE_MARGIN_M
+        return ARENA_FENCE_LANE_MARGIN_M
+
+    def search_polygon(self):
+        """The fenced field beyond the outbound corridor, local XY, or None.
+
+        Only in a fence-only arena, and only once the corridor exit is known:
+        the polygon clipped to the side of the exit the corridor leads to,
+        one metre past it. With organiser corners the field is their
+        rectangle and this is None.
+        """
+        zone = getattr(self, "judges_zone_local", None)
+        if self.fence_only and zone is not None:
+            # The points ARE the delivery zone: known before take-off.
+            self.delivery_zone_reason = "search area is the judges' delivery zone"
+            return zone
+        if not self.fence_only or self.corridor_exit_pose is None:
             return None
+        ex, ey, _z, yaw = self.corridor_exit_pose
+        heading = self.gate_heading if self.gate_heading is not None else yaw
+        key = (tuple(map(tuple, self.geofence_local)), round(ex, 2), round(ey, 2),
+               round(heading, 3))
+        if getattr(self, "_search_polygon_key", None) != key:
+            clipped = clip_beyond(self.geofence_local, (ex, ey), heading, 1.0)
+            if len(clipped) < 3 or abs(polygon_area(clipped)) < 25.0:
+                clipped = None
+                self.delivery_zone_reason = ("the geofence leaves no field "
+                                             "beyond the corridor exit")
+            else:
+                zone = bounding_zone(clipped)
+                self.delivery_zone_reason = "search area derived from the geofence"
+                self._log_once(
+                    f"Search area from the geofence beyond the corridor exit: "
+                    f"{len(clipped)} vertices, x {zone[0]:.1f}..{zone[1]:.1f}, "
+                    f"y {zone[2]:.1f}..{zone[3]:.1f}")
+            self._search_polygon_key, self._search_polygon = key, clipped
+        return self._search_polygon
+
+    def delivery_search_zone(self, clearance_m):
+        base = self.delivery_zone_local
+        if base is None:
+            poly = self.search_polygon()
+            if poly is None:
+                if self.fence_only and self.corridor_exit_pose is None:
+                    self.delivery_zone_reason = (
+                        "search area is derived from the geofence once the "
+                        "corridor exit is known")
+                return None
+            base = bounding_zone(poly)
         try:
-            return inset_zone(self.delivery_zone_local, clearance_m)
+            return inset_zone(base, clearance_m)
         except ValueError as exc:
             self.delivery_zone_reason = str(exc)
             return None
@@ -386,7 +522,7 @@ class Mav:
 
         MAVROS publishes home as a global fix plus a local offset. The local
         origin IS the EKF origin, so home is (0,0) in local coordinates
-        whenever the EKF origin was set at the home point — which is the normal
+        whenever the EKF origin was set at the home point â€” which is the normal
         case and what the old constant silently relied on. Returning it through
         this accessor means the assumption is stated in one place and can be
         replaced with a real transform if it ever stops holding.
@@ -417,7 +553,7 @@ class Mav:
 
         qr_node encodes this in the offset's z: 1.0 matched target, 0.5 some
         marker, 0.0 nothing. Before Phase 3 the offset was only populated for a
-        MATCHED target, so during the start scan — when no target is known yet —
+        MATCHED target, so during the start scan â€” when no target is known yet â€”
         the mission had no way to tell a marker was sitting off to one side.
         """
         return self.qr_offset.z > 0.0
@@ -433,6 +569,9 @@ class Mav:
         try:
             d = json.loads(m.data)
         except (ValueError, TypeError):
+            return
+        now = self.node.get_clock().now().nanoseconds * 1e-9
+        if not self.banner_captures.receive(d, now):
             return
         # DETECTOR TELEMETRY ONLY. The board aspect was once read as "how
         # square am I to the board", on the theory that a banner is widest
@@ -461,7 +600,7 @@ class Mav:
                 "wh": d.get('image_wh') or [1280, 720],
                 "regions": [{"px": r[:4], "area": float(r[4])}
                             for r in d.get('green_regions') or []],
-                "t": self.node.get_clock().now().nanoseconds * 1e-9}
+                "t": d['capture_stamp']}
         else:
             self.banner_green = None
 
@@ -567,14 +706,36 @@ class Mav:
         object rejected as not-the-banner, 0.0 nothing green in view. Before
         Phase 4 any green rectangle produced 1.0 and the GCS said ALIGNED.
         """
-        return self.banner.z >= 1.0
+        observation = self.banner_observation()
+        return bool(observation and observation['identified'] and
+                    self._banner_current_bearing() is not None)
+
+    def banner_observation(self):
+        return self.banner_captures.current(
+            self.node.get_clock().now().nanoseconds * 1e-9)
+
+    def banner_observations(self):
+        return self.banner_captures.recent(
+            self.node.get_clock().now().nanoseconds * 1e-9)
+
+    def banner_capture_pose(self):
+        observation = self.banner_observation()
+        return observation['pose'] if observation else None
+
+    def _banner_current_bearing(self):
+        hfov = float(self.node.get_parameter('camera_hfov').value)
+        return self.banner_captures.bearing_now(
+            self.node.get_clock().now().nanoseconds * 1e-9, self.yaw(), hfov)
 
     def banner_bearing(self):
         """Normalised horizontal offset, [-1,1], negative = banner to the left."""
-        return self.banner.x if self.banner_identified() else 0.0
+        bearing = self._banner_current_bearing()
+        return 0.0 if bearing is None else bearing
 
     def _on_abort(self, m):
         self.abort_requested = m.data
+        if m.data:
+            self._abort_t = time.monotonic()
 
     def _on_start(self, m):
         if m.data and not self.mission_started:
@@ -586,22 +747,37 @@ class Mav:
             # into a new mission would make the watchdog swallow a genuine
             # external disarm, so every start begins with a clean slate.
             self._expect_disarm = False
+            # An Abort pressed while idle (or during a passive task, which
+            # runs no tree) must not fail the next flight at its first tick.
+            # One racing this start (under a second old) still stands.
+            if time.monotonic() - getattr(self, '_abort_t', 0.0) > 1.0:
+                self.abort_requested = False
             self.abort_reason = ""
             self.abort_latched = False
             self.mission_failed = False
             self.mission_complete = False
             self._attitude_violations = 0
             self.clear_airborne_floor()
+            # The return gate's laid sheet, as ranged this mission only.
+            self.laid_sheet_xy = None
             # This mission's corridor, not the last one's.
             self.corridor_exit_pose = None
             self.gate_heading = None
             self.outbound_banner_xy = None
             self.board_face_t = None
             self.delivery_confirmed = None     # set by WinchDrop's camera check
+            self.delivery_skipped = None       # set by SkipDeliveryAndReturn
+            # A new flight reads its own start marker: an empty target makes
+            # perception drop the previous flight's pattern reference.
+            self.qr_reference_captured = False
+            self.qr_reference_kind = None
+            self.set_target("")
             self.node.get_logger().info("Mission 2 start received from GCS")
 
     def _on_pose(self, m):
         self.pose = m
+        self.delivery_inputs['pose_stamp'] = m.header.stamp.sec + m.header.stamp.nanosec*1e-9
+        self.banner_captures.pose(self.delivery_inputs['pose_stamp'], self.pos(), self.yaw())
         self.roll_deg, self.pitch_deg = self._rp_deg(m.pose.orientation)
         worst = max(abs(self.roll_deg), abs(self.pitch_deg))
         if worst > self.attitude_limit_deg:
@@ -622,6 +798,8 @@ class Mav:
         self._fcu_state = prev if not m.connected else m
         if not m.connected:
             return
+        if m.armed and not prev.armed:
+            self.armed_at = self.node.get_clock().now().nanoseconds * 1e-9
         # Only an active mission can be interrupted; a disarmed idle aircraft
         # changing mode on the bench is not an event.
         if not self.mission_started:
@@ -636,6 +814,12 @@ class Mav:
         if m.mode != prev.mode and m.mode in _TERMINAL_MODES:
             if not self._mode_was_ours(m.mode):
                 self._request_reset(f"external mode change to {m.mode}")
+        # A pilot taking over in LOITER/ALT_HOLD/POSHOLD (or the FC entering
+        # SMART_RTL/BRAKE) is an intervention too: the tree must stop, or a
+        # later stage failure commands RTL over the pilot. GUIDED is ours.
+        elif (m.armed and m.mode != prev.mode and m.mode != "GUIDED"
+              and not self._mode_was_ours(m.mode)):
+            self._request_reset(f"external mode change to {m.mode}")
 
     # ------------------------------------------------------------------ #
     # attitude
@@ -706,6 +890,7 @@ class Mav:
         self._reset_requested = False
         self._reset_reason = ""
         self.mission_started = False
+        self.target_override = ""      # one run only (see release_control)
         self.abort_requested = False
         self.abort_latched = False
         self.mission_failed = False
@@ -735,6 +920,8 @@ class Mav:
             # can show it but cannot compare, threshold or chart it.
             "delivery_offset_m": getattr(self, "delivery_offset_m", None),
             "delivery_confirmed": getattr(self, "delivery_confirmed", None),
+            "delivery_confirmation_basis": getattr(self, "delivery_confirmation_basis", None),
+            "delivery_skipped": getattr(self, "delivery_skipped", None),
             "landing_precision": getattr(self, "landing_precision", None),
             "t": self.node.get_clock().now().nanoseconds / 1e9,
         })
@@ -924,6 +1111,10 @@ class Mav:
         else:
             self.set_mode("LAND")
 
+    def hold_position(self):
+        x,y,z=self.pos()
+        self.goto(x,y,z,self.yaw())
+
     def goto(self, x, y, z, yaw=0.0):
         """Stream position setpoint with heading orientation (yaw in radians)."""
         sp = PoseStamped()
@@ -938,6 +1129,13 @@ class Mav:
     def pos(self):
         p = self.pose.pose.position
         return (p.x, p.y, p.z)
+
+    def position_target_xy(self):
+        """Current position intent, including turn and camera/decode holds."""
+        if self._sp is None:
+            return None
+        p = self._sp.pose.position
+        return (p.x, p.y)
 
     def reached(self, x, y, z, tol=0.6):
         px, py, pz = self.pos()
@@ -1012,8 +1210,15 @@ class Mav:
     def _on_winch_status(self, m):
         try:
             self.winch_status = json.loads(m.data)
+            self.winch_status_t = self.node.get_clock().now().nanoseconds*1e-9
         except json.JSONDecodeError:
             self.winch_status = {}
+            self.winch_status_t = None
+
+    def winch_status_fresh(self, max_age_s=1.0):
+        now = self.node.get_clock().now().nanoseconds*1e-9
+        return bool(self.winch_status and self.winch_status_t is not None and
+                    0 <= now-self.winch_status_t <= max_age_s)
 
     def _on_camera_state(self, m):
         try:
@@ -1037,7 +1242,16 @@ class Mav:
         if st.get("stale"):
             return False
         if pose is not None and st.get("requested") != pose:
-            return False
+            # camera_ctrl already accepts numeric degrees and reports their
+            # canonical name as e.g. "-10.0deg". Still require its measured
+            # settled/readback state and the exact requested angle.
+            try:
+                angle = math.radians(float(pose))
+                requested = float(st['requested_rad'])
+            except (ValueError, TypeError, KeyError):
+                return False
+            if not all(map(math.isfinite, (angle, requested))) or abs(angle-requested) > 1e-6:
+                return False
         return True
 
     def camera_state_summary(self):
@@ -1150,6 +1364,46 @@ class Mav:
             return
         self.payload_det_t = self.node.get_clock().now().nanoseconds * 1e-9
 
+    def _delivery_motors(self, m):
+        span = self.motor_pwm_max - self.motor_pwm_min
+        if span <= 0 or not self.motor_channels or any(i < 0 or i >= len(m.channels) for i in self.motor_channels):
+            return
+        values = [(float(m.channels[i])-self.motor_pwm_min)/span for i in self.motor_channels]
+        if not all(0 < v < 1 for v in values):
+            return
+        self.delivery_inputs['effort'] = sum(v*v for v in values)/len(values)
+        self.delivery_inputs['motor_stamp'] = m.header.stamp.sec + m.header.stamp.nanosec*1e-9
+
+    def _delivery_imu(self, m):
+        a = m.linear_acceleration
+        self.delivery_inputs['accel_residual'] = math.sqrt(a.x*a.x+a.y*a.y+a.z*a.z)-9.80665
+        self.delivery_inputs['imu_stamp'] = m.header.stamp.sec + m.header.stamp.nanosec*1e-9
+
+    def _delivery_velocity(self, m):
+        v = m.twist.linear
+        speed = math.hypot(v.x, v.y)
+        stamp = m.header.stamp.sec+m.header.stamp.nanosec*1e-9
+        self.delivery_inputs.update(vz=v.z, speed=speed, velocity_stamp=stamp)
+        if not hasattr(self, 'delivery_velocity_samples'):
+            self.delivery_velocity_samples = deque(maxlen=40)
+        self.delivery_velocity_samples.append((stamp, speed))
+        if not hasattr(self, 'ground_velocity_samples'):
+            self.ground_velocity_samples = deque(maxlen=80)
+        self.ground_velocity_samples.append((stamp, float(v.x), float(v.y)))
+
+    def delivery_telemetry(self):
+        now = self.node.get_clock().now().nanoseconds*1e-9
+        d = self.delivery_inputs
+        if any(k not in d or not 0 <= now-d[k] <= 0.5
+               for k in ('motor_stamp', 'imu_stamp', 'velocity_stamp', 'pose_stamp')):
+            return None
+        return dict(stamp=d['motor_stamp'], effort=d['effort'], alt=self.alt(),
+                    vz=d['vz'], speed=d['speed'], accel_residual=d['accel_residual'],
+                    tilt_deg=max(abs(self.roll_deg), abs(self.pitch_deg)))
+
+    def delivery_observation(self, detail):
+        self.pub_delivery_observation.publish(String(data=json.dumps(detail)))
+
     def payload_seen(self, max_age_s=1.5):
         """The latest payload detection if it is fresh, else None."""
         if self.payload_det_t is None:
@@ -1164,16 +1418,47 @@ class Mav:
         except (ValueError, TypeError):
             return
         self.redzone_status = d.get("status", "NOT_VISIBLE")
+        if hasattr(self,'detector_timing'):
+            if self.redzone_status not in ('CLEAR','RED'):
+                self.detector_timing['red'].samples.clear()
+            else:
+                self.detector_timing['red'].add(d,self.node.get_clock().now().nanoseconds*1e-9)
         # One detail per frame processed: the search paces itself on it.
         self.redzone_seq = getattr(self, "redzone_seq", 0) + 1
         ex = d.get("exclusions") or []
-        self.exclusions = [tuple(float(v) for v in r) for r in ex if len(r) == 4]
+        confirmed = [tuple(float(v) for v in r) for r in ex if len(r) == 4]
+        provisional = []
+        now = self.node.get_clock().now().nanoseconds * 1e-9
+        try:
+            capture = float(d['capture_stamp'])
+            if math.isfinite(capture) and 0 <= now-capture <= .5 and self.redzone_status in ('CLEAR','RED'):
+                for rectangle in d.get('provisional_exclusions', []):
+                    if len(rectangle) != 4:
+                        continue
+                    values = tuple(float(v) for v in rectangle)
+                    if all(math.isfinite(v) for v in values) and values[0] < values[1] and values[2] < values[3]:
+                        provisional.append(values)
+        except (KeyError, TypeError, ValueError):
+            provisional = []
+        self.provisional_exclusions = provisional
+        self.confirmed_exclusions = confirmed
+        self.exclusions = confirmed + provisional
+
+    def _on_qr_detail(self,m):
+        try:
+            detail=json.loads(m.data)
+        except (ValueError,TypeError):
+            return
+        self.detector_timing['qr'].add(detail,self.node.get_clock().now().nanoseconds*1e-9)
+        if isinstance(detail, dict) and 'reference_captured' in detail:
+            self.qr_reference_captured = detail.get('reference_captured') is True
+            self.qr_reference_kind = detail.get('reference_kind')
 
     def log(self, msg, warn=False):
         """Route a stage's findings to the ROS log.
 
         py_trees `self.logger` goes to the py_trees logger, which nothing in
-        this stack configures — so the observed zone bounds, the derived sweep
+        this stack configures â€” so the observed zone bounds, the derived sweep
         and decode altitudes, the coverage figure and the fence verification
         result were all computed, used, and never recorded anywhere. The
         evidence pack for Phase 6 and Phase 7 depends on exactly those lines.

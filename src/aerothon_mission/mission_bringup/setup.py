@@ -22,5 +22,7 @@ setup(
     license='MIT',
     entry_points={'console_scripts': [
         'stream_rate_keeper = mission_bringup.stream_rate_keeper:main',
-        'scan_mount = mission_bringup.scan_mount:main']},
+        'scan_mount = mission_bringup.scan_mount:main',
+        'scan_odometry = mission_bringup.scan_odometry:main',
+        'camera_exposure = mission_bringup.camera_exposure:main']},
 )

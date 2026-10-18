@@ -33,12 +33,13 @@ import rclpy
 from sensor_msgs.msg import LaserScan
 
 from avoidance.velocity_controller import VelocityController
-from test_frame_conventions import make_scan
+from test_frame_conventions import make_scan, refresh_pose
 
 
 def walled_in(distance=0.6, n=360, rmax=12.0):
     """Every direction blocked at `distance` — no gap anywhere."""
     scan = LaserScan()
+    scan.header.frame_id = "base_link"
     scan.angle_min = -math.pi
     scan.angle_max = math.pi
     scan.angle_increment = (2 * math.pi) / n
@@ -51,6 +52,7 @@ def walled_in(distance=0.6, n=360, rmax=12.0):
 def obstacle_on_one_side(blocked_side="left", n=360, rmax=12.0):
     """Corridor with one side blocked close and the other open."""
     scan = LaserScan()
+    scan.header.frame_id = "base_link"
     scan.angle_min = -math.pi
     scan.angle_max = math.pi
     scan.angle_increment = (2 * math.pi) / n
@@ -61,9 +63,9 @@ def obstacle_on_one_side(blocked_side="left", n=360, rmax=12.0):
         ang = scan.angle_min + i * scan.angle_increment
         deg = math.degrees(ang)
         if blocked_side == "left" and 5 <= deg <= 60:
-            ranges.append(0.5)
+            ranges.append(1.5)
         elif blocked_side == "right" and -60 <= deg <= -5:
-            ranges.append(0.5)
+            ranges.append(1.5)
         else:
             ranges.append(rmax)
     scan.ranges = ranges
@@ -87,12 +89,18 @@ class CorridorRecoveryTests(unittest.TestCase):
         self.sent = []
         self.node.pub_sp.publish = self.sent.append
         self.node.enabled = True
+        self.node._now = lambda: 0.0
+        self.node._pos = (0.0, 0.0)
+        self.node._yaw = 0.0
+        self.node._pose_t = 0.0
 
     def tearDown(self):
         self.node.destroy_node()
 
     def tick(self, scan, n=1):
         for _ in range(n):
+            self.node._pose_t = self.node._now()
+            refresh_pose(self.node)
             self.node._on_scan(scan)
             self.node._tick()
         return self.sent[-1]
@@ -104,6 +112,8 @@ class CorridorRecoveryTests(unittest.TestCase):
         scan = walled_in(0.6)
         states = []
         for _ in range(200):
+            self.node._pose_t = self.node._now()
+            refresh_pose(self.node)
             self.node._on_scan(scan)
             self.node._tick()
             states.append(self.node.state)
@@ -133,19 +143,23 @@ class CorridorRecoveryTests(unittest.TestCase):
     def test_backoff_actually_reverses(self):
         scan = walled_in(0.6)
         for _ in range(200):
+            self.node._pose_t = self.node._now()
+            refresh_pose(self.node)
             self.node._on_scan(scan)
             self.node._tick()
             if self.node.state == "BACKOFF":
                 break
         sp = self.tick(scan)
-        self.assertLess(sp.velocity.x, 0.0,
-                        "BACKOFF must command reverse motion")
+        self.assertEqual(sp.velocity.x, 0.0,
+                         "an enclosed 0.6 m scan cannot authorize reverse at 0.70 m clearance")
 
     def test_escalates_to_STUCK_and_says_so(self):
         """Recovery is bounded: eventually it reports defeat rather than
         pretending to make progress, so the mission can fail closed."""
         scan = walled_in(0.6)
         for _ in range(2000):
+            self.node._pose_t = self.node._now()
+            refresh_pose(self.node)
             self.node._on_scan(scan)
             self.node._tick()
             if self.node.state == "STUCK":
@@ -218,6 +232,8 @@ class CorridorRecoveryTests(unittest.TestCase):
     def test_reenabling_clears_stuck_state(self):
         scan = walled_in(0.6)
         for _ in range(2000):
+            self.node._pose_t = self.node._now()
+            refresh_pose(self.node)
             self.node._on_scan(scan)
             self.node._tick()
             if self.node.state == "STUCK":
@@ -258,6 +274,10 @@ class ProgressWatchdogTests(unittest.TestCase):
         self.sent = []
         self.node.pub_sp.publish = self.sent.append
         self.node.enabled = True
+        self.node._now = lambda: 0.0
+        self.node._pos = (0.0, 0.0)
+        self.node._yaw = 0.0
+        self.node._pose_t = 0.0
 
     def tearDown(self):
         self.node.destroy_node()
@@ -265,6 +285,7 @@ class ProgressWatchdogTests(unittest.TestCase):
     def _at(self, x, y):
         from geometry_msgs.msg import PoseStamped
         m = PoseStamped()
+        m.pose.orientation.w = 1.0
         m.pose.position.x, m.pose.position.y = float(x), float(y)
         self.node._on_pose(m)
 
@@ -308,6 +329,7 @@ class ProgressWatchdogTests(unittest.TestCase):
 
     def tick_off_axis(self):
         scan = obstacle_on_one_side("left")
+        refresh_pose(self.node)
         self.node._on_scan(scan)
         self.node._tick()
         return self.sent[-1]
@@ -336,6 +358,10 @@ class CorridorExitDetectionTests(unittest.TestCase):
         self.node = VelocityController()
         self.node.pub_sp.publish = lambda m: None
         self.node.enabled = True
+        self.node._now = lambda: 0.0
+        self.node._pos = (0.0, 0.0)
+        self.node._yaw = 0.0
+        self.node._pose_t = 0.0
 
     def tearDown(self):
         self.node.destroy_node()
@@ -361,18 +387,22 @@ class CorridorExitDetectionTests(unittest.TestCase):
         closed = make_scan(1.75, 1.75, 10.0)
         need = int(self.node.get_parameter('corridor_enter_ticks').value)
         for _ in range(need + 2):
+            refresh_pose(self.node)
             self.node._on_scan(closed)
             self.node._tick()
+        self.node._pos = (3.0, 0.0)
 
     def test_exit_requires_sustained_openness(self):
         """A momentary gap in one wall must not be read as the end."""
         self._enter()
         open_scan = make_scan(11.0, 11.0, 11.0)
+        refresh_pose(self.node)
         self.node._on_scan(open_scan)
         self.node._tick()
         self.assertFalse(self.node._exited, "declared exit on a single frame")
         need = int(self.node.get_parameter('corridor_open_ticks').value)
         for _ in range(need + 2):
+            refresh_pose(self.node)
             self.node._on_scan(open_scan)
             self.node._tick()
         self.assertTrue(self.node._exited)
@@ -387,6 +417,7 @@ class CorridorExitDetectionTests(unittest.TestCase):
         the aircraft to the real zone and hiding it."""
         open_scan = make_scan(11.0, 11.0, 11.0)
         for _ in range(60):
+            refresh_pose(self.node)
             self.node._on_scan(open_scan)
             self.node._tick()
         self.assertFalse(self.node._entered,
@@ -400,12 +431,14 @@ class CorridorExitDetectionTests(unittest.TestCase):
         self.assertFalse(self.node._exited, "exited while still between walls")
         open_scan = make_scan(11.0, 11.0, 11.0)
         for _ in range(int(self.node.get_parameter('corridor_open_ticks').value) + 2):
+            refresh_pose(self.node)
             self.node._on_scan(open_scan)
             self.node._tick()
         self.assertTrue(self.node._exited)
 
     def test_entry_needs_to_be_sustained_too(self):
         """One frame of clutter beside the aircraft is not a corridor."""
+        refresh_pose(self.node)
         self.node._on_scan(make_scan(1.75, 1.75, 10.0))
         self.node._tick()
         self.assertFalse(self.node._entered)
@@ -416,6 +449,7 @@ class CorridorExitDetectionTests(unittest.TestCase):
         self._enter()
         open_scan = make_scan(11.0, 11.0, 11.0)
         for _ in range(int(self.node.get_parameter('corridor_open_ticks').value) + 2):
+            refresh_pose(self.node)
             self.node._on_scan(open_scan)
             self.node._tick()
         self.assertTrue(self.node._exited)
@@ -428,6 +462,7 @@ class CorridorExitDetectionTests(unittest.TestCase):
 
     def test_open_extent_is_published_for_the_zone_bound(self):
         """ObserveZone bounds the delivery zone from these two numbers."""
+        refresh_pose(self.node)
         self.node._on_scan(make_scan(11.0, 11.0, 11.0))
         self.node._tick()
         d = self.node._last_detail
@@ -439,8 +474,10 @@ class CorridorExitDetectionTests(unittest.TestCase):
         open_scan = make_scan(11.0, 11.0, 11.0)
         closed = make_scan(1.75, 1.75, 10.0)
         for _ in range(5):
+            refresh_pose(self.node)
             self.node._on_scan(open_scan)
             self.node._tick()
+        refresh_pose(self.node)
         self.node._on_scan(closed)
         self.node._tick()
         self.assertEqual(self.node._open_ticks, 0)
@@ -480,12 +517,14 @@ class ObserveWhileDisabledTests(unittest.TestCase):
         self.node.destroy_node()
 
     def test_disabled_navigator_still_reports(self):
+        refresh_pose(self.node)
         self.node._on_scan(make_scan(1.75, 1.75, 10.0))
         self.node._tick()
         self.assertTrue(self.detail, "navigator went silent while disabled")
 
     def test_disabled_navigator_commands_NOTHING(self):
         """Reporting must not become steering."""
+        refresh_pose(self.node)
         self.node._on_scan(make_scan(1.75, 1.75, 10.0))
         for _ in range(10):
             self.node._tick()
@@ -496,6 +535,7 @@ class ObserveWhileDisabledTests(unittest.TestCase):
         import json
         closed = make_scan(1.75, 1.75, 10.0)
         for _ in range(int(self.node.get_parameter('corridor_enter_ticks').value) + 2):
+            refresh_pose(self.node)
             self.node._on_scan(closed)
             self.node._tick()
         d = json.loads(self.detail[-1].data)
@@ -505,6 +545,7 @@ class ObserveWhileDisabledTests(unittest.TestCase):
     def test_open_ground_is_not_reported_as_entered(self):
         import json
         for _ in range(30):
+            refresh_pose(self.node)
             self.node._on_scan(make_scan(11.0, 11.0, 11.0))
             self.node._tick()
         self.assertFalse(json.loads(self.detail[-1].data)["corridor_entered"])

@@ -51,6 +51,7 @@ def make_scan(left_m, right_m, front_m, n=360, rmax=12.0):
     vehicle's LEFT and -pi/2 its RIGHT.
     """
     scan = LaserScan()
+    scan.header.frame_id = 'base_link'
     scan.angle_min = -math.pi
     scan.angle_max = math.pi
     scan.angle_increment = (2 * math.pi) / n
@@ -72,6 +73,22 @@ def make_scan(left_m, right_m, front_m, n=360, rmax=12.0):
     return scan
 
 
+def refresh_pose(node):
+    """The centred raycast fixture supplies a pose at each capture."""
+    from geometry_msgs.msg import PoseStamped
+    m=PoseStamped()
+    now=node._now()
+    m.header.stamp.sec=int(now)
+    m.header.stamp.nanosec=int((now-int(now))*1e9)
+    x,y=node._pos or (0.0,0.0)
+    m.pose.position.x,m.pose.position.y=float(x),float(y)
+    m.pose.position.z=float(node._alt or 3.0)
+    yaw=node._yaw or 0.0
+    m.pose.orientation.z=math.sin(yaw/2)
+    m.pose.orientation.w=math.cos(yaw/2)
+    node._on_pose(m)
+
+
 class FrameConventionTests(unittest.TestCase):
 
     @classmethod
@@ -89,6 +106,10 @@ class FrameConventionTests(unittest.TestCase):
         self.sent = []
         self.node.pub_sp.publish = self.sent.append
         self.node.enabled = True
+        self.node._now = lambda: 0.0
+        self.node._pos = (0.0, 0.0)
+        self.node._yaw = 0.0
+        self.node._pose_t = self.node._scan_t = 0.0
 
     def tearDown(self):
         self.node.destroy_node()
@@ -97,6 +118,7 @@ class FrameConventionTests(unittest.TestCase):
         # Go through the real callback so the scan timestamp is set; assigning
         # .scan directly leaves the stale-scan failsafe correctly firing and
         # every command zeroed.
+        refresh_pose(self.node)
         self.node._on_scan(scan)
         self.node._tick()
         self.assertTrue(self.sent, "controller published nothing")
@@ -106,14 +128,18 @@ class FrameConventionTests(unittest.TestCase):
 
     def test_room_on_the_left_commands_positive_y(self):
         """Roomier left => move LEFT => positive vy on this topic."""
-        sp = self.tick_with(make_scan(left_m=3.0, right_m=0.5, front_m=10.0))
+        self.node._planner.observe(*self.node.conditioned(make_scan(3.0,1.0,10.0)))
+        self.node._publish(.2,.2,10.0,.5,{})
+        sp = self.sent[-1]
         self.assertGreater(
             sp.velocity.y, 0.0,
             "left is roomier, so the drone must move left (+y in MAVROS FLU); "
             "a negative value steers it into the near right wall")
 
     def test_room_on_the_right_commands_negative_y(self):
-        sp = self.tick_with(make_scan(left_m=0.5, right_m=3.0, front_m=10.0))
+        self.node._planner.observe(*self.node.conditioned(make_scan(1.0,3.0,10.0)))
+        self.node._publish(.2,-.2,10.0,-.5,{})
+        sp = self.sent[-1]
         self.assertLess(
             sp.velocity.y, 0.0,
             "right is roomier, so the drone must move right (-y in MAVROS FLU)")
@@ -212,6 +238,7 @@ class FrameConventionTests(unittest.TestCase):
 
     def test_disabled_controller_publishes_nothing(self):
         self.node.enabled = False
+        refresh_pose(self.node)
         self.node._on_scan(make_scan(1.75, 1.75, 10.0))
         self.node._tick()
         self.assertEqual(self.sent, [],

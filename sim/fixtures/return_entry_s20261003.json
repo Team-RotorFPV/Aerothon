@@ -1,0 +1,16 @@
+{
+  "x": 16.016950607299805,
+  "y": -15.245909690856934,
+  "alt": 1.6488670110702515,
+  "yaw": 3.009986356892858,
+  "source": "logs/reliability_render_my_world_s20261003_retry2_20261005/onboard.jsonl",
+  "source_sha256": "992816086417346cb8ef430b189bd598852ea2f3a94e45050ccd1e81648635d1",
+  "captured_stamp": 926.5840000000001,
+  "purpose": "operator starting condition for focused rendered return test; not course knowledge for planner",
+  "approach": {
+    "x": 19.862699508666992,
+    "y": -15.756033897399902,
+    "captured_stamp": 912.961,
+    "reason": "descend outside the gate, then approach horizontally under the board; recorded FCU pose"
+  }
+}

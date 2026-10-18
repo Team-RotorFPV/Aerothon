@@ -3,7 +3,7 @@
 
 WHAT WAS WRONG (Phase 7)
 
-    The node published one Bool — "red is visible somewhere in frame" — plus
+    The node published one Bool â€” "red is visible somewhere in frame" â€” plus
     the fraction of the image it covered. Three separate problems:
 
       1. NO POSITION. A detection you cannot locate cannot be routed around,
@@ -15,8 +15,8 @@ WHAT WAS WRONG (Phase 7)
          camera can see that ground and it is clean". An operator cannot act
          on that, and neither can the mission.
 
-      3. A SINGLE FRAME DECIDED. One red-ish blob — a jacket, a flare, wet
-         clay — was enough.
+      3. A SINGLE FRAME DECIDED. One red-ish blob â€” a jacket, a flare, wet
+         clay â€” was enough.
 
 WHAT IT DOES NOW
 
@@ -40,10 +40,11 @@ Topics
 
 import json
 import math
+import time
 
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import qos_profile_sensor_data, QoSProfile, DurabilityPolicy
 import cv2
 import numpy as np
 from cv_bridge import CvBridge
@@ -53,9 +54,12 @@ from std_msgs.msg import Bool, Float32, String
 
 from collections import deque
 
+from perception_banner import colours
 from perception_banner.photometry import normalise
 from perception_redzone.georef import (GroundGrid, bbox, footprint,
                                        ground_point_q)
+
+from perception_redzone.partial_boundary import partial_boundaries
 
 NOT_VISIBLE = "NOT_VISIBLE"
 CLEAR = "CLEAR"
@@ -83,6 +87,11 @@ class RedZoneNode(Node):
         p('cell_m', 1.0)
         p('confirm_hits', 3)
         p('inflate_m', 1.0)
+
+        self._red_hex = ''
+        self.create_subscription(
+            String, '/mission/banner_colours', self._on_banner_colours,
+            QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
 
         self.bridge = CvBridge()
         self.grid = GroundGrid(cell_m=float(self._g('cell_m')),
@@ -131,21 +140,21 @@ class RedZoneNode(Node):
                          1.0 - 2.0 * (q.y ** 2 + q.z ** 2))
         self._pose = (m.pose.position.x, m.pose.position.y,
                       m.pose.position.z, yaw)
-        t = self.get_clock().now().nanoseconds * 1e-9
+        t = m.header.stamp.sec + m.header.stamp.nanosec*1e-9
+        if t<=0:
+            t = self.get_clock().now().nanoseconds * 1e-9
         self._poses.append((t,) + self._pose + ((q.w, q.x, q.y, q.z),))
 
     def pose_at(self, t):
         """The buffered pose nearest time `t`: (x, y, z, yaw, quat) or None.
 
-        Falls back to the latest pose when the buffer does not bracket `t`
-        closely -- a mismatched clock must degrade to the old behaviour, not
-        to no projection at all.
+        Missing capture-time pose invalidates the ground observation.
         """
         if not self._poses:
             return None
         best = min(self._poses, key=lambda p: abs(p[0] - t))
-        if abs(best[0] - t) > 0.5:
-            best = self._poses[-1]
+        if abs(best[0] - t) > 0.2:
+            return None
         return best[1:]
 
     def on_camera_state(self, m: String):
@@ -167,7 +176,7 @@ class RedZoneNode(Node):
 
     # ------------------------------------------------------------------ #
     def can_georeference(self):
-        """(ok, reason) — whether a bounded ground claim can be made at all."""
+        """(ok, reason) â€” whether a bounded ground claim can be made at all."""
         if self._pose is None:
             return False, "no aircraft pose"
         if self._cam_pitch is None:
@@ -181,13 +190,30 @@ class RedZoneNode(Node):
                            "view runs to the horizon")
         return True, ""
 
+    def _on_banner_colours(self, msg):
+        """The organisers' shades. Only the zone's red concerns this node."""
+        try:
+            supplied = colours.validate(json.loads(msg.data).get('colours'))
+        except (ValueError, TypeError, AttributeError, json.JSONDecodeError) as error:
+            self.get_logger().warn(f"banner colours refused: {error}")
+            return
+        self._red_hex = supplied.get('red', '')
+        # All of them: the red band must stop short of the banner shades.
+        self._supplied = supplied
+        if self._red_hex:
+            self.get_logger().info(f"restricted-zone red set -> {self._red_hex}")
+
     def red_mask(self, frame):
+        """Restricted-zone shade supplied by the operator; no fixed fallback."""
         hsv = cv2.cvtColor(normalise(frame), cv2.COLOR_BGR2HSV)
         s_lo, v_lo = int(self._g('s_lo')), int(self._g('v_lo'))
-        # Red wraps the hue circle -> two bands.
-        m1 = cv2.inRange(hsv, (0, s_lo, v_lo), (10, 255, 255))
-        m2 = cv2.inRange(hsv, (170, s_lo, v_lo), (179, 255, 255))
-        mask = cv2.bitwise_or(m1, m2)
+        supplied = getattr(self, '_red_hex', '')
+        if supplied:
+            shades = getattr(self, '_supplied', None) or {'red': supplied}
+            mask = colours.mask(hsv, colours.separated_ranges(
+                'red', shades, s_floor=s_lo, v_floor=v_lo))
+        else:
+            mask = np.zeros(hsv.shape[:2], np.uint8)
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
         return self._drop_narrow(mask)
 
@@ -233,6 +259,11 @@ class RedZoneNode(Node):
         return poly
 
     def on_image(self, msg: Image):
+        processing_started = time.perf_counter()
+        capture = msg.header.stamp.sec + msg.header.stamp.nanosec*1e-9
+        if capture>0 and capture<=getattr(self,'_last_capture',-1):
+            return
+        self._last_capture = capture
         try:
             frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
         except Exception as e:  # noqa: BLE001
@@ -243,7 +274,17 @@ class RedZoneNode(Node):
         # Red found where it cannot be placed on the ground is a number with
         # nowhere to go: skip the mask, keep publishing the map.
         ok, why = self.can_georeference()
+        if not self._red_hex:
+            ok, why = False, 'operator red HEX is not configured'
+        pose = self.pose_at(capture) if capture>0 else None
+        if pose is None:
+            ok,why = False,'no fresh aircraft pose at camera capture time'
         cnts, frac = [], 0.0
+        provisional = []
+        if ok:
+            provisional = partial_boundaries(normalise(frame), pose[2], self._hfov,
+                lambda contour, wh: self.project_polygon(contour, wh, pose),
+                bands=colours.separated_ranges('red', self._supplied, s_floor=90, v_floor=60))
         if ok:
             mask = self.red_mask(frame)
             frac = float(np.count_nonzero(mask)) / mask.size
@@ -258,17 +299,13 @@ class RedZoneNode(Node):
                   "observed": None}
 
         if ok:
-            stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
-            pose = self.pose_at(stamp) if stamp > 0.0 else None
-            if pose is None:
-                pose = self._pose + ((1.0, 0.0, 0.0, 0.0),)
             px, py, pz, yaw, _q = pose
             fp = footprint((w, h), self._hfov, pz, (px, py), yaw,
                            self._cam_pitch)
             detail["observed"] = [round(v, 2) for v in bbox(fp)] if fp else None
             # CLEAR is now a real claim: this bounded patch of ground was
             # looked at, and there was no red on it.
-            detail["status"] = RED if cnts else CLEAR
+            detail["status"] = RED if cnts or provisional else CLEAR
             detail["reason"] = ""
             # Fill each blob's ground polygon, then credit every covered cell
             # ONCE for this frame.
@@ -282,8 +319,15 @@ class RedZoneNode(Node):
                                 for ex in self.grid.exclusions(
                                     inflate_m=float(self._g('inflate_m')))]
         detail["confirmed_area_m2"] = round(self.grid.area_m2(), 1)
+        detail["provisional_exclusions"] = [list(bbox(item['polygon'])) for item in provisional]
+        detail["provisional_basis"] = 'clipped solid red and connected visible white backing'
+        detail["provisional_confirmed"] = False
+        detail.update(capture_stamp=capture,
+                      processing_wall_s=time.perf_counter()-processing_started,
+                      processed_stamp=self.get_clock().now().nanoseconds*1e-9,
+                      processing_latency_s=max(0,self.get_clock().now().nanoseconds*1e-9-capture))
 
-        self.pub.publish(Bool(data=bool(cnts)))
+        self.pub.publish(Bool(data=bool(cnts) or bool(provisional)))
         self.pub_area.publish(Float32(data=frac))
         self.pub_detail.publish(String(data=json.dumps(detail)))
         # A GCS debug view: drawn and converted only while someone watches.

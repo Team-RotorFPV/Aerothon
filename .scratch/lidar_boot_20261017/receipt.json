@@ -1,0 +1,92 @@
+{
+  "feature": "lidar_boot_20261017",
+  "triage": "ready-for-human",
+  "problem": [
+    "Pi runtime waited for a manual GCS Connect after boot",
+    "MAVLink UDP for Mission Planner was not available as the first boot service",
+    "GPS-free SLAM map was unusable: depended on FCU transforms, clipped top/right walls, sparse free space",
+    "Live scan view dropped 648 of 720 C1 beams",
+    "LiDAR calibration accepted single spikes and out-of-range returns and measured only yaw",
+    "A map frame slower than 100 ms silently removed the browser from all later updates"
+  ],
+  "scope": "Boot/connection, router, LiDAR display, GPS-free mapping, calibration workflow, GCS streaming. Flight decision modules unchanged; no renewed flight evidence claimed.",
+  "changes": {
+    "boot_connection": "Saved drone profile connects the runtime automatically at boot regardless of the props checkbox; arming, mission Start and camera motion stay behind reviewed Start (tests/test_boot_connection.py)",
+    "router": "aerothon-router.service starts after local filesystems, before networking/Docker; outbound GCS UDP is briefly coalesced to cut Wi-Fi packet rate; FC command and local MAVROS paths keep per-read forwarding",
+    "mapping": "LiDAR-only odometry (lidar_odom -> lidar_mapping_base -> lidar_mapping_scan, /scan_slam) holds map updates when registration is unreliable; aerothon_slam_grid adds the missing last grid row/column; flight navigation keeps FCU odometry",
+    "scan_view": "Full 720-beam metric view with zoom/pan, separate from the map view",
+    "calibration": "Staged wizard: measured XYZ/roll/pitch, background capture, repeated target captures, four independent direction/range checks; rejects isolated spikes, ambiguous targets and returns beyond sensor range",
+    "streaming": "Bounded per-browser writer, lossless RLE map encoding, WebSocket compression with bounded fallback"
+  },
+  "evidence": {
+    "offline_suite": {
+      "log": "offline_20261017T165049Z.log",
+      "scope_ledger": "offline_scope_20261017T165049Z.json",
+      "result": "2082 passed, 17 skipped; 12 native ROS interface tests passed; frontend built; ALL IN-SCOPE OFFLINE CHECKS PASSED",
+      "skips": {
+        "strong_gust_user_deferred": 5,
+        "photo_corpus_not_shot": 3,
+        "launch_and_wiring_without_aerothon_slam_grid_sourced": 9
+      },
+      "skip_resolution": "The 9 launch/wiring tests passed in affected_final.log (69 passed, -rs, no skips) with colcon_install/aerothon_slam_grid sourced"
+    },
+    "native_slam": {
+      "file": "native_slam.json",
+      "image": "native_slam.png",
+      "before": "native_slam.before.json / native_slam.before.png",
+      "result": "synthetic room, no FCU/GPS: 100% occupied cells within 120 mm of a wall, 100% wall samples within 150 mm, 97.4% interior free",
+      "hardware_qualified": false
+    },
+    "pi_reboot": {
+      "file": "boot_verified.json",
+      "router_start_s": 4.47,
+      "docker_start_s": 14.6,
+      "gcs_start_s": 15.86,
+      "connect_or_start_requests": 0,
+      "power": "throttled=0x50000 (undervoltage occurred earlier this power session; not current at capture), EXT5V 5.05 V"
+    },
+    "pi_live_after_reboot": {
+      "file": "pi_after_reboot.json",
+      "runtime": "Running, profile drone, FCU connected, disarmed",
+      "scan": "720 beams, 652 valid returns, ~9.7 Hz",
+      "slam": "LiDAR scan matching Tracking, RMSE 6.5 mm, overlap 0.93, GPS 0 satellites",
+      "map_messages": 8
+    },
+    "udp_after_reboot": {
+      "file": "udp_after_reboot_complete.json",
+      "result": "laptop received disarmed FC heartbeats at ~1 Hz and full telemetry without any GCS Connect"
+    },
+    "mission_planner": "User confirmed live vehicle data in Mission Planner over UDP 192.168.0.102:14550 after the reboot (17 October, 22:30 IST)",
+    "deployed_bundle": {
+      "zip": "aerothon-pi-20261017-lidar-boot-v5.zip",
+      "sha256": "eea66489921cc9513ada6a171314871672b9a15d30c6b0c066c66ea6ebcd209f",
+      "deploy_log": "deploy_v5.log"
+    }
+  },
+  "status": "deployed_and_live_verified_17_october",
+  "blockers": [
+    "LiDAR mounting calibration not performed: real XYZ/roll/pitch measurements and the four panel captures must be entered in the wizard on the aircraft",
+    "SLAM map quality on the real C1 in a real room not graded against measured geometry; only the synthetic native test is graded",
+    "Pi power: undervoltage flag recorded during the powered session; supply needs checking before flight",
+    "No GCS screenshots were saved to this directory; the live state is recorded in the JSON captures above",
+    "Changes not committed"
+  ],
+  "completion": "Software changes deployed and verified live on the Pi through a reboot. Hardware calibration and real-room map grading remain pending.",
+  "followups": {
+    "c1_front_reversed_20261018": {
+      "problem": "Objects at the C1 front drew behind the GCS arrow; every /scan consumer saw the scan rotated 180 deg",
+      "cause": "sllidar_ros2 rev 34300099 publishes bearing = pi - C1 angle (sllidar_node.cpp publish_scan); default mount yaw 0 did not undo it. Pure rotation, no mirror.",
+      "fix": "Driver publishes /scan_driver; scan_mount applies driver_yaw_deg (c1 180, ld06 0) into /scan_raw (lidar frame) then the mount into /scan. Mount yaw 0 = C1 front on the nose; calibration measures in /scan_raw.",
+      "tests": "sim/test_scan_mount.py replays sllidar indexing (front/left/right/back); launch wiring per model; 73 affected passed; full reduced suite 2094 passed, 8 skipped (5 strong-gust, 3 photo corpus), native 12 passed, frontend built",
+      "offline_log": "offline_20261018T035414Z.log",
+      "bundle": {
+        "zip": "aerothon-pi-20261018-lidar-front-v6.zip",
+        "sha256": "6c3a645d42a3932f81030cd635216c46c4d7dd29b7b0b36463bb981c884b4626"
+      },
+      "deploy": "deploy_pi_v6.sh on the Pi (log /home/pi5/.local/state/aerothon/lidar_boot_20261017/deploy_v6.log); 4 files changed; check_pi_runtime all PASS",
+      "live": "pi_after_v6.json: runtime auto-connected, FCU connected, disarmed, 720 beams, LiDAR odometry Tracking, scan angle_min ~0 (was -pi), mount yaw 0 from launch arguments, throttled=0x0",
+      "pending": "Physical front/left target check skipped by the user; the 0.30 m nearest-return readout ignores closer objects, use new_object_watch.py with a target about 0.5 m away",
+      "access": "Laptop id_ed25519 key installed on pi5 by the user (install_laptop_key.ps1); host key pinned to SHA256:hb9hOhkoDKLFU5a0JPLTc6sa8r/FhocTUnpxkMzWYXw in pi_known_hosts"
+    }
+  }
+}

@@ -27,6 +27,7 @@ sys.path.insert(0, os.path.join(
 import cv2
 import numpy as np
 import rclpy
+from rclpy.parameter import Parameter
 
 from perception_banner.banner_node import BannerNode
 
@@ -69,6 +70,7 @@ class BannerIdentityTests(unittest.TestCase):
 
     def setUp(self):
         self.node = BannerNode()
+        self.node._colours = {'green':'#07A03D','orange':'#EB5A0A','red':'#C4161C'}
         self.sent = []
         self.detail = []
         self.node.pub.publish = self.sent.append
@@ -80,7 +82,9 @@ class BannerIdentityTests(unittest.TestCase):
 
     def feed(self, img):
         from cv_bridge import CvBridge
-        self.node.on_image(CvBridge().cv2_to_imgmsg(img, encoding="bgr8"))
+        message = CvBridge().cv2_to_imgmsg(img, encoding="bgr8")
+        message.header.stamp = self.node.get_clock().now().to_msg()
+        self.node.on_image(message)
         import json
         return self.sent[-1], json.loads(self.detail[-1].data)
 
@@ -461,6 +465,7 @@ class DistanceAwareAreaGateTests(unittest.TestCase):
 
     def setUp(self):
         self.node = BannerNode()
+        self.node._colours = {'green':'#07A03D','orange':'#EB5A0A','red':'#C4161C'}
 
     def tearDown(self):
         self.node.destroy_node()
@@ -526,7 +531,9 @@ class DistanceAwareAreaGateTests(unittest.TestCase):
         self.node.pub_detail.publish = detail.append
         self.node.pub_annot.publish = lambda m: None
         from cv_bridge import CvBridge
-        self.node.on_image(CvBridge().cv2_to_imgmsg(img, encoding="bgr8"))
+        message = CvBridge().cv2_to_imgmsg(img, encoding="bgr8")
+        message.header.stamp = self.node.get_clock().now().to_msg()
+        self.node.on_image(message)
         self.assertEqual(sent[-1].z, 1.0,
                          f"derived area gate rejected the banner: {detail[-1].data}")
 
@@ -634,6 +641,7 @@ class RenderedFrameRegressionTests(unittest.TestCase):
 
     def setUp(self):
         self.node = BannerNode()
+        self.node._colours = {'green':'#07A03D','orange':'#EB5A0A','red':'#C4161C'}
         self.sent, self.detail = [], []
         self.node.pub.publish = self.sent.append
         self.node.pub_detail.publish = self.detail.append
@@ -650,15 +658,34 @@ class RenderedFrameRegressionTests(unittest.TestCase):
             "tests", "fixtures", name)
         img = cv2.imread(path)
         self.assertIsNotNone(img, f"fixture missing: {path}")
-        self.node.on_image(CvBridge().cv2_to_imgmsg(img, encoding="bgr8"))
+        message = CvBridge().cv2_to_imgmsg(img, encoding="bgr8")
+        message.header.stamp = self.node.get_clock().now().to_msg()
+        self.node.on_image(message)
         return self.sent[-1], json.loads(self.detail[-1].data)
 
     def test_the_real_rendered_banner_is_identified(self):
         out, d = self._feed("banner_sim_ambient_3m.png")
         self.assertEqual(out.z, 1.0, f"live banner frame rejected: {d}")
 
+    def test_oblique_return_banner_is_not_discarded_before_alignment(self):
+        """Recorded seed 20261003 view rejected at board aspect 0.82.
+
+        The extra orbit consumed the mission's flight-time allowance. This
+        actual camera frame contains the banner before the later frontal
+        view; accepting its structural identity lets lidar square up safely.
+        It does not establish a successful OCR reading or authorize entry.
+        """
+        out, d = self._feed("banner_return_oblique_843_20261006.png")
+        self.assertEqual(out.z, 1.0, f"oblique return banner rejected: {d}")
+
     def test_the_lettering_is_actually_found_in_it(self):
         """Not just "passed" -- the letters have to be what passed it."""
+        # The organisers' banners carry no text, so the border now
+        # identifies first and this frame would never reach the
+        # lettering. The lettering path is retained and this is what
+        # still measures it, so ask for it explicitly.
+        self.node.set_parameters(
+            [Parameter('border_identity', value=False)])
         _, d = self._feed("banner_sim_ambient_3m.png")
         self.assertGreaterEqual(d["components"], 4,
                                 f"lettering not detected: {d}")
@@ -822,6 +849,7 @@ class TextRescueTests(unittest.TestCase):
 
     def setUp(self):
         self.node = BannerNode()
+        self.node._colours = {'green':'#07A03D','orange':'#EB5A0A','red':'#C4161C'}
         self.detail = []
         self.node.pub.publish = lambda m: None
         self.node.pub_detail.publish = self.detail.append
@@ -832,7 +860,9 @@ class TextRescueTests(unittest.TestCase):
 
     def feed(self, img):
         from cv_bridge import CvBridge
-        self.node.on_image(CvBridge().cv2_to_imgmsg(img, encoding="bgr8"))
+        message = CvBridge().cv2_to_imgmsg(img, encoding="bgr8")
+        message.header.stamp = self.node.get_clock().now().to_msg()
+        self.node.on_image(message)
 
     def last(self):
         import json
@@ -943,6 +973,7 @@ class ShadowRobustLetteringTests(unittest.TestCase):
 
     def setUp(self):
         self.node = BannerNode()
+        self.node._colours = {'green':'#07A03D','orange':'#EB5A0A','red':'#C4161C'}
         self.sent, self.detail = [], []
         self.node.pub.publish = self.sent.append
         self.node.pub_detail.publish = self.detail.append
@@ -966,7 +997,9 @@ class ShadowRobustLetteringTests(unittest.TestCase):
     def _feed(self, img):
         import json
         from cv_bridge import CvBridge
-        self.node.on_image(CvBridge().cv2_to_imgmsg(img, encoding="bgr8"))
+        message = CvBridge().cv2_to_imgmsg(img, encoding="bgr8")
+        message.header.stamp = self.node.get_clock().now().to_msg()
+        self.node.on_image(message)
         return self.sent[-1], json.loads(self.detail[-1].data)
 
     def _stroke(self, on):
@@ -1024,6 +1057,12 @@ class ShadowRobustLetteringTests(unittest.TestCase):
         Runs at the SHIPPED configuration deliberately: the stroke path is
         off by default now, and a test that switches it on is not testing what
         flies."""
+        # The organisers' banners carry no text, so the border now
+        # identifies first and this frame would never reach the
+        # lettering. The lettering path is retained and this is what
+        # still measures it, so ask for it explicitly.
+        self.node.set_parameters(
+            [Parameter('border_identity', value=False)])
         _, d = self._feed(self.src)
         self.assertEqual(d.get("lettering_path"), "brightness")
         self.assertEqual(d.get("text"), "AEROTHON")
@@ -1108,6 +1147,7 @@ class PathSelectionTests(unittest.TestCase):
 
     def setUp(self):
         self.node = BannerNode()
+        self.node._colours = {'green':'#07A03D','orange':'#EB5A0A','red':'#C4161C'}
         self.sent, self.detail = [], []
         self.node.pub.publish = self.sent.append
         self.node.pub_detail.publish = self.detail.append
@@ -1124,7 +1164,9 @@ class PathSelectionTests(unittest.TestCase):
     def _feed(self, img):
         import json
         from cv_bridge import CvBridge
-        self.node.on_image(CvBridge().cv2_to_imgmsg(img, encoding="bgr8"))
+        message = CvBridge().cv2_to_imgmsg(img, encoding="bgr8")
+        message.header.stamp = self.node.get_clock().now().to_msg()
+        self.node.on_image(message)
         return self.sent[-1], json.loads(self.detail[-1].data)
 
     def _shaded(self, far_edge):
@@ -1237,6 +1279,7 @@ class BoardAreaGateTests(unittest.TestCase):
 
     def setUp(self):
         self.node = BannerNode()
+        self.node._colours = {'green':'#07A03D','orange':'#EB5A0A','red':'#C4161C'}
         self.sent, self.detail = [], []
         self.node.pub.publish = self.sent.append
         self.node.pub_detail.publish = self.detail.append
@@ -1248,7 +1291,9 @@ class BoardAreaGateTests(unittest.TestCase):
     def _feed(self, img):
         import json
         from cv_bridge import CvBridge
-        self.node.on_image(CvBridge().cv2_to_imgmsg(img, encoding="bgr8"))
+        message = CvBridge().cv2_to_imgmsg(img, encoding="bgr8")
+        message.header.stamp = self.node.get_clock().now().to_msg()
+        self.node.on_image(message)
         return self.sent[-1], json.loads(self.detail[-1].data)
 
     def test_the_floor_is_derived_not_a_fraction_of_the_frame(self):
@@ -1303,3 +1348,84 @@ class BoardAreaGateTests(unittest.TestCase):
         _, d = self._feed(cv2.imread(path))
         self.assertIn("board_px", d)
         self.assertIn("board_area_px", d)
+
+
+# ---- the banner the organisers actually confirmed: no text, a border ---- #
+
+def bordered(img, x, y, w, h, colour=GREEN, border=8, sides=("n", "s", "e", "w")):
+    """A plain colour panel inside a white frame, which is the real banner.
+
+    The organisers' banner carries no lettering at all: a solid colour field
+    with a 3-inch white border, its width the width of the corridor. The
+    frame is drawn OUTSIDE the panel, which is where the border sits.
+    """
+    if "n" in sides:
+        cv2.rectangle(img, (x-border, y-border), (x+w+border, y), WHITE, -1)
+    if "s" in sides:
+        cv2.rectangle(img, (x-border, y+h), (x+w+border, y+h+border), WHITE, -1)
+    if "w" in sides:
+        cv2.rectangle(img, (x-border, y), (x, y+h), WHITE, -1)
+    if "e" in sides:
+        cv2.rectangle(img, (x+w, y), (x+w+border, y+h), WHITE, -1)
+    cv2.rectangle(img, (x, y), (x+w, y+h), colour, -1)
+    return img
+
+
+class TextFreeBannerTests(BannerIdentityTests):
+    """Identification with no lettering anywhere in the scene.
+
+    Before the border test existed, every one of these frames was rejected
+    for having "no white lettering on the board" -- which is now the whole
+    arena, so the banner had to become identifiable without it.
+    """
+
+    def test_a_text_free_bordered_banner_is_identified(self):
+        img = blank()
+        bordered(img, 150, 180, 340, 120)
+        out, d = self.feed(img)
+        self.assertEqual(out.z, 1.0, f"text-free banner rejected: {d}")
+        self.assertTrue(d["identified"])
+        self.assertEqual(d.get("identity_path"), "border")
+
+    def test_an_unframed_panel_of_the_same_colour_and_size_is_REJECTED(self):
+        """What keeps a tarpaulin out once the lettering is gone."""
+        img = blank()
+        green_rect(img, 150, 180, 340, 120)
+        out, d = self.feed(img)
+        self.assertNotEqual(out.z, 1.0, f"a bare colour panel was identified: {d}")
+        self.assertFalse(d["identified"])
+
+    def test_a_panel_framed_on_only_one_side_is_REJECTED(self):
+        """A painted edge is not a border."""
+        img = blank()
+        bordered(img, 150, 180, 340, 120, sides=("n",))
+        out, d = self.feed(img)
+        self.assertFalse(d["identified"], f"one painted edge passed as a border: {d}")
+
+    def test_a_green_floor_between_two_white_walls_in_a_frame_corner_is_REJECTED(self):
+        """Rendered regression: the outbound corridor's green floor, seen into
+        the bottom-right corner between its white walls, identified as a
+        banner at the return gate, and the aircraft chased it."""
+        img = blank()
+        h, w = img.shape[:2]
+        bordered(img, w - 300, h - 150, 300, 150, sides=("n", "w"))
+        out, d = self.feed(img)
+        self.assertFalse(d["identified"], f"a cornered floor patch passed: {d}")
+
+    def test_a_board_wider_than_the_frame_identifies_on_its_top_and_bottom(self):
+        """Rendered regression: the return board seen from 3 m overflows both
+        sides of the frame; three-side identity refused it and the return
+        gate never aligned."""
+        img = blank()
+        h, w = img.shape[:2]
+        # 3 inches on a 3.7 m board ~700 px wide is ~14 px: drawn at 16.
+        bordered(img, -30, h // 2 - 60, w + 60, 120, border=16)
+        out, d = self.feed(img)
+        self.assertEqual(out.z, 1.0, f"a frame-wide board was refused: {d}")
+
+    def test_a_banner_at_the_frame_edge_still_identifies_on_the_sides_it_shows(self):
+        """A sweep sees the banner clipped; that is not a missing border."""
+        img = blank()
+        bordered(img, -40, 180, 340, 120)
+        out, d = self.feed(img)
+        self.assertEqual(out.z, 1.0, f"clipped banner rejected: {d}")

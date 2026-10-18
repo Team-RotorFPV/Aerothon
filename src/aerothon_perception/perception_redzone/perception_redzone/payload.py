@@ -42,6 +42,7 @@ def detect_payload(bgr, min_area_px=20, hsv_lo=YELLOW_LO, hsv_hi=YELLOW_HI):
     cy = m["m01"] / m["m00"] if m["m00"] else 0.0
     _, _, bw, bh = cv2.boundingRect(c)
     return {"visible": True,
+            "bbox": [int(v) for v in cv2.boundingRect(c)],
             "x": (cx - w / 2.0) / (w / 2.0), "y": (cy - h / 2.0) / (h / 2.0),
             "area_px": area, "w_px": int(bw), "h_px": int(bh),
             "img_w": w, "img_h": h}

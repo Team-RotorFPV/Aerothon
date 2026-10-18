@@ -35,7 +35,12 @@ from sensor_msgs.msg import BatteryState, LaserScan, NavSatFix
 from std_msgs.msg import Bool, String, UInt32
 
 from gcs_aggregator.readiness import blocking_reasons, evaluate, is_ready
-from mission_bt.delivery_zone import (parse_boundary, boundary_to_local_zone,
+# One definition of a valid colour, shared with the detectors that use it:
+# a panel saying "loaded" for a payload perception refuses is worse than
+# no panel at all.
+from perception_banner.colours import validate as validate_colours
+from mission_bt.delivery_zone import (ROLE_DELIVERY_ZONE, judges_polygon_role,
+                                      parse_boundary, boundary_to_local_zone,
                                       parse_polygon, point_inside_with_margin,
                                       polygon_to_local)
 
@@ -88,12 +93,16 @@ class Readiness(Node):
         # DECISION, so it is a named parameter and the relaxed items are
         # reported, not silently treated as healthy.
         p("waive_items", [""])
+        # Simulator scripts that hand the mission its arena as launch values
+        # (no GCS operator) turn this off; the item is then reported WAIVED.
+        p("require_arena_dimensions", True)
 
         self.obs = {}
         self.delivery_vertices = None
         self.delivery_parse_reason = "delivery-zone boundary is missing"
         self.home = None
         self.lidar = RateMeter()
+        self._lidar_receipt = None
         self.detectors = {"qr": RateMeter(), "banner": RateMeter(),
                           "redzone": RateMeter()}
         self.camera = None
@@ -126,8 +135,10 @@ class Readiness(Node):
                                  self._on_sys_status, qos_profile_sensor_data)
         self.create_subscription(RCIn, "/mavros/rc/in", self._on_rc,
                                  qos_profile_sensor_data)
+        # scan_mount publishes /scan best-effort; a reliable subscriber
+        # never receives it on the aircraft (lidar rate stuck at 0 Hz).
         self.create_subscription(LaserScan, "/scan",
-                                 lambda m: self.lidar.touch(), 5)
+                                 self._on_lidar, qos_profile_sensor_data)
         self.create_subscription(String, "/percep/qr/detail",
                                  lambda m: self.detectors["qr"].touch(), 5)
         self.create_subscription(String, "/percep/banner/detail",
@@ -146,6 +157,10 @@ class Readiness(Node):
         self.fence_parse_reason = "arena geofence boundary is missing"
         self.create_subscription(String, "/mission/geofence",
                                  self._on_geofence, boundary_qos)
+        self.create_subscription(String, "/mission/banner_colours",
+                                 self._on_banner_colours, boundary_qos)
+        self.create_subscription(String, "/mission/arena_dimensions/applied",
+                                 self._on_arena_dimensions, boundary_qos)
 
         self.pub = self.create_publisher(Bool, "/mission_ready", 10)
         self.pub_detail = self.create_publisher(String, "/mission_ready/detail", 10)
@@ -266,10 +281,66 @@ class Readiness(Node):
             m.data, what="geofence")
         self._resolve_geofence()
 
+    def _on_arena_dimensions(self, m):
+        """The mission's own report of what it applied, not what was sent."""
+        try:
+            data = json.loads(m.data)
+            applied = data.get("applied") is True
+            reason = str(data.get("reason") or "")
+            dims = data.get("dimensions") or {}
+        except (ValueError, TypeError, AttributeError):
+            applied, reason, dims = False, "unreadable applied-dimensions report", {}
+        if not applied and self.obs.get("arena_dimensions_applied"):
+            # A refused change leaves the mission on the values it last
+            # applied; those still stand, and the refusal is shown with them.
+            self.obs["arena_dimensions_value"] = (
+                f"{self._dims_summary} (last change refused: "
+                f"{reason or 'not applied'})")
+            return
+        self.obs["arena_dimensions_applied"] = applied
+        self.obs["arena_dimensions_reason"] = "" if applied else (
+            reason or "arena dimensions not applied")
+        qr = dims.get("qr", {}) if isinstance(dims, dict) else {}
+        corridor = dims.get("corridor", {}) if isinstance(dims, dict) else {}
+        try:
+            self._dims_summary = (
+                f"QR {float(qr['target_m']):.2f} m, corridor "
+                f"{float(corridor['length_m']):.1f} m at {float(corridor['nav_height_m']):.2f} m")
+        except (KeyError, TypeError, ValueError):
+            self._dims_summary = "applied"
+        self.obs["arena_dimensions_value"] = self._dims_summary if applied else "not applied"
+
+    def _on_banner_colours(self, m):
+        """The organisers' HEX shades, validated exactly as the detectors do.
+
+        Reported here by the same rules perception applies, so the panel
+        cannot say "loaded" for a payload the detectors will refuse.
+        """
+        try:
+            supplied = validate_colours(json.loads(m.data).get("colours"))
+        except (ValueError, TypeError, AttributeError, json.JSONDecodeError) as error:
+            self.obs["banner_colours_valid"] = False
+            self.obs["banner_colours_reason"] = str(error) or "banner colours are invalid"
+            self.obs["banner_colours_value"] = "invalid"
+            return
+        missing = sorted({"green", "orange", "red"} - set(supplied))
+        if missing:
+            self.obs["banner_colours_valid"] = False
+            self.obs["banner_colours_reason"] = (
+                f"no shade supplied for the {', '.join(missing)} banner")
+            self.obs["banner_colours_value"] = "incomplete"
+            return
+        self.obs["banner_colours_valid"] = True
+        self.obs["banner_colours_reason"] = ""
+        self.obs["banner_colours_value"] = " ".join(
+            f"{name}={supplied[name]}" for name in sorted(supplied))
+
     def _resolve_geofence(self):
         """Same acceptance as the mission's UploadArenaFence pre-check."""
         vertices = getattr(self, "fence_vertices", None)
         ok = False
+        value = None
+        self.judges_role = None
         reason = getattr(self, "fence_parse_reason",
                          "arena geofence boundary is missing")
         if vertices is None and not hasattr(self, "fence_vertices"):
@@ -281,13 +352,22 @@ class Readiness(Node):
                 pts, reason = polygon_to_local(
                     vertices, float(self.home.geo.latitude),
                     float(self.home.geo.longitude))
-                if pts is not None:
+                if pts is not None and judges_polygon_role(pts) == ROLE_DELIVERY_ZONE:
+                    # Take-off outside the points: they are the delivery
+                    # zone, and the mission derives the enforced fence round
+                    # the zone and take-off (mav_commander, safety_fence).
+                    self.judges_role = ROLE_DELIVERY_ZONE
+                    ok, reason = True, ""
+                    value = "derived round the delivery zone and take-off"
+                elif pts is not None:
                     if not point_inside_with_margin(0.0, 0.0, pts, 2.0):
                         reason = "home is not at least 2 m inside the geofence"
                     else:
                         ok, reason = True, ""
         self.obs["geofence_valid"] = ok
         self.obs["geofence_reason"] = reason or "geofence polygon resolved"
+        self.obs["geofence_value"] = value or ("judges' points" if ok else "invalid")
+        self._resolve_delivery_zone()
 
     def _resolve_delivery_zone(self):
         zone = None
@@ -299,13 +379,35 @@ class Readiness(Node):
                 zone, reason = boundary_to_local_zone(
                     self.delivery_vertices, float(self.home.geo.latitude),
                     float(self.home.geo.longitude))
+        if self.delivery_vertices is None and self.obs.get("geofence_valid"):
+            # Fence-only arena: the judges give one polygon and no delivery
+            # corners. Round take-off it is the whole flying area and the
+            # mission searches the fenced field beyond the corridor exit;
+            # away from take-off it is the delivery zone itself.
+            self.obs["delivery_zone_valid"] = True
+            self.obs["delivery_zone_reason"] = ""
+            self.obs["delivery_zone_value"] = (
+                "judges' points (delivery zone)"
+                if getattr(self, "judges_role", None) == ROLE_DELIVERY_ZONE
+                else "fenced field beyond the corridor")
+            return
         self.obs["delivery_zone_valid"] = zone is not None
         self.obs["delivery_zone_reason"] = reason or "four-corner boundary resolved in local ENU"
+        self.obs["delivery_zone_value"] = "supplied corners" if zone is not None else "invalid"
 
     # ---- interlock ---- #
+    def _on_lidar(self, message):
+        capture = message.header.stamp.sec + message.header.stamp.nanosec/1e9
+        if capture <= 0 or (self.lidar.stamps and capture <= self.lidar.stamps[-1]):
+            return
+        self.lidar.touch(capture)
+        self._lidar_receipt = time.monotonic()
+
     def _tick(self):
         obs = dict(self.obs)
-        obs["lidar_hz"] = self.lidar.hz()
+        # Use the sensor's ROS clock for rate, and steady time for loss. This
+        # is the same calculation for system and externally supplied clocks.
+        obs["lidar_hz"] = self.lidar.hz(self.get_clock().now().nanoseconds/1e9) if self._lidar_receipt is not None and time.monotonic()-self._lidar_receipt < 1 else 0.0
         obs["detectors"] = {n: r.age() for n, r in self.detectors.items()}
         # MAVLink latency is not directly published; the age of the freshest
         # FCU-sourced message is the honest proxy and is labelled as such.
@@ -324,6 +426,8 @@ class Readiness(Node):
         items = evaluate(obs, limits)
 
         waived = {w for w in (self._g("waive_items") or []) if w}
+        if not bool(self._g("require_arena_dimensions")):
+            waived.add("arena_dimensions")
         for i in items:
             if i["key"] in waived and not i["ok"]:
                 i["ok"] = True

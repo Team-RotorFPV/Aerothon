@@ -36,16 +36,19 @@ from mavros_msgs.srv import CommandLong
 MAV_CMD_SET_MESSAGE_INTERVAL = 511
 
 # message id -> Hz. Mirrors scripts/set_stream_rates.py; keep them in step.
+# ~4.2 kB/s of the 115200 TELEM3 link's ~11.5 kB/s (was ~7.2 kB/s, 62%).
 DESIRED = {
-    30: 50.0,    # ATTITUDE
-    32: 50.0,    # LOCAL_POSITION_NED
-    33: 10.0,    # GLOBAL_POSITION_INT
-    24: 5.0,     # GPS_RAW_INT
-    74: 10.0,    # VFR_HUD
+    30: 25.0,    # ATTITUDE
+    32: 25.0,    # LOCAL_POSITION_NED
+    33: 5.0,     # GLOBAL_POSITION_INT
+    24: 2.0,     # GPS_RAW_INT
+    74: 4.0,     # VFR_HUD
     1: 4.0,      # SYS_STATUS
-    2: 4.0,      # SYSTEM_TIME
-    27: 10.0,    # RAW_IMU
+    2: 2.0,      # SYSTEM_TIME
+    27: 2.0,     # RAW_IMU: magnetometer diagnostics only
+    241: 2.0,   # VIBRATION: operator diagnostics only
     65: 5.0,     # RC_CHANNELS
+    36: 20.0,    # SERVO_OUTPUT_RAW: delivery load proxy, not measured current
     # EKF_STATUS_REPORT. Nothing requested this, so MAVROS never
     # published /mavros/estimator_status, the interlock's "EKF health"
     # item reported "no data received" forever, and is_ready() -- which

@@ -36,7 +36,8 @@ WHAT IT DOES NOT DO
 
 import math
 
-from .search_planner import route_leg, path_hits_exclusion, routing_obstacles
+from .search_planner import (route_leg, path_hits_exclusion, routing_obstacles,
+                             point_in_exclusion)
 
 RUNNING = "RUNNING"
 ARRIVED = "ARRIVED"
@@ -90,7 +91,7 @@ class LegRouter:
     def _plan(self, mav, x, y):
         """(Re)compute the route when the destination or the zones change."""
         ex = self._exclusions(mav)
-        key = (round(float(x), 2), round(float(y), 2), len(ex))
+        key = (round(float(x), 2), round(float(y), 2),tuple(sorted(tuple(r) for r in ex)))
         if key == self._key:
             return not self._blocked
         self._key = key
@@ -123,6 +124,11 @@ class LegRouter:
         if self.lead_m <= 0.0 or self._i >= len(self._wps) - 1:
             return wx, wy
         px, py = mav.pos()[:2]
+        # Finish the planned escape before applying look-ahead. Overlapping
+        # observed margins may require several consecutive escape waypoints.
+        blocks = routing_obstacles(self._exclusions(mav), self.clearance_m)
+        if any(x0 <= px <= x1 and y0 <= py <= y1 for x0,x1,y0,y1 in blocks):
+            return wx, wy
         left = self.lead_m - math.hypot(wx - px, wy - py)
         if left <= 0.0:
             return wx, wy
@@ -141,10 +147,10 @@ class LegRouter:
         return ax, ay
 
     # ---- the tick ---- #
-    def fly(self, mav, x, y, z, yaw=0.0):
-        """Command one tick of this leg. RUNNING / ARRIVED / BLOCKED."""
+    def target(self, mav, x, y, z):
+        """Certified active segment endpoint, before a stage turns or moves."""
         if not self._plan(mav, x, y):
-            return BLOCKED
+            return None
 
         while self._i < len(self._wps) - 1:
             wx, wy = self._wps[self._i]
@@ -162,8 +168,93 @@ class LegRouter:
 
         wx, wy = self._wps[self._i]
         cx, cy = self._carrot(mav, wx, wy)
+        if not self._segment_safe(mav,(cx,cy)):
+            # Aircraft drift and changed exclusions both invalidate a cached
+            # segment. Recompute from measured position before commanding it.
+            self._key = None
+            if not self._plan(mav,x,y):
+                return None
+            wx,wy = self._wps[self._i]
+            cx,cy = self._carrot(mav,wx,wy)
+            if not self._segment_safe(mav,(cx,cy)):
+                self.blocked_reason = 'active segment violates exclusion clearance'
+                return None
+        return cx,cy,wx,wy
+
+    def fly(self, mav, x, y, z, yaw=0.0):
+        """Command one tick of this leg. RUNNING / ARRIVED / BLOCKED."""
+        target=self.target(mav,x,y,z)
+        if target is None:
+            self._hold(mav,yaw)
+            return BLOCKED
+        cx,cy,wx,wy=target
         mav.goto(cx, cy, z, yaw)
         last = self._i >= len(self._wps) - 1
         if last and mav.reached(wx, wy, z, self.tol):
             return ARRIVED
         return RUNNING
+
+    @staticmethod
+    def _hold(mav,yaw):
+        fn=getattr(mav,'hold_position',None)
+        if callable(fn):
+            fn()
+
+    def _segment_safe(self,mav,end,exclusions=None):
+        px,py=mav.pos()[:2]
+        raw=self._exclusions(mav) if exclusions is None else list(exclusions)
+        if (not all(math.isfinite(v) for v in (px,py,*end))
+                or any(len(rect)!=4 or not all(math.isfinite(v) for v in rect)
+                       for rect in raw)):
+            return False
+        # Bounding boxes simplify route planning, but their added empty ground
+        # is not an observed exclusion. An already issued segment may continue
+        # only when both endpoints and its whole line clear EVERY original
+        # observed rectangle inflated by the unchanged clearance. Starts inside
+        # an actual margin still require the restricted nearest-edge escape.
+        if (not point_in_exclusion(px,py,self.clearance_m,raw)
+                and not point_in_exclusion(*end,self.clearance_m,raw)
+                and not path_hits_exclusion([(px,py),end],self.clearance_m,raw)):
+            return True
+        blocks=routing_obstacles(raw,self.clearance_m)
+        containing=[r for r in blocks if r[0]<=px<=r[1] and r[2]<=py<=r[3]]
+        if not containing:
+            return not path_hits_exclusion([(px,py),end],0,blocks)
+        # A zone discovered inside the braking margin is already a clearance
+        # failure. Permit only the planner's nearest-edge escape, never a
+        # cached flight through the paint or a new zone.
+        # route_leg leaves the first containing margin, then replans the
+        # others. Their nearest exits can differ; requiring one command to
+        # equal every exit strands the aircraft. Paint and other obstacles
+        # are still checked below before accepting this escape segment.
+        for x0,x1,y0,y1 in containing[:1]:
+            candidates=[(x0-.25,py),(x1+.25,py),(px,y0-.25),(px,y1+.25)]
+            nearest=min(candidates,key=lambda p:math.dist((px,py),p))
+            if math.dist(end,nearest)>.01:
+                # A streamed escape remains aimed at the same exit edge
+                # while small cross-track motion changes its exact endpoint.
+                # Permit continuation only through that nearest edge and
+                # only when distance to paint in each containing margin is
+                # nondecreasing along the whole straight segment. Squared
+                # distance to a convex rectangle is convex; its initial
+                # directional derivative suffices for that condition.
+                axis=0 if candidates.index(nearest)<2 else 1
+                if abs(end[axis]-nearest[axis])>.01:
+                    return False
+                vx,vy=end[0]-px,end[1]-py
+                for rx0,rx1,ry0,ry1 in raw:
+                    margin=self.clearance_m
+                    if not (rx0-margin<=px<=rx1+margin and
+                            ry0-margin<=py<=ry1+margin):
+                        # Other zones retain the full inflated segment
+                        # check below. Approaching a distant zone without
+                        # entering its margin cannot invalidate this escape.
+                        continue
+                    dx=px-min(max(px,rx0),rx1)
+                    dy=py-min(max(py,ry0),ry1)
+                    if dx*vx+dy*vy < -1e-9:
+                        return False
+        other=[r for r in blocks if r not in containing]
+        paint=[r for r in raw if not (r[0]<=px<=r[1] and r[2]<=py<=r[3])]
+        return not (path_hits_exclusion([(px,py),end],0,other) or
+                    path_hits_exclusion([(px,py),end],0,paint))

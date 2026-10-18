@@ -20,6 +20,11 @@ the operator can still resolve with a target override (goal.md Q19).
 
 import re
 
+# The target the mission sets when the start marker carried no readable
+# payload and only its PATTERN identifies the pad (mission_bt.decode_hover
+# defines the same string). No decoded payload ever matches it.
+APPEARANCE_ONLY = "<start marker appearance>"
+
 # Not "A": it is the likeliest pad name of all.
 FILLER = frozenset({
     "AND", "AT", "CODE", "DELIVER", "DELIVERY", "DROP", "FOR", "ID",
@@ -38,7 +43,7 @@ def identifiers(text):
 def matches(target, payload):
     """True if `payload` (a pad) names the place `target` (the start QR) does."""
     target, payload = str(target or "").strip(), str(payload or "").strip()
-    if not target or not payload:
+    if not target or not payload or target == APPEARANCE_ONLY:
         return False
     if target == payload:
         return True

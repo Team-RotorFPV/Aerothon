@@ -434,6 +434,8 @@ class StageWiringTests(unittest.TestCase):
             if stage.update() is not py_trees.common.Status.RUNNING:
                 break
             mav.arrive()
+            if mav.gotos and len(mav.gotos[-1])>3:
+                mav._yaw = mav.gotos[-1][3]
             if track[-1] != mav.pos()[:2]:
                 track.append(mav.pos()[:2])
         self.assertGreater(len(track), 2, "the sweep never moved")

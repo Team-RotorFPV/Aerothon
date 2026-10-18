@@ -41,3 +41,7 @@ __pycache__/
 terrain/
 tmp/
 *.whl
+
+# Local documentation archive and cleanup evidence; never ship to the Pi.
+.scratch/pi_consolidation_20261013/
+.scratch/pi_deploy_20261014/

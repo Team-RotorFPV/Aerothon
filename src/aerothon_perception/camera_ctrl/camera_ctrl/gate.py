@@ -36,6 +36,11 @@ class CameraGate:
             return
         self._t = self._now()
 
+    @property
+    def requested(self):
+        """The pose camera_ctrl last reported requested, or None if unknown."""
+        return self._requested
+
     def open(self):
         if self._requested is None or self._t is None \
                 or self._now() - self._t > self.stale_s:

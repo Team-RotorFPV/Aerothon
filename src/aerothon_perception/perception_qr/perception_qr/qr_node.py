@@ -42,6 +42,7 @@ Topics
 """
 
 import json
+import time
 
 import rclpy
 from rclpy.node import Node
@@ -54,7 +55,8 @@ from std_msgs.msg import String, Bool
 
 from camera_ctrl.gate import CameraGate
 from perception_qr.qr_decode import QrDecoder, zbar_available
-from perception_qr.qr_match import matches
+from perception_qr import qr_appearance
+from perception_qr.qr_match import APPEARANCE_ONLY, matches
 
 UNREAD = 0.25      # mission_bt.decode_hover.UNREAD
 
@@ -66,7 +68,18 @@ class QrNode(Node):
         p('image_topic', '/image_raw')
         p('camera_info_topic', '/camera/camera_info')
         p('target', '')
+        # ---- appearance matching, the PRIMARY evidence ---- #
+        # The organisers have not settled whether the codes encode anything,
+        # and the requirement is to match the marker by how it looks. The
+        # start marker's own pattern becomes the reference; a pad whose
+        # pattern agrees with it is the target, decoded or not.
+        p('appearance_matching', True)
+        p('appearance_threshold', qr_appearance.DEFAULT_THRESHOLD)
+        p('appearance_coarse_threshold', qr_appearance.COARSE_THRESHOLD)
         p('match_mode', 'identifiers')   # or 'exact'; see qr_match.py
+        # False discards every decoded payload: the organisers' codes may
+        # carry nothing, and this flies that case on codes that do.
+        p('use_payloads', True)
         p('process_every', 1)
         # Plausibility bounds on the PHYSICAL marker. Wide on purpose: the
         # competition size is unconfirmed. This rejects nonsense, not detail.
@@ -82,6 +95,12 @@ class QrNode(Node):
 
         self.bridge = CvBridge()
         self.decoder = QrDecoder()
+        # The start marker, as a pattern. Captured during the start scan --
+        # the only time a marker is in frame before any target exists -- and
+        # cleared when a new run starts so one flight's reference cannot
+        # identify the next flight's pad.
+        self._reference = None
+        self._reference_px = 0.0
         self._frame_i = 0
         self._alt = None
         self._fx = None
@@ -120,10 +139,63 @@ class QrNode(Node):
             self._fx = float(m.k[0])
 
     def on_target(self, msg: String):
+        # A run that names a new target starts a new search. Keeping
+        # the previous flight's reference would let one flight's start
+        # marker identify the next flight's pad.
+        # The mission publishes an empty target at every START, so each
+        # flight captures its own start marker.
+        if not msg.data:
+            self._reference, self._reference_px = None, 0.0
         self.target = msg.data
         self.get_logger().info(f"target set -> '{self.target}'")
 
+    def _appearance(self, frame, quad, marker_px):
+        """This marker's pattern, and the start reference if none is held yet.
+
+        The start scan is the one moment a marker is in frame before any
+        target exists, so the largest marker seen then IS the start marker.
+        Capturing it there -- rather than being handed a reference -- keeps
+        this to what the aircraft actually saw.
+        """
+        if not bool(self.get_parameter('appearance_matching').value):
+            return None
+        seen = qr_appearance.signature(frame, quad)
+        if seen is None:
+            return None
+        held = self._reference
+        # A module-grid reading beats a coarse one at any size: the two kinds
+        # cannot be compared, and pads are read as module grids.
+        better = held is None or (
+            (seen.kind == "modules") > (held.kind == "modules")) or (
+            seen.kind == held.kind and marker_px > self._reference_px)
+        if not self.target and better:
+            self._reference, self._reference_px = seen, marker_px
+            self.get_logger().info(
+                f"start marker pattern captured ({marker_px:.0f} px)")
+        return seen
+
+    def _looks_like_target(self, seen):
+        """(is_match, score) for a pattern against the captured start marker."""
+        if seen is None or self._reference is None:
+            return False, 0.0
+        # During the start scan the reference IS this marker; a marker cannot
+        # identify itself as the delivery target.
+        if not self.target:
+            return False, 0.0
+        return qr_appearance.same_marker(
+            self._reference, seen,
+            float(self.get_parameter('appearance_threshold').value),
+            float(self.get_parameter('appearance_coarse_threshold').value))
+
+    def _comparable(self, seen):
+        """Both patterns read as module grids of one size: the look decides."""
+        ref = self._reference
+        return (seen is not None and ref is not None and seen.kind == "modules"
+                and ref.kind == "modules" and seen.n == ref.n)
+
     def _matches(self, payload: str) -> bool:
+        if self.target == APPEARANCE_ONLY:
+            return False
         if self.match_mode == 'exact':
             return bool(self.target) and payload == self.target
         return matches(self.target, payload)
@@ -164,6 +236,11 @@ class QrNode(Node):
 
     # ------------------------------------------------------------------ #
     def on_image(self, msg: Image):
+        processing_started = time.perf_counter()
+        capture = msg.header.stamp.sec + msg.header.stamp.nanosec*1e-9
+        if capture>0 and capture<=getattr(self,'_last_capture',-1):
+            return
+        self._last_capture = capture
         self._frame_i += 1
         if self._frame_i % self.process_every:
             return
@@ -173,6 +250,14 @@ class QrNode(Node):
             self.pub_offset.publish(Vector3())
             self.pub_decoded.publish(String(data=""))
             self.pub_matched.publish(Bool(data=False))
+            self.pub_detail.publish(String(data=json.dumps({
+                'capture_stamp': capture,
+                'processed_stamp': self.get_clock().now().nanoseconds*1e-9,
+                'accepted': '', 'matched': False, 'offset': [0,0,0],
+                'status': 'NOT_VISIBLE', 'reason': 'camera pose gate is closed',
+                'rejected': [], 'boxes': [], 'unread': False,
+                'processing_wall_s': time.perf_counter()-processing_started,
+            })))
             return
         try:
             frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
@@ -183,11 +268,15 @@ class QrNode(Node):
         h, w = frame.shape[:2]
         accepted = ""
         matched = False
+        basis = []
+        detail_look = 0.0
         offset = Vector3(x=0.0, y=0.0, z=0.0)
         rejected = []
         best = None            # (is_match, payload, cx, cy, px)
 
         decoded, located = self.decoder.read(frame)
+        if not bool(self.get_parameter('use_payloads').value):
+            decoded = [("", quad) for _, quad in decoded]
 
         require = bool(self.get_parameter('require_plausible').value)
         # The annotated copy is for a GCS debug view; nobody subscribed, no
@@ -201,7 +290,28 @@ class QrNode(Node):
         for info, quad in decoded:
             marker_px = self._marker_px(quad)
             good, why = self.plausible(marker_px)
-            is_match = self._matches(info)
+            # APPEARANCE FIRST, payload second. A code that encodes nothing
+            # still looks like itself, so the pattern is the evidence the
+            # rulebook asks for and the payload is the confirmation.
+            seen = self._appearance(frame, quad, marker_px)
+            by_look, look_score = self._looks_like_target(seen)
+            detail_look = max(detail_look, look_score)
+            by_payload = self._matches(info)
+            # A pad that READS as another place is not the target, however
+            # alike it looks: a decoded contradiction vetoes the pattern.
+            contradicted = (by_look and not by_payload and bool(info)
+                            and bool(self.target)
+                            and self.target != APPEARANCE_ONLY)
+            # And a payload that only SHARES identifiers with the start code
+            # ("ZONE 2 PAD 1" against a pad "2") does not outvote two module
+            # grids that plainly differ. An identical payload still counts.
+            if (by_payload and not by_look
+                    and info.strip() != self.target.strip()
+                    and self._comparable(seen)):
+                by_payload = False
+            is_match = bool((by_look and not contradicted) or by_payload)
+            if is_match:
+                basis.append("appearance" if by_look else "payload")
             quad_i = quad.astype(int)
 
             if not good and require:
@@ -233,8 +343,19 @@ class QrNode(Node):
         unread = None
         if located is not None:
             quad = located
-            if self.plausible(self._marker_px(quad))[0]:
+            marker_px = self._marker_px(quad)
+            if self.plausible(marker_px)[0]:
                 unread = quad
+                # A marker nothing could decode is exactly the case appearance
+                # matching exists for: judge its pattern anyway.
+                seen = self._appearance(frame, quad, marker_px)
+                by_look, look_score = self._looks_like_target(seen)
+                detail_look = max(detail_look, look_score)
+                if by_look:
+                    matched = True
+                    basis.append("appearance")
+                    cx, cy = quad.mean(axis=0)
+                    best = best or (True, "", float(cx), float(cy), marker_px)
                 boxes.append({"quad": quad.astype(int).tolist(),
                               "label": "UNREAD", "ok": False})
                 if annotate:
@@ -264,6 +385,10 @@ class QrNode(Node):
 
         rng = self.expected_px_range()
         self.pub_detail.publish(String(data=json.dumps({
+            "capture_stamp": capture,
+            "processed_stamp": self.get_clock().now().nanoseconds*1e-9,
+            "processing_wall_s": time.perf_counter()-processing_started,
+            "processing_latency_s": max(0,self.get_clock().now().nanoseconds*1e-9-capture),
             "accepted": accepted,
             "matched": matched,
             "target": self.target,
@@ -273,6 +398,15 @@ class QrNode(Node):
             "expect_px": [round(rng[0], 1), round(rng[1], 1)] if rng else None,
             "rejected": rejected,
             "unread": unread is not None,
+            # WHICH evidence identified it. Nothing may claim a decode it did
+            # not get: "appearance" means the pattern matched the start
+            # marker, "payload" means a decoded string did.
+            "match_basis": sorted(set(basis)),
+            "appearance_score": round(detail_look, 4),
+            "reference_captured": self._reference is not None,
+            "reference_px": round(self._reference_px, 1),
+            "reference_kind": None if self._reference is None else self._reference.kind,
+            "reference_n": None if self._reference is None else self._reference.n,
             "boxes": boxes,
         })))
 

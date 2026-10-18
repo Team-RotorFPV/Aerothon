@@ -29,6 +29,7 @@ decides is re-derived here:
 import copy
 import json
 import math
+import os
 import xml.etree.ElementTree as ET
 
 MODEL = "aerothon_iris_c1_webcam"      # the world's vehicle slot; kept stable
@@ -229,10 +230,13 @@ def build(airframe_dir, upstream_models, out_root, camera_w=1280, camera_h=720,
         "<d_gain>0.6</d_gain><i_max>1</i_max><i_min>-1</i_min></plugin>"))
 
     if "claw" in af:
-        add_claw(model, af["claw"], uri)
+        add_claw(model, af["claw"], uri,
+                 detachable=os.environ.get('AEROTHON_PAYLOAD_FIXTURE', 'loaded') != 'unloaded')
     else:
         add_hook(model, af)
 
+    from vehicle_contact_sensors import attach_vehicle_contact_sensors
+    contact_channels=attach_vehicle_contact_sensors(model)
     sdf = ET.Element("sdf", version="1.9")
     sdf.append(model)
     tree = ET.ElementTree(sdf)
@@ -240,6 +244,7 @@ def build(airframe_dir, upstream_models, out_root, camera_w=1280, camera_h=720,
     mdir = out_root / MODEL
     (mdir / "meshes").mkdir(parents=True, exist_ok=True)
     tree.write(mdir / "model.sdf", encoding="utf-8", xml_declaration=True)
+    (mdir/'vehicle_contact_sensors.json').write_text(json.dumps(contact_channels,indent=2))
     for f in (airframe_dir / "meshes").iterdir():
         (mdir / "meshes" / f.name).write_bytes(f.read_bytes())
     (mdir / "model.config").write_text(

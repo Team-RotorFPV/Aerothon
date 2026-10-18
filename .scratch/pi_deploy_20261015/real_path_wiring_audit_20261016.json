@@ -1,0 +1,40 @@
+{
+  "problem": "GCS features that passed in simulation did nothing on the real drone: wrong lidar driver, readiness lidar rate stuck at 0 Hz, camera buttons closing detector gates, idle Abort failing the next flight, Set target ignored by the mission, stale mission state locking controls, QR without camera intrinsics, devices plugged in after boot invisible to the runtime, Mission Planner UDP receiving nothing after the laptop's DHCP address changed.",
+  "scope": "Real-aircraft wiring between GCS, runtime, ROS nodes, devices and MAVLink router. Flight thresholds unchanged. mav_commander abort/start and execution_node terminal state are decision-adjacent changes covered by unit tests; no new flight run.",
+  "fixed_and_deployed": {
+    "lidar_driver": "mission2.launch.py lidar_model (default c1) -> sllidar_ros2 @460800 -> /scan_raw; see c1_lidar_driver_20261016.json",
+    "readiness_scan_qos": "readiness_node /scan subscription now sensor-data QoS; live: 'Lidar rate: Ready'",
+    "camera_pose_names": "camera_ctrl maps 0/-90/-45 deg to FORWARD/NADIR/ALIGN so detector gates open after GCS camera buttons",
+    "start_device_reason": "execution_node names which device blocks a task (camera_actuator gate itself kept: unqualified feedback)",
+    "abort_latch": "mav_commander clears an Abort older than 1 s at Start; one racing the Start stands",
+    "set_target": "aggregator also publishes /mission/target_override, which the mission reads",
+    "terminal_mission_state": "execution_node publishes COMPLETED/FAILED when a run ends (not for Outcome unknown)",
+    "qr_camera_info": "qr reads /camera_info on the aircraft, /camera/camera_info in sim/gateway",
+    "image_frame": "usb_cam frame_id camera_optical_frame (exists in URDF; camera_link did not)",
+    "hotplug_devices": "run_container.sh web: cgroup rules c 188:* and c 81:* plus /dev bind; FC UART stays refused in the container",
+    "router_broadcast": "mav_router --gcs-broadcast (default via profile_router): FC MAVLink to LAN broadcast :14550, own echo dropped, no duplicates; live: Mission Planner became an active GCS endpoint",
+    "gcs_host_field": "Connections page field for the extra unicast Mission Planner IP",
+    "texts": "LD06-specific operator messages made lidar-generic"
+  },
+  "pi": {
+    "backups": "/home/pi5/.local/state/aerothon/backup-wiring-20261016/ and backup-c1-lidar-20261016/",
+    "services_restarted": ["aerothon-gcs (runtime disconnected, disarmed)", "aerothon-router"],
+    "profile_change": "drone profile slam=true (via GCS Connections)"
+  },
+  "evidence": {
+    "unit": "sim/test_real_path_wiring.py 13 passed; sim/test_mav_router_broadcast.py 6 passed; affected suites 125 passed",
+    "live": "/scan 10 Hz in runtime; readiness Lidar rate Ready; slam_toolbox active; router 1 FCU, 1 MAVROS, 1 GCS"
+  },
+  "open": [
+    "SLAM map empty on the bench: /mavros/local_position/pose absent (no GPS fix / EKF origin), so no odom->base_link; slam_toolbox drops every scan",
+    "No camera attached (/dev/video0 absent; usb_cam node 'c270' exits); camera tab, QR/banner/redzone detectors idle",
+    "Pi lost power twice (power_reset=0, supply negotiates 3 A); needs a 5 A supply/BEC",
+    "camera_actuator ok:false by design until camera motion feedback is qualified: every flight task refuses on the real drone",
+    "pymavlink absent from the Pi image (laptop-SITL gateway path) and from WSL (2 native tests)",
+    "Laptop SITL profile points at 192.168.0.102 (the Pi) instead of the laptop",
+    "Offline satellite tiles cover only the sim site; field tiles 502 without internet",
+    "Graphs camera/lidar Hz empty on the real path; EKF datum display reads estimator_status ArduPilot never sends",
+    "C1 mount yaw/mirror unmeasured (0/false); re-run GCS lidar calibration",
+    "stream_rate_keeper requests ~60% of the 115200 TELEM3 link"
+  ]
+}

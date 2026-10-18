@@ -1,61 +1,30 @@
 #!/usr/bin/env python3
-"""Corridor navigation by follow-the-gap, with recovery.
+"""Corridor navigation over connected lidar-observed free space.
 
-WHAT REPLACED WHAT (Phase 5)
-
-  The previous controller computed a front/left/right sector minimum, slowed as
-  the front closed, stopped inside stop_dist, and nudged sideways in proportion
-  to the left/right imbalance. Two consequences, both seen live:
-
-    * With symmetric walls the imbalance is zero, so when something blocks the
-      front it commands a full stop and NOTHING ELSE. The first end-to-end run
-      sat at x=4.86 for over 250 s with front_m=0.77, cmd_vx=0.0,
-      centering_err=-0.0 — stopped, centred, and permanently stuck.
-    * It could not choose a side to pass an obstacle, because it never measured
-      obstacle extent — only three sector minima.
-
-  This version steers toward the largest navigable GAP in the forward arc,
-  which handles centring, obstacle avoidance and pass-side selection with one
-  mechanism, and escalates through recovery states rather than stalling.
-
-FRAME CONVENTION — unchanged from Phase 2 and still the thing to be careful of.
-  MAVROS takes body-frame setpoints in ROS FLU and converts to FRD itself, so
-  on /mavros/setpoint_raw/local with coordinate_frame 8/9:
-      velocity.x = forward     velocity.y = LEFT      velocity.z = UP
-  Getting this backwards once already flew the aircraft into a wall.
-
-STATES
-  CRUISE    a gap is open; drive toward its bearing
-  BLOCKED   no acceptable gap; hold and re-evaluate briefly
-  BACKOFF   reverse slowly to open the field of view, then try again
-  STUCK     escalation exhausted; reported so the mission can fail closed
-
-LIDAR PRE-PROCESSING (goal.md Q21, previously absent)
-  * angular masking of the frame/arm sectors
-  * range clamping to [range_min_valid, range_max_valid]
-  * median filter to drop isolated outliers (dust, sunlight speckle)
-  * stale-scan failsafe: no scan for stale_scan_s means stop, not coast
-
-Topics
-  sub  <scan_topic>                sensor_msgs/LaserScan
-  sub  /avoidance/enable           std_msgs/Bool
-  sub  /avoidance/cruise           std_msgs/Float32
-  pub  /mavros/setpoint_raw/local  mavros_msgs/PositionTarget  body velocity
-  pub  /avoidance/status           geometry_msgs/Vector3  x=front y=gap_bearing z=cmd_vx
-  pub  /avoidance/detail           std_msgs/String        JSON diagnostics
+All paths and recovery velocities enforce 0.70 m centre-to-surface clearance.
+Unobserved reverse paths, stale poses/scans and exhausted recovery stop.
+MAVROS body velocities use FLU: +x forward, +y left, +z up.
+No venue geometry or simulator truth is consumed here.
 """
 
 import json
 import math
+import time
+from collections import deque
 
 import numpy as np
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import qos_profile_sensor_data, QoSProfile, DurabilityPolicy
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Bool, Float32, String
-from geometry_msgs.msg import PoseStamped, Vector3
+from geometry_msgs.msg import PoseStamped, TwistStamped, Vector3
 from mavros_msgs.msg import PositionTarget
+from avoidance.fast_connected_planner_candidate import FastConnectedPlanner as LocalPlanner
+from avoidance.scan_geometry import register_rays
+from rclpy.time import Time
+from tf2_ros import Buffer, TransformException
+from tf2_msgs.msg import TFMessage
 
 # PositionTarget type_mask: use vx,vy,vz + yaw_rate; ignore pos, accel, yaw.
 IGN_PX, IGN_PY, IGN_PZ = 1, 2, 4
@@ -93,8 +62,10 @@ class VelocityController(Node):
         super().__init__('velocity_controller')
         p = self.declare_parameter
         p('scan_topic', '/scan')
+        p('body_frame', 'base_link')
         p('rate_hz', 20.0)
         p('cruise_speed', 0.8)
+        p('motion_computation_budget_s', 0.20)
         p('max_lateral', 0.6)
         # Yaw rate CAP, not the yaw rate itself -- see _yaw_rate_for(). This
         # was published directly as sp.yaw_rate, so at its old value of 0.0
@@ -112,13 +83,7 @@ class VelocityController(Node):
         p('yaw_follow_limit_deg', 60.0)   # max heading off the corridor axis; see _yaw_rate_for
         p('safety_radius', 0.8)       # goal.md Q8 keep-out bubble (m)
         p('min_gap_width_deg', 14.0)  # narrower than this is not a way through
-        # Physical passage test (find_gap). Iris: 0.25 m arm plus 0.127 m
-        # prop radius ~= 0.4 m, plus 0.25 m for the airframe's lag behind a
-        # velocity command; the comfort strip centres it. At 0.45 m live run
-        # 4 slid down o2's flank 0.17 m off the block and hit it.
-        # Swept in sim/test_slalom_traverse.py against the shipped return lane
-        # with velocity lag: 0.75+ finds no heading through its 2.07 m gaps,
-        # 0.7 / 1.3 clears every block by 0.60-0.65 m from all three starts.
+        # Hard centre-to-surface clearance, also enforced by LocalPlanner.
         p('passage_half_width', 0.7)
         p('airframe_radius', 0.4)
         p('passage_comfort_width', 1.3)
@@ -143,6 +108,7 @@ class VelocityController(Node):
         p('corridor_enter_ticks', 10)     # sustained ENCLOSED before "inside"
         p('progress_window_s', 12.0)      # look-back for forward progress
         p('min_progress_m', 0.8)          # less than this over the window = stalled
+        p('steer_min_step_m', 0.3)        # a first waypoint nearer than this is a stub (steer_point)
         # ---- altitude hold ----
         # `velocity.z = 0.0` is a command for zero vertical RATE, not for a
         # held altitude: any thrust bias or disturbance integrates into a sink.
@@ -151,24 +117,21 @@ class VelocityController(Node):
         # (correctly) aborted. The loop has to be closed.
         p('alt_hold_gain', 0.8)       # m/s of vz per metre of error
         p('max_vz', 0.6)              # ceiling on the correction
-        # ---- wind: a disturbance observer on the lateral axis ----
-        # The navigator steers by choosing a heading; a gust pushes the
-        # airframe sideways without its knowledge until the next scan shows
-        # it off the strip. The observer compares the lateral velocity the
-        # airframe HAS with the one it was told to have, delayed by how it
-        # follows a command (`vel_response_s`, the lag test_slalom_traverse
-        # calibrates), and subtracts what is left. Lateral only: wind along
-        # the lane only changes speed, which the reach law already governs,
-        # and compensating it would wind up every time the navigator brakes.
-        # Capped, so a pinned airframe cannot be pushed harder into what
-        # pins it. sim/test_corridor_stress.py: gusty 8 m/s crosswind.
+        # Compare measured world velocity with the lagged command response.
+        # Keep the observer in world coordinates as aircraft yaw changes.
+        # These response/filter settings have simulation evidence; hardware
+        # response and pose noise remain bench qualification items.
         p('vel_response_s', 0.6)
-        p('drift_filter_s', 0.4)
-        p('drift_comp_gain', 0.8)
-        p('max_drift_comp', 0.5)
+        # Rendered FCU identification found ~0.38 s command transport delay.
+        # This simulation setting must be remeasured before hardware flight.
+        p('vel_command_delay_s', 0.4)
+        p('drift_filter_s', 0.05)
+        p('drift_comp_gain', 1.0)
+        p('max_drift_comp', 1.5)
         p('backoff_ticks', 40)
         p('backoff_speed', 0.35)
         p('max_backoffs', 3)
+        p('braking_accel_mps2', 0.5)
 
         self.enabled = False
         self.cruise = float(self.get_parameter('cruise_speed').value)
@@ -182,10 +145,33 @@ class VelocityController(Node):
         self._pos = None
         self._alt = None            # current altitude, from /local_position/pose
         self._hold_alt = None       # altitude this traversal should maintain
+        self._fcu_vz = None
+        self._alt_motion_origin = None
+        self._alt_motion_previous = None
+        self._alt_motion_displacement = 0.0
+        self._alt_motion_fault = ''
         self._yaw = None            # current heading, from the pose
         self._axis = None           # the corridor axis this traversal started on
         self._progress_ref = None
         self._progress_t = None
+        self._origin = None
+        self._max_progress = 0.0
+        self._entered_progress = None
+        self._pose_t = None
+        self._fcu_velocity = None
+        self._fcu_velocity_t = None
+        self._ground_velocity_history = deque(maxlen=100)
+        self._velocity_fault = ''
+        self._measured_speed = 0.0
+        self._pose_history = deque(maxlen=100)
+        self._scan_pose = None
+        self._scan_orientation = None
+        self._tf_buffer = self._tf_listener = None
+        self._mount_frames = {str(self._g('body_frame'))}
+        self._planner = LocalPlanner(float(self._g('passage_half_width')),
+                                     occupied_radius=float(self._g('airframe_radius')))
+        self._path_world = []
+        self._plan_t = None
         self._open_ticks = 0
         # You cannot exit a corridor you were never inside. Without this the
         # detector fired on the open apron BEFORE the corridor: a live run
@@ -202,7 +188,16 @@ class VelocityController(Node):
                                  qos_profile_sensor_data)
         self.create_subscription(PoseStamped, '/mavros/local_position/pose',
                                  self._on_pose, qos_profile_sensor_data)
+        self.create_subscription(TwistStamped, '/mavros/local_position/velocity_local',
+                                 self._on_velocity, qos_profile_sensor_data)
         self.create_subscription(Bool, '/avoidance/enable', self._on_enable, 10)
+        self.intent_enabled = False
+        self._intent_speed_cap = self.cruise
+        self._intent = None
+        self._intent_t = None
+        self._intent_steady = None
+        self.create_subscription(Bool, '/avoidance/intent_enabled', self._on_intent_enable, 10)
+        self.create_subscription(Vector3, '/avoidance/intent', self._on_intent, 10)
         self.create_subscription(Float32, '/avoidance/cruise', self._on_cruise, 10)
         self.create_subscription(Float32, '/avoidance/hold_alt',
                                  self._on_hold_alt, 10)
@@ -218,8 +213,24 @@ class VelocityController(Node):
     def _g(self, n):
         return self.get_parameter(n).value
 
+    def _on_intent_enable(self, m):
+        if self.intent_enabled != m.data:
+            self._axis = None
+            self._origin = None
+            self._planner.path = []
+            self._intent = None
+        self.intent_enabled = m.data
+
+    def _on_intent(self, m):
+        self._intent = m
+        self._intent_t = self._now()
+        self._intent_steady = time.monotonic()
+
     def _on_enable(self, m: Bool):
         if m.data and not self.enabled:
+            self._alt_motion_origin = self._alt_motion_previous = None
+            self._alt_motion_displacement = 0.0
+            self._alt_motion_fault = ''
             self.state = "CRUISE"
             self._blocked = 0
             self._backoff = 0
@@ -235,16 +246,37 @@ class VelocityController(Node):
             # The corridor's axis: the heading the aircraft is handed control
             # on, square to the banner. Latched on the first steering tick.
             self._axis = None
+            self._origin = self._pos
+            self._max_progress = 0.0
+            self._entered_progress = None
+            self._path_world = []
+            self._plan_t = None
             self._last_gap_bearing = None
             self._reset_drift()
+            if self._velocity_fresh():
+                # Existing EKF motion is the initial response state, not a
+                # newly discovered disturbance at control handover.
+                self._ground_world = self._fcu_velocity.copy()
+                self._expect_world = self._ground_world.copy()
+                self._model_t = self._fcu_velocity_t
+                self._drift_prev,self._drift_prev_t = self._pos,self._fcu_velocity_t
             # Latch the altitude to hold for this traversal. The mission can
             # override it on /avoidance/hold_alt; without that, whatever the
             # aircraft was flying at when avoidance was handed control is the
             # honest default.
             if self._alt is not None:
                 self._hold_alt = self._alt
+                if (math.isfinite(self._alt) and self._velocity_fresh()
+                        and self._pose_t is not None
+                        and 0 <= self._now()-self._pose_t <= float(self._g('stale_scan_s'))
+                        and self._fcu_vz is not None):
+                    self._alt_motion_origin = self._alt
+                    self._alt_motion_previous = (self._now(), self._fcu_vz)
         if not m.data:
             self._hold_alt = None
+            self._alt_motion_origin = self._alt_motion_previous = None
+            self._alt_motion_displacement = 0.0
+            self._alt_motion_fault = ''
         self.enabled = m.data
 
     def _on_cruise(self, m: Float32):
@@ -259,7 +291,21 @@ class VelocityController(Node):
         """
         if self._hold_alt is None or self._alt is None:
             return 0.0
-        err = self._hold_alt - self._alt
+        if not all(math.isfinite(value) for value in (self._hold_alt,self._alt)):
+            return 0.0
+        if self._alt_motion_origin is not None:
+            if not self._velocity_fresh() or self._alt_motion_fault:
+                return 0.0
+            # Preserve the physical handover height. Differencing barometer
+            # fixes turns estimator wander into actual climbing or sinking.
+            altitude = self._alt_motion_origin+self._alt_motion_displacement
+        elif self._fcu_velocity_t is not None:
+            # A received but unusable motion stream cannot fall back to
+            # trusting changing barometer fixes as physical displacement.
+            return 0.0
+        else:
+            altitude = self._alt
+        err = self._hold_alt - altitude
         vz = float(self._g('alt_hold_gain')) * err
         cap = float(self._g('max_vz'))
         return max(-cap, min(cap, vz))
@@ -275,13 +321,86 @@ class VelocityController(Node):
         self._hold_alt = float(m.data) if m.data > 0.0 else None
 
     def _on_pose(self, m: PoseStamped):
+        now = self._now()
+        stamp = m.header.stamp.sec + m.header.stamp.nanosec*1e-9
+        previous_t = self._pose_t
+        previous = self._pos
         self._pos = (m.pose.position.x, m.pose.position.y)
+        self._pose_t = min(now, stamp) if stamp > 0 else now
+        if previous is not None and previous_t is not None and now > previous_t:
+            self._measured_speed = math.dist(previous, self._pos)/(now-previous_t)
         # z was thrown away here, which is why "hold altitude" could never be
         # more than a comment: the controller did not know its own altitude.
         self._alt = float(m.pose.position.z)
         q = m.pose.orientation
         self._yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y),
                                1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+        self._pose_history.append((self._pose_t,*self._pos,self._yaw,(q.x,q.y,q.z,q.w)))
+
+    def _velocity_fresh(self):
+        return (not self._velocity_fault and not self._alt_motion_fault
+                and self._fcu_velocity_t is not None
+                and 0 <= self._now()-self._fcu_velocity_t <= float(self._g('stale_scan_s')))
+
+    def _on_velocity(self, message: TwistStamped):
+        # MAVROS velocity_local values are local ENU even when the header
+        # names base_link. These values must not be rotated into body axes.
+        now = self._now()
+        stamp = message.header.stamp.sec+message.header.stamp.nanosec*1e-9
+        velocity = np.array([message.twist.linear.x,message.twist.linear.y])
+        vz = float(message.twist.linear.z)
+        if not np.isfinite(velocity).all() or not math.isfinite(vz) or stamp < 0 or stamp > now+.1:
+            self._velocity_fault = 'invalid FCU velocity observation'
+            if self.enabled and self._alt_motion_origin is not None:
+                self._alt_motion_fault = 'invalid vertical motion capture'
+            return
+        stamp = min(now,stamp) if stamp > 0 else now
+        if self._fcu_velocity_t is not None and stamp <= self._fcu_velocity_t:
+            return
+        if self.enabled and self._alt_motion_previous is not None:
+            previous_t, previous_vz = self._alt_motion_previous
+            if stamp > previous_t:
+                dt = stamp-previous_t
+                if dt > 3*float(self._g('stale_scan_s')):
+                    self._alt_motion_fault = 'vertical motion capture gap'
+                elif not self._alt_motion_fault:
+                    # A gap up to 3x stale_scan_s is bridged by the two FCU
+                    # velocities either side of it (still no barometer
+                    # trust). Latching every gap also made _velocity_fresh()
+                    # false for the rest of the traversal: one telemetry
+                    # hiccup (CPU load in SITL; a busy 115200 TELEM link on the
+                    # aircraft) froze the aircraft in the corridor until the
+                    # battery failed (16 Oct campaign).
+                    self._alt_motion_displacement += .5*dt*(previous_vz+vz)
+                self._alt_motion_previous = (stamp,vz)
+        self._fcu_vz = vz
+        self._fcu_velocity,self._fcu_velocity_t = velocity,stamp
+        self._ground_velocity_history.append((stamp,velocity.copy()))
+        self._velocity_fault = ''
+
+    def _scan_ground_displacement(self):
+        """Short capture-to-pose motion without differencing noisy GPS fixes."""
+        start,end = self._scan_t,self._pose_t
+        if start is None or end is None or end < start:
+            raise ValueError('lidar motion capture interval unavailable')
+        if not self._velocity_fresh():
+            raise ValueError('ground velocity capture stale')
+        if end == start:
+            return np.zeros(2)
+        history = list(self._ground_velocity_history)
+        if (not history or start < history[0][0] or
+                end-history[-1][0] > .06+1e-9):
+            raise ValueError('ground velocity does not cover lidar capture')
+        times = np.array([t for t,v in history])
+        velocities = np.array([v for t,v in history])
+        # The last velocity may precede pose delivery by at most one nominal
+        # FCU capture interval. Longer gaps are unknown, never GPS movement.
+        knots = np.concatenate(([start],times[(times>start)&(times<end)],[end]))
+        for a,b in zip(times,times[1:]):
+            if a < end and b > start and b-a > .12:
+                raise ValueError('ground velocity capture history has a gap')
+        values = np.column_stack([np.interp(knots,times,velocities[:,axis]) for axis in (0,1)])
+        return np.sum((values[:-1]+values[1:])*.5*np.diff(knots)[:,None],axis=0)
 
     def stalled(self):
         """True when the aircraft has not covered ground recently.
@@ -299,7 +418,10 @@ class VelocityController(Node):
         window = float(self._g('progress_window_s'))
         if (now - self._progress_t) < window:
             return False
-        moved = math.dist(self._pos, self._progress_ref)
+        axis = self._axis if self._axis is not None else self._yaw
+        axis = axis if axis is not None else 0.0
+        moved = ((self._pos[0]-self._progress_ref[0])*math.cos(axis)
+                 +(self._pos[1]-self._progress_ref[1])*math.sin(axis))
         if moved < float(self._g('min_progress_m')):
             # Keep this expired reference until movement earns a new window.
             # Resetting it on every stall produced a single blocked tick per
@@ -310,7 +432,65 @@ class VelocityController(Node):
 
     def _on_scan(self, m: LaserScan):
         self.scan = m
-        self._scan_t = self._now()
+        stamp = m.header.stamp.sec + m.header.stamp.nanosec*1e-9
+        self._scan_t = min(self._now(), stamp) if stamp > 0 else self._now()
+        self._scan_pose = None
+        self._scan_orientation = None
+        if self._pose_history:
+            closest = min(self._pose_history,key=lambda p:abs(p[0]-self._scan_t))
+            if abs(closest[0]-self._scan_t)<=.2:
+                self._scan_pose = closest[1:4]
+                self._scan_orientation = closest[4]
+
+    def _registered_scan(self, bearings, ranges):
+        if self._scan_pose is None or self._scan_orientation is None:
+            raise ValueError('capture-time aircraft pose unavailable')
+        frame = self.scan.header.frame_id
+        if not frame:
+            raise ValueError('lidar frame missing')
+        if frame == self._g('body_frame'):
+            translation, quaternion = (0,0,0), (0,0,0,1)
+        else:
+            if self._tf_buffer is None:
+                self._tf_buffer = Buffer()
+                self._tf_listener = self.create_subscription(
+                    TFMessage, '/tf_static', self._on_static_mounts,
+                    QoSProfile(depth=100,durability=DurabilityPolicy.TRANSIENT_LOCAL))
+            try:
+                transform = self._tf_buffer.lookup_transform(
+                    self._g('body_frame'), frame, Time(seconds=self._scan_t)).transform
+            except TransformException as error:
+                raise ValueError(f'lidar mount {self._g("body_frame")} <- {frame} unavailable: {error}') from error
+            t,q = transform.translation, transform.rotation
+            translation, quaternion = (t.x,t.y,t.z), (q.x,q.y,q.z,q.w)
+        current_xy = self._pos
+        self._scan_motion_basis = 'paired FCU pose fallback'
+        self._scan_motion_world = None
+        if self._fcu_velocity_t is not None:
+            displacement = self._scan_ground_displacement()
+            current_xy = np.asarray(self._scan_pose[:2])+displacement
+            self._scan_motion_basis = 'fresh FCU world ground velocity captures'
+            self._scan_motion_world = displacement.tolist()
+        return register_rays(bearings,ranges,translation,quaternion,
+                             self._scan_pose[:2],self._scan_orientation,
+                             current_xy,self._yaw)
+
+    def _on_static_mounts(self, message):
+        # Only relative equipment calibration below the aircraft body belongs
+        # in this buffer. Never subscribe to dynamic TF or install an absolute
+        # vehicle pose. Aircraft motion comes exclusively from the FCU pose.
+        forbidden={'world','map','odom',str(self._g('body_frame'))}
+        pending=[t for t in message.transforms if t.child_frame_id not in forbidden]
+        while pending:
+            remaining=[]
+            for transform in pending:
+                if transform.header.frame_id in self._mount_frames:
+                    self._tf_buffer.set_transform_static(transform,'onboard_equipment_mount')
+                    self._mount_frames.add(transform.child_frame_id)
+                else:
+                    remaining.append(transform)
+            if len(remaining)==len(pending):break
+            pending=remaining
 
     def _now(self):
         return self.get_clock().now().nanoseconds / 1e9
@@ -389,53 +569,13 @@ class VelocityController(Node):
         strips = self._strips(bearings, ranges)
         gap = self._find_gap(bearings, ranges,
                              float(self._g('passage_half_width')), strips)
-        if gap is None:
-            # Nothing fits the full strip. Before calling it blocked, try the
-            # bare airframe plus 0.1 m: a tight spot should be crept through,
-            # not frozen in front of.
-            gap = self._find_gap(bearings, ranges,
-                                 float(self._g('airframe_radius')) + 0.1,
-                                 strips)
-        if gap is None:
-            gap = self._escape(bearings, ranges)
         return gap
-
-    def _escape(self, bearings, ranges):
-        """Already too close to something: creep the way that opens room.
-
-        Every forward heading is inside the strip of a return a few tens of
-        centimetres off. Backing off blind is what pinned seed 1002 against a
-        pillar. Instead take the heading whose line passes the near returns
-        widest, and give it a reach just past the stop distance so the speed
-        law creeps (~0.15 m/s) rather than drives.
-        """
-        fov = math.radians(float(self._g('search_fov_deg'))) / 2.0
-        r_air = float(self._g('airframe_radius'))
-        stop = float(self._g('stop_dist'))
-        b, r = np.asarray(bearings), np.asarray(ranges)
-        sel = r < 1.5
-        if not sel.any():
-            return None
-        near_x, near_y = _polar_xy(b[sel], r[sel])
-        step = math.radians(2.0)
-        th, c, s = _headings(int(fov / step), step)
-        x, y = near_x[None, :], near_y[None, :]
-        ahead = x * c + y * s > 0.0
-        lat = np.abs(-x * s + y * c)
-        m = np.where(ahead, lat, np.inf).min(axis=1)
-        m = np.where(ahead.any(axis=1), m, 1.5)
-        score = m - 0.05 * np.abs(th)
-        j = int(np.argmax(score))          # the first of equal bests, as before
-        if m[j] < r_air - 0.05:
-            return None
-        return float(th[j]), step, stop + 0.3
 
     def _strips(self, bearings, ranges):
         """Every candidate heading against every return, for _find_gap.
 
-        None of it depends on the strip width, so the full-strip pass and the
-        bare-airframe retry share one computation. Rows are headings -n..n in
-        2 degree steps, columns returns.
+        Rows are headings -n..n in 2 degree steps, columns are returns. The
+        caller always uses the full passage width.
         """
         fov = math.radians(float(self._g('search_fov_deg'))) / 2.0
         comfort = float(self._g('passage_comfort_width'))
@@ -471,7 +611,7 @@ class VelocityController(Node):
         # contact: an aircraft already beside a block has to be allowed to
         # peel AWAY from it, which a full-margin strip forbids in every
         # direction and so freezes it there.
-        hw = r_air + (half_w - r_air) * r_1
+        hw = np.full_like(r_1, half_w)
         narrow_of = np.where(ahead & (lat <= hw[None, :]), along, look).min(
             axis=1, initial=look)
         # THE TURN PENALTY SCALES WITH HOW OPEN STRAIGHT AHEAD IS. It keeps
@@ -631,42 +771,313 @@ class VelocityController(Node):
         return max(-cap, min(cap, rate))
 
     def _reset_drift(self):
-        self._drift = 0.0            # lateral disturbance, body left, m/s
-        self._expect_vy = 0.0        # lateral velocity the last commands imply
-        self._drift_prev = None      # (x, y) at the last pose that moved
-        self._drift_ticks = 0        # ticks since then
+        self._drift = 0.0
+        self._response_known = False
+        self._expect_world = np.zeros(2)
+        self._wind_world = np.zeros(2)
+        self._wind_rate_world = np.zeros(2)
+        self._wind_innovation_world = np.zeros(2)
+        self._ground_world = np.zeros(2)
+        self._drift_prev = None
+        self._drift_prev_t = None
+        self._model_t = None
+        self._last_command_world = np.zeros(2)
+        self._command_history = deque(maxlen=400)
+        self._sent_heading = {}
+        self._yaw_command_history = deque(maxlen=400)
+
+    def _heading_at(self, stamp):
+        """Observed past heading or a queued-command forecast, from FCU only."""
+        history = self._pose_history
+        if not history:
+            return self._yaw or 0.0
+        latest = history[-1]
+        if stamp <= latest[0]:
+            right = latest
+            for left in reversed(history):
+                if left[0] <= stamp:
+                    if right[0] <= left[0]:
+                        return left[3]
+                    delta = math.atan2(math.sin(right[3]-left[3]),
+                                       math.cos(right[3]-left[3]))
+                    return left[3]+delta*(stamp-left[0])/(right[0]-left[0])
+                right = left
+            return history[0][3]
+        rate = 0.0
+        for previous in reversed(history):
+            span = latest[0]-previous[0]
+            if span > 1e-6:
+                rate = math.atan2(math.sin(latest[3]-previous[3]),
+                                  math.cos(latest[3]-previous[3]))/span
+                break
+        heading, at = latest[3], latest[0]
+        delay = float(self._g('vel_command_delay_s'))
+        for sent, target_rate in self._yaw_command_history:
+            arrival = sent+delay
+            if latest[0] < arrival <= stamp:
+                heading += rate*(arrival-at)
+                at, rate = arrival, target_rate
+        return heading+rate*(stamp-at)
+
+    def _command_known(self, stamp):
+        """Has an own velocity packet reached the FCU under the declared delay?"""
+        return bool(self._command_history) and self._command_history[0][0]+float(
+            self._g('vel_command_delay_s'))<=stamp+1e-9
+
+    def _effective_command(self, stamp):
+        """Previously transmitted world command that reaches the FCU now."""
+        cutoff = stamp-float(self._g('vel_command_delay_s'))
+        for sent,command in reversed(self._command_history):
+            if sent<=cutoff+1e-9:
+                # The stored earth vector uses heading at transmission.
+                # ArduPilot instead converts its body vector at receipt.
+                issued_heading = self._sent_heading.get(sent)
+                if issued_heading is None:
+                    issued_heading = self._heading_at(sent)
+                delta = self._heading_at(sent+float(self._g('vel_command_delay_s')))-issued_heading
+                c,s = math.cos(delta),math.sin(delta)
+                return np.array([c*command[0]-s*command[1],
+                                 s*command[0]+c*command[1]])
+        return np.zeros(2)
 
     def _drift_comp(self, vy):
-        """`vy` with the observed lateral drift taken off; updates the observer.
+        # Kept for callers that inspect lateral compensation.
+        return self._compensated(0.0,vy)[1]
 
-        Runs once per steering tick at `rate_hz`. The velocity is measured
-        between poses that differ, over however many ticks separate them, so
-        a pose stream slower than the tick reads as its true average rather
-        than as zero followed by a jump.
-        """
+    def _compensated(self, vx, vy):
         if self._pos is None or self._yaw is None:
-            return vy
-        dt = 1.0 / float(self._g('rate_hz'))
-        self._drift_ticks += 1
+            return vx,vy
+        now=self._now()
+        use_velocity = self._velocity_fresh()
+        measured_t=self._fcu_velocity_t if use_velocity else self._pose_t if self._pose_t is not None else now
+        # The EKF sample describes motion at its header stamp. Comparing it
+        # with a response already advanced to receipt time invents a wind
+        # pulse during every acceleration and reverses its sign when braking.
+        # Repeated samples must not advance the observer's response state.
+        dt=0.0 if self._model_t is None else max(0,measured_t-self._model_t)
+        # The preceding position controller retains its target until our
+        # first packet arrives. Its target response is not a zero command.
+        # Start residual assessment after a measured seed at that boundary.
+        response_known=self._model_t is not None and self._command_known(self._model_t)
+        self._response_known=response_known
+        # Integrate delayed commands at their actual arrival boundaries.
+        # Comparing current motion with the newest transmitted command makes
+        # actuator lag look like wind and closes an unstable correction loop.
+        if response_known and dt>0:
+            delay=float(self._g('vel_command_delay_s'))
+            boundaries=[self._model_t]+[sent+delay for sent,_ in self._command_history
+                if self._model_t<sent+delay<measured_t]+[measured_t]
+            for start,end in zip(boundaries,boundaries[1:]):
+                command=self._effective_command((start+end)/2)
+                fraction=min(1.0,(end-start)/float(self._g('vel_response_s')))
+                self._expect_world += (command-self._expect_world)*fraction
+        self._model_t=measured_t
+        if use_velocity:
+            self._ground_world = self._fcu_velocity.copy()
         if self._drift_prev is None:
-            self._drift_prev, self._drift_ticks = self._pos, 0
-        elif self._pos != self._drift_prev:
-            span = self._drift_ticks * dt
-            dx = self._pos[0] - self._drift_prev[0]
-            dy = self._pos[1] - self._drift_prev[1]
-            meas = (-dx * math.sin(self._yaw) + dy * math.cos(self._yaw)) / span
-            f = min(1.0, span / float(self._g('drift_filter_s')))
-            self._drift += ((meas - self._expect_vy) - self._drift) * f
-            self._drift_prev, self._drift_ticks = self._pos, 0
+            self._drift_prev,self._drift_prev_t = self._pos,measured_t
+        elif measured_t>self._drift_prev_t:
+            span = measured_t-self._drift_prev_t
+            if not use_velocity:
+                self._ground_world = (np.array(self._pos)-self._drift_prev)/span
+            if response_known:
+                residual = self._ground_world-self._expect_world
+                f = min(1.0,span/float(self._g('drift_filter_s')))
+                previous = self._wind_world.copy()
+                self._wind_world += (residual-self._wind_world)*f
+                self._wind_innovation_world = residual-self._wind_world
+                rate = (self._wind_world-previous)/span
+                rate *= min(1.0,.8/max(1e-6,float(np.linalg.norm(rate))))
+                self._wind_rate_world += (rate-self._wind_rate_world)*f
+            self._drift_prev,self._drift_prev_t = self._pos,measured_t
+        if not response_known:
+            self._expect_world=self._ground_world.copy()
+            self._wind_world=np.zeros(2);self._wind_rate_world=np.zeros(2)
+            self._wind_innovation_world=np.zeros(2)
+        c,s = math.cos(self._yaw),math.sin(self._yaw)
+        wind = np.array([[c,s],[-s,c]]) @ self._wind_world
+        self._drift = float(wind[1])
+        rate = np.array([[c,s],[-s,c]]) @ self._wind_rate_world
+        prediction = float(self._g('vel_response_s'))
+        compensation = float(self._g('drift_comp_gain'))*(wind+prediction*rate)
         cap = float(self._g('max_drift_comp'))
-        comp = max(-cap, min(cap, float(self._g('drift_comp_gain')) * self._drift))
-        out = vy - comp
-        self._expect_vy += (out - self._expect_vy) * min(
-            1.0, dt / float(self._g('vel_response_s')))
-        return out
+        compensation *= min(1.0,cap/max(1e-6,float(np.linalg.norm(compensation))))
+        desired = np.array([vx,vy])
+        # Act only on the disturbance innovation, not the ordinary command
+        # response lag. Startup must retain the configured cruise speed.
+        feedback = -.7*(np.array([[c,s],[-s,c]]) @ self._wind_innovation_world)
+        feedback *= min(1.0,.8/max(1e-6,float(np.linalg.norm(feedback))))
+        output = desired-compensation+feedback
+        return float(output[0]),float(output[1])
 
     def _publish(self, vx, vy, front, bearing, extra):
-        vy = self._drift_comp(vy)
+        computation_started = self._now()
+        budget = float(self._g('motion_computation_budget_s'))
+        if not math.isfinite(budget) or budget < 0:
+            raise ValueError('motion computation budget must be finite and nonnegative')
+        extra = dict(extra)
+        if 'fault' not in extra and (self.scan_stale() or
+                self._pose_t is None or self._now()-self._pose_t > float(self._g('stale_scan_s')) or
+                self._velocity_fault or (self._fcu_velocity_t is not None and not self._velocity_fresh())):
+            extra['fault'] = 'post-planning flight observations stale'
+        fresh = 'fault' not in extra
+        desired = (vx,vy)
+        yaw_rate = float(self._yaw_rate_for(bearing)) if fresh and abs(vx)+abs(vy)>1e-6 else 0.0
+        if getattr(self, 'intent_enabled', False) and fresh and self._intent is not None:
+            yaw_rate = max(-float(self._g('max_yaw_rate')), min(float(self._g('max_yaw_rate')), self._intent.z))
+        if fresh:
+            vx,vy = self._compensated(vx,vy)
+            c,s = math.cos(self._yaw or 0.0),math.sin(self._yaw or 0.0)
+            rotation = np.array([[c,s],[-s,c]])
+            ground = rotation @ self._ground_world
+            wind = rotation @ self._wind_world
+            wind_rate = rotation @ self._wind_rate_world
+            delay = float(self._g('vel_command_delay_s'))
+            receipt_turn = self._heading_at(self._now()+budget+delay)-(self._yaw or 0.0)
+            def disturbance_motion_clear(command, wind, wind_rate):
+                forecast_now = self._now()
+                # Preserve the supported FCU-pose finite-difference fallback.
+                # Once an EKF velocity stream exists, stale captures still stop.
+                sample_epoch = min(self._pose_t, self._fcu_velocity_t) if self._fcu_velocity_t is not None else self._pose_t
+                capture_age = max(0., forecast_now-sample_epoch)
+                packet_wait = capture_age+budget+float(self._g('vel_command_delay_s'))
+                # Predict velocity-loop lag from measured ground velocity,
+                # followed by braking. Motor compensation is not travel.
+                target = np.array(command)+wind
+                velocity = ground.copy()
+                point = np.zeros(2)
+                trajectory = [point.copy()]
+                dt = .05
+                tau = float(self._g('vel_response_s'))
+                delay = float(self._g('vel_command_delay_s'))
+                # Check the lagged braking tail too. One response time leaves
+                # 37% of incoming velocity, which can still cross a surface.
+                braking = float(self._g('braking_accel_mps2'))
+                duration = packet_wait+6*tau+max(float(np.linalg.norm(target)),
+                                    float(np.linalg.norm(ground)))/braking
+                for t in np.arange(0,max(.1,duration),dt):
+                    if t<packet_wait:
+                        # A stop cannot cancel commands already in transit.
+                        if self._command_known(sample_epoch+t):
+                            goal = rotation @ self._effective_command(sample_epoch+t)+wind+t*wind_rate
+                        else:
+                            # Retain observed incoming motion while the prior
+                            # position target is unknown. Zero would shorten
+                            # the predicted stopping distance at handover.
+                            goal = ground.copy()
+                    else:
+                        # Forecast compensation counters a changing measured
+                        # disturbance. Testing that command against constant
+                        # wind rejects it as overshoot and loses cancellation
+                        # during a rising gust. Bound the forecast to the same
+                        # command/response interval, then certify the full
+                        # braking tail as before.
+                        if t<packet_wait+tau:
+                            # ArduPilot converts each body velocity to earth
+                            # coordinates at receipt. Turning during transport
+                            # changes that conversion; the received vector
+                            # then stays fixed during its response interval.
+                            angle=receipt_turn
+                            co,si=math.cos(angle),math.sin(angle)
+                            turning=np.array([[co,-si],[si,co]]) @ np.array(command)
+                            goal = turning+wind+t*wind_rate
+                        else:
+                            goal = np.zeros(2)
+                    change = (goal-velocity)*min(1.0,dt/tau)
+                    if t>=packet_wait+tau:
+                        # The declared braking acceleration is a bound, not
+                        # just a horizon. A fast exponential response must
+                        # not shorten the required stopping distance.
+                        change *= min(1.0,braking*dt/max(1e-6,float(np.linalg.norm(change))))
+                    velocity += change
+                    nxt = point+velocity*dt
+                    trajectory.append(nxt.copy())
+                    point = nxt
+                return self._planner.polyline_clear(trajectory)
+            def motion_clear(command):
+                # A response mismatch may masquerade as helpful disturbance.
+                # Require clearance for the zero-disturbance prediction too.
+                return (disturbance_motion_clear(command, wind, wind_rate)
+                        and disturbance_motion_clear(command, np.zeros(2), np.zeros(2)))
+            if not motion_clear((vx,vy)):
+                # Reduce travel while retaining the disturbance cancellation.
+                accepted = False
+                for scale in (.75,.5,.25,0.0):
+                    candidate = (vx-desired[0]*(1-scale),vy-desired[1]*(1-scale))
+                    if motion_clear(candidate):
+                        vx,vy = candidate
+                        accepted = True
+                        break
+                if not accepted:
+                    # A rising-gust forecast can over-correct toward the
+                    # opposite surface. Retain cancellation of the currently
+                    # measured disturbance only if its entire ground-motion
+                    # prediction is certified. Raw zero loses that cancellation.
+                    cap = float(self._g('max_drift_comp'))
+                    for hold,source in (
+                        (-wind.copy(),'certified current disturbance cancellation'),
+                        (-wind-np.array([0,ground[1]]),'certified active disturbance braking'),
+                        (-wind-np.array([ground[0],0]),'certified active disturbance braking'),
+                        (-wind-ground,'certified active disturbance braking'),
+                    ):
+                        hold *= min(1.0,cap/max(1e-6,float(np.linalg.norm(hold))))
+                        if motion_clear(hold):
+                            vx,vy = map(float,hold)
+                            accepted = True
+                            extra['hold_source']=source
+                            break
+                if not accepted:
+                    # A blocked planner still sends hold compensation. It must
+                    # pass exactly the same motion check as a travel command.
+                    # If no compensated hold is certified, request FCU braking
+                    # rather than publishing an unchecked drift correction.
+                    vx=vy=0.0
+                    extra['braking_clearance_available']=motion_clear((0,0))
+                    yaw_rate=0.0
+                extra['recovery_reason'] = 'travel limited by observed braking clearance'
+            # Update the actuator model with the command actually published.
+            command_world = np.array([[c,-s],[s,c]]) @ np.array([vx,vy])
+            self._last_command_world=command_world
+        else:
+            vx=vy=0.0
+            pending=self._command_history.copy()
+            headings=self._sent_heading.copy()
+            yaw_pending=self._yaw_command_history.copy()
+            # A lidar fault prohibits motion, but it does not invalidate
+            # independently fresh FCU motion samples. Erasing the observer
+            # here makes the next scan treat measured wind as a new handover.
+            flight_fresh = (self._pose_t is not None and
+                self._now()-self._pose_t <= float(self._g('stale_scan_s')) and
+                not self._velocity_fault and self._velocity_fresh())
+            if flight_fresh:
+                self._compensated(0.0,0.0)
+            else:
+                self._reset_drift()
+            self._command_history=pending
+            self._sent_heading=headings
+            self._yaw_command_history=yaw_pending
+        computation_elapsed = max(0.,self._now()-computation_started)
+        if fresh and computation_elapsed > budget+1e-9:
+            vx=vy=yaw_rate=0.0
+            fresh=False
+            extra['fault']='motion certificate computation deadline exceeded'
+        elif fresh and (self.scan_stale() or self._pose_t is None or
+                self._now()-self._pose_t > float(self._g('stale_scan_s')) or
+                self._velocity_fault or (self._fcu_velocity_t is not None and not self._velocity_fresh())):
+            vx=vy=yaw_rate=0.0
+            fresh=False
+            extra['fault']='post-certificate flight observations stale'
+        extra['motion_computation_elapsed_s']=computation_elapsed
+        extra['motion_computation_budget_s']=budget
+        # Include holds in the delayed actuator model, including stale-data
+        # braking. Resetting estimation must not erase commands in transit.
+        c,s=math.cos(self._yaw or 0),math.sin(self._yaw or 0)
+        sent_at=self._now()
+        if len(self._command_history)==self._command_history.maxlen:
+            self._sent_heading.pop(self._command_history[0][0],None)
+        self._command_history.append((sent_at,np.array([c*vx-s*vy,s*vx+c*vy])))
+        self._sent_heading[sent_at]=self._yaw or 0.0
+        self._yaw_command_history.append((sent_at,yaw_rate))
         sp = PositionTarget()
         sp.header.stamp = self.get_clock().now().to_msg()
         sp.coordinate_frame = FRAME_BODY_OFFSET_NED
@@ -674,7 +1085,6 @@ class VelocityController(Node):
         sp.velocity.x = float(vx)      # forward
         sp.velocity.y = float(vy)      # LEFT (MAVROS converts FLU -> FRD)
         vz = float(self._alt_correction())
-        yaw_rate = float(self._yaw_rate_for(bearing))
         sp.velocity.z = vz             # CLOSED-LOOP hold
         sp.yaw_rate = yaw_rate
         self.pub_sp.publish(sp)
@@ -695,8 +1105,31 @@ class VelocityController(Node):
                   "hold_alt_m": (None if self._hold_alt is None
                                  else round(self._hold_alt, 2)),
                   "alt_m": (None if self._alt is None else round(self._alt, 2)),
+                  "altitude_motion_basis": ('FCU vertical displacement from handover'
+                      if self._alt_motion_origin is not None else 'pose-only; no FCU motion anchor'),
+                  "altitude_motion_displacement_m": self._alt_motion_displacement,
+                  "altitude_motion_fault": self._alt_motion_fault,
                   "backoffs": self._backoffs_done,
+                  "disturbance_estimate_valid": bool(fresh and self._response_known),
+                  "disturbance_world_mps": self._wind_world.tolist() if fresh and self._response_known else None,
+                  "disturbance_rate_world_mps2": self._wind_rate_world.tolist() if fresh and self._response_known else None,
+                  "command_response_state": 'observed own velocity response' if fresh and self._response_known else 'unknown prior control response',
+                  "ground_velocity_world_mps": self._ground_world.tolist() if fresh else None,
+                  "ground_velocity_basis": 'unavailable during sensor fault' if not fresh else 'fresh FCU EKF velocity_local' if self._velocity_fresh() else 'FCU pose finite difference estimate',
+                  "fcu_velocity_age_s": None if self._fcu_velocity_t is None else self._now()-self._fcu_velocity_t,
+                  "command_delay_s": float(self._g('vel_command_delay_s')),
+                  "commanded_yaw_rate_rad_s": yaw_rate,
+                  "command_receipt_turn_rad": float(receipt_turn) if fresh else None,
                   "drift_left_mps": round(self._drift, 2)}
+        detail.update(planner_state=self._planner.reason,
+                      required_clearance_m=self._planner.clearance,
+                      observed_clearance_m=float(self._planner.distances([(0,0)])[0]) if self._planner.tree is not None else None,
+                      scan_motion_basis=getattr(self,'_scan_motion_basis','unavailable'),
+                      scan_motion_world_m=getattr(self,'_scan_motion_world',None),
+                      scan_age_s=None if self._scan_t is None else round(self._now()-self._scan_t,3),
+                      pose_age_s=None if self._pose_t is None else round(self._now()-self._pose_t,3),
+                      planner_path_body_m=self._planner.path,
+                      axis_progress_m=round(self._axis_progress(),3))
         detail.update(extra)
         self._last_detail = detail
         self.pub_detail.publish(String(data=json.dumps(detail)))
@@ -710,6 +1143,14 @@ class VelocityController(Node):
             self._observe_only()
             return
 
+        if getattr(self, 'intent_enabled', False):
+            m = self._intent
+            if m is None or self._intent_t is None or self._intent_steady is None or self._now()-self._intent_t > .5 or time.monotonic()-self._intent_steady > .5 or not all(math.isfinite(x) for x in (m.x,m.y,m.z)):
+                self._publish(0,0,0,0,{'fault':'pilot intent stale or invalid'})
+                return
+            self.cruise = min(self._intent_speed_cap, math.hypot(m.x,m.y))
+            self._axis = self._yaw + math.atan2(m.y,m.x)
+
         if self.scan is None or self.scan_stale():
             # Never coast on stale data: an unknown world is a stop, not a
             # continuation of the last command.
@@ -717,13 +1158,46 @@ class VelocityController(Node):
                           {"fault": "scan stale or missing"})
             return
 
+        if self._pose_t is None or self._now()-self._pose_t > float(self._g('stale_scan_s')):
+            self._publish(0.0,0.0,0.0,0.0,{'fault':'pose stale or missing'})
+            return
+
+        if self._velocity_fault or (self._fcu_velocity_t is not None and not self._velocity_fresh()):
+            self._publish(0.0,0.0,0.0,0.0,{'fault':self._velocity_fault or 'FCU velocity stale'})
+            return
+
         bearings, ranges = self.conditioned(self.scan)
         if not len(ranges):
             self._publish(0.0, 0.0, 0.0, 0.0, {"fault": "no valid returns"})
             return
+        if any(math.isnan(r) or r <= 0 for r in self.scan.ranges):
+            self._publish(0.0,0.0,0.0,0.0,{'fault':'scan contains unknown or invalid ranges'})
+            return
 
         front = self._front_min(bearings, ranges)
-        gap = self.find_gap(bearings, ranges)
+        hits = ranges < float(self._g('range_max_valid'))-0.001
+        try:
+            sensor_origin,bearings,ranges = self._registered_scan(bearings,ranges)
+        except (ValueError, TransformException) as error:
+            self._publish(0,0,front,0,{'fault':str(error)})
+            return
+        front = self._front_min(bearings,ranges)
+        if self._axis is None:
+            self._axis = self._yaw
+        if self._origin is None:
+            self._origin = self._pos
+        self._planner.observe(bearings,ranges,float(self._g('range_max_valid')),
+                              sensor_origin=sensor_origin,hits=hits)
+        if self.state == 'STUCK':
+            self._publish(0.0,0.0,front,0.0,{'recovery_reason':'recovery exhausted'})
+            return
+        axis_bearing = math.atan2(math.sin(self._axis-self._yaw),math.cos(self._axis-self._yaw))
+        path = self._local_path(axis_bearing)
+        gap = None
+        if len(path)>1:
+            x,y = steer_point(path, self._planner.segment_clear,
+                              float(self._g('steer_min_step_m')))
+            gap = (math.atan2(y,x),0.0,math.hypot(x,y)+float(self._g('stop_dist')))
 
         is_open, left_m, right_m = self.corridor_open(bearings, ranges)
         self._open_depth, self._open_width = self.open_extent(
@@ -733,8 +1207,15 @@ class VelocityController(Node):
         self._enclosed_ticks = 0 if is_open else self._enclosed_ticks + 1
         if self._enclosed_ticks >= int(self._g('corridor_enter_ticks')):
             self._entered = True
+            if self._entered_progress is None:
+                self._entered_progress = self._axis_progress()
+        progress = self._axis_progress()
+        self._max_progress = max(self._max_progress,progress)
         exited = (self._entered
-                  and self._open_ticks >= int(self._g('corridor_open_ticks')))
+                  and self._open_ticks >= int(self._g('corridor_open_ticks'))
+                  and self._entered_progress is not None
+                  and progress > self._entered_progress+float(self._g('min_progress_m'))
+                  and progress >= self._max_progress-0.2)
         self._exited, self._left_m, self._right_m = exited, left_m, right_m
         brake = float(self._g('brake_dist'))
         stop = float(self._g('stop_dist'))
@@ -746,8 +1227,14 @@ class VelocityController(Node):
             if self._backoff <= 0:
                 self.state = "CRUISE"
                 self._blocked = 0
-            self._publish(-float(self._g('backoff_speed')), 0.0, front, 0.0,
-                          {"note": "reversing to find a way through"})
+                # Give this bounded recovery attempt a new progress window.
+                # The attempt count stays cumulative; STUCK stays terminal.
+                self._progress_ref,self._progress_t = self._pos,self._now()
+            reverse = -float(self._g('backoff_speed'))
+            if not self._planner.segment_clear((0,0),(-0.8,0)):
+                reverse = 0.0
+            self._publish(reverse, 0.0, front, 0.0,
+                          {"recovery_reason": "observed reverse path" if reverse else 'reverse path blocked or unobserved'})
             return
 
         if gap is not None and self.stalled():
@@ -800,7 +1287,7 @@ class VelocityController(Node):
 
         vx = speed * math.cos(bearing)
         # POSITIVE vy is LEFT and a positive bearing is to the left in ROS
-        # LaserScan convention, so the sign is direct — asserted in tests.
+        # LaserScan convention, so the sign is direct â€” asserted in tests.
         # Travel along the chosen heading. The old extra `gain * bearing`
         # push is gone: with a physical heading it only overshot the strip.
         vy = speed * math.sin(bearing)
@@ -811,21 +1298,86 @@ class VelocityController(Node):
                        "gap_depth_m": round(depth, 2),
                        "reach_m": round(reach, 2)})
 
+    def _axis_progress(self):
+        if self._pos is None or self._origin is None or self._axis is None:
+            return 0.0
+        return ((self._pos[0]-self._origin[0])*math.cos(self._axis)
+                +(self._pos[1]-self._origin[1])*math.sin(self._axis))
+
+    def _local_path(self, axis_bearing):
+        # Reuse only the steering hint, never its old clearance verdict.
+        # Fresh observations and braking certification still run every tick.
+        now = self._now()
+        c,s = math.cos(self._yaw),math.sin(self._yaw)
+        px,py = self._pos
+        while len(self._path_world)>1 and math.dist(self._pos,self._path_world[0])<0.2:
+            self._path_world.pop(0)
+        body = [(c*(x-px)+s*(y-py),-s*(x-px)+c*(y-py)) for x,y in self._path_world]
+        if (body and self._plan_t is not None and now-self._plan_t<0.5
+                and all(self._planner.segment_clear(a,b)
+                        for a,b in zip([(0,0)]+body,body))):
+            self._planner.path = [(0,0)]+body
+            self._planner.reason = 'freshly revalidated lidar path'
+            return self._planner.path
+        path = self._planner.plan(axis_bearing)
+        self._plan_t = now
+        self._path_world = [(px+c*x-s*y,py+s*x+c*y) for x,y in path[1:]]
+        return path
+
     @property
     def last_detail(self):
         return self._last_detail
 
 
+def steer_point(path, segment_clear, min_step_m):
+    """The body-frame waypoint to steer at: path[1], unless it is a stub
+    nearer than `min_step_m`, then path[2] when the straight leg to it is
+    clear. Only the stub is skipped: steering past ordinary waypoints cut
+    corners into the walls under gusts (corridor stress tests).
+
+    Steering at path[1] alone stalled the clarified arena's return slalom
+    (rendered, p2r10): the planner's first waypoint was 0.1 m straight ahead
+    of a half-width obstacle with the turn after it, so the commanded bearing
+    was 0 deg and the speed, from 0.1 m of reach, 0.05 m/s -- straight at the
+    obstacle -- until "no ground covered" exhausted recovery (STUCK). Braking
+    certification still applies to whatever is commanded."""
+    first = path[1]
+    if len(path) < 3 or math.hypot(*first) >= min_step_m:
+        return first
+    return path[2] if segment_clear((0.0, 0.0), path[2]) else first
+
+
 def main():
+    import os
     rclpy.init()
-    node = VelocityController()
+    node = None
+    clock_driver = capture_driver = trace = None
     try:
+        node = VelocityController()
+        from avoidance.buffered_scan_pose import install
+        install(node)
+        from avoidance.independent_ros_clock_candidate import IndependentRosClock
+        clock_driver = IndependentRosClock(node)
+        from avoidance.capture_inbox import CaptureInbox
+        capture_driver = CaptureInbox(node)
+        recording_path = os.environ.get('AEROTHON_MOTION_FORECAST_OUT')
+        if recording_path:
+            from avoidance.motion_forecast_trace import MotionForecastTrace
+            trace = MotionForecastTrace(node, recording_path)
         rclpy.spin(node)
     except KeyboardInterrupt:
         pass
     finally:
-        node.destroy_node()
-        rclpy.shutdown()
+        if trace is not None:
+            trace.close()
+        if capture_driver is not None:
+            capture_driver.close()
+        if clock_driver is not None:
+            clock_driver.close()
+        if node is not None:
+            node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':

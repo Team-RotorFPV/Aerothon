@@ -172,7 +172,8 @@ def fit_surface(angle_min, angle_increment, ranges, bearing_rad,
                 min_points=6, min_extent_m=0.9, max_residual_m=0.08,
                 gap_m=0.35, inlier_m=0.20, max_depth_m=6.0,
                 max_obliquity_rad=math.radians(70.0),
-                expected_range_m=None, range_tol_m=3.0):
+                expected_range_m=None, range_tol_m=3.0, min_range_m=None,
+                widest_first=False):
     """The flat surface the camera is looking at, or an explicit refusal.
 
     Searches only the sector `bearing_rad` +/- `half_width_rad`, because the
@@ -197,6 +198,11 @@ def fit_surface(angle_min, angle_increment, ranges, bearing_rad,
     half = abs(float(half_width_rad))
     inc = float(angle_increment)
     lo, hi = float(range_min), float(range_max)
+    # `min_range_m`: only what stands beyond it. A laid banner's square-up
+    # asks about the corridor's contents past the sheet, not the stub of wall
+    # end nearer in that "nearest first" would otherwise pick.
+    if min_range_m is not None:
+        lo = max(lo, float(min_range_m))
 
     sector = []
     for i, r in enumerate(ranges):
@@ -224,6 +230,10 @@ def fit_surface(angle_min, angle_increment, ranges, bearing_rad,
     # returns is the surface being asked about.
     groups = sorted(_clusters(sector, gap_m),
                     key=lambda g: sorted(math.hypot(x, y) for x, y in g)[len(g) // 2])
+    if widest_first:
+        # Inside a corridor mouth the nearest run is a stub of wall end; the
+        # face worth squaring on is the widest one there.
+        groups.sort(key=lambda g: -_extent(list(g)))
     nearest = min(math.hypot(x, y) for x, y in groups[0])
 
     chosen = list(groups[0])

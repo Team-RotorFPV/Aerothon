@@ -63,7 +63,8 @@ class PayloadNode(Node):
         g = lambda n: self.get_parameter(n).value
         det = detect_payload(frame, min_area_px=int(g("min_area_px")),
                              hsv_lo=g("hsv_lo"), hsv_hi=g("hsv_hi"))
-        det["stamp"] = now
+        det["stamp"] = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+        det["received_stamp"] = now
         self.pub.publish(String(data=json.dumps(det)))
 
 

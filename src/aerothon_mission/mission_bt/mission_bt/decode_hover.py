@@ -43,6 +43,10 @@ import time
 
 # qr_node's offset z for a marker located but not decoded.
 UNREAD = 0.25
+# The target set when the start marker decodes to nothing and its PATTERN
+# alone identifies the pad. perception_qr.qr_match defines the same string;
+# no decoded payload ever matches it.
+APPEARANCE_ONLY = "<start marker appearance>"
 
 
 class DecodeHover:

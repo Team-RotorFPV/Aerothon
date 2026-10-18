@@ -1,481 +1,1137 @@
-import { useEffect, useRef, useState } from "react";
-import { listen } from "@tauri-apps/api/event";
-import { invoke } from "@tauri-apps/api/core";
-import maplibregl, { type GeoJSONSource } from "maplibre-gl";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
-import { drawHUD, drawMap, drawSlam, type OccGrid } from "./render";
-import type { Telemetry, Envelope } from "./types";
+import type { Telemetry } from "./types";
+import { TelemetryHistory } from "./telemetryHistory";
+import {
+  acknowledgement,
+  commandId,
+  age,
+  freshFcu,
+  missionActive,
+  startAllowed,
+  reviewAllowed,
+  taskCommand,
+  tasks,
+  videoUrl,
+  type CommandOutcome,
+  api,
+  ApiError,
+  type HostState,
+  vehicleLabel,
+} from "./runtime";
+import Connections from "./Connections";
+import ArenaDimensions from "./ArenaDimensions";
+import LidarCalibration from "./LidarCalibration";
+import Slam, { type Grid } from "./LidarView";
+import { decodeGrid } from "./lidarGeometry";
+import coverage from "./satelliteCoverage.json";
+import { satelliteStyle } from "./mapSources";
 import "./gcs.css";
+const Graphs = lazy(() => import("./Graphs"));
 
-const CL: [string, string][] = [
-  ["takeoff", "Auto Takeoff (5m)"], ["start_qr", "Scan & Decode Start QR"],
-  ["banner", "Corridor Banner Align"], ["corridor", "Corridor Nav & Avoidance"],
-  ["target_id", "Target QR Search & Match"], ["drop", "Winch Drop & Ground Release"],
-  ["return", "Corridor Return Navigation"], ["land", "Precision Landing at Origin"],
-];
-const STEP: Record<string, number> = {
-  TAKEOFF: 0, GOTO_CORRIDOR: 1, CORRIDOR_NAV: 3, ENTER_ZONE: 3, SEARCH_QR: 4,
-  WINCH_DROP: 5, RETURN: 6, RETURN_CORRIDOR: 6, LAND: 7,
-};
-
-export default function App() {
-  const [S, setS] = useState<Telemetry | null>(null);
-  const [log, setLog] = useState<string[]>([]);
-  const [linked, setLinked] = useState(false);
-  const [endpoint, setEndpoint] = useState("ws://127.0.0.1:8765");
-  const [activeEndpoint, setActiveEndpoint] = useState("ws://127.0.0.1:8765");
-  const [connectionNonce, setConnectionNonce] = useState(0);
-  const [view, setView] = useState<"map" | "cam" | "slam">("map");
-  // The composite overlay is the default: the live camera with whatever is
-  // currently detected drawn on it. The per-detector streams are kept
-  // selectable because they are what proved the banner lettering bug.
-  const [videoTopic, setVideoTopic] = useState("/percep/overlay");
-  const webSocket = useRef<WebSocket | null>(null);
-  const inTauri = "__TAURI_INTERNALS__" in window;
-  const mapHost = useRef<HTMLDivElement>(null);
-  const geoMap = useRef<maplibregl.Map | null>(null);
-  const gpsMarker = useRef<maplibregl.Marker | null>(null);
-  const gpsTrail = useRef<[number, number][]>([]);
-  const mapCentered = useRef(false);
-
-  const hud = useRef<HTMLCanvasElement>(null);
-  const map = useRef<HTMLCanvasElement>(null);
-  const slam = useRef<HTMLCanvasElement>(null);
-  const trail = useRef<[number, number][]>([]);
-  const cells = useRef<Map<string, [number, number]>>(new Map());
-  const grid = useRef<OccGrid | null>(null);
-  const latest = useRef<Telemetry | null>(null);
-  const logRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!inTauri) return;
-    const un = listen<string>("ws", (e) => {
-      setLinked(true);
-      let env: Envelope; try { env = JSON.parse(e.payload); } catch { return; }
-      if (env.kind === "telemetry") onTelemetry(env.data as Telemetry);
-      else if (env.kind === "map") grid.current = env.data as OccGrid;
-      else if (env.kind === "event") pushLog(`● ${env.data.msg}`);
-      else if (env.kind === "ack") pushLog(`⤷ ack ${env.data.cmd}: ${env.data.result}`);
-    });
-    const unConn = listen<{ connected: boolean; endpoint: string }>("connection", (e) => {
-      setLinked(e.payload.connected);
-      setEndpoint(e.payload.endpoint);
-      pushLog(e.payload.connected ? `● connected ${e.payload.endpoint}` : "○ disconnected");
-    });
-    let raf = 0;
-    const loop = () => {
-      if (hud.current) drawHUD(hud.current, latest.current);
-      if (map.current) drawMap(map.current, latest.current, trail.current, cells.current, grid.current);
-      if (slam.current) drawSlam(slam.current, latest.current, cells.current, grid.current);
-      raf = requestAnimationFrame(loop);
-    };
-    raf = requestAnimationFrame(loop);
-    return () => { un.then((f) => f()); unConn.then((f) => f()); cancelAnimationFrame(raf); };
-  }, [inTauri]);
-
-  // Browser build: communicate directly with the ROS WebSocket aggregator.
-  // The Tauri desktop build continues to use its native command bridge.
-  useEffect(() => {
-    if (inTauri) return;
-    let stopped = false;
-    let retry: number | undefined;
-    let raf = 0;
-    const draw = () => {
-      if (hud.current) drawHUD(hud.current, latest.current);
-      if (map.current) drawMap(map.current, latest.current, trail.current, cells.current, grid.current);
-      if (slam.current) drawSlam(slam.current, latest.current, cells.current, grid.current);
-      raf = requestAnimationFrame(draw);
-    };
-    raf = requestAnimationFrame(draw);
-    const open = () => {
-      if (stopped) return;
-      const ws = new WebSocket(activeEndpoint);
-      webSocket.current = ws;
-      ws.onopen = () => {
-        if (stopped || webSocket.current !== ws) return;
-        setLinked(true);
-        pushLog(`● connected ${activeEndpoint}`);
+const value = (n: unknown, unit = "", precision = 1) =>
+  typeof n === "number" && Number.isFinite(n)
+    ? `${n.toFixed(precision)}${unit}`
+    : "Unavailable";
+// Readiness values are numbers, text or, for detectors, {name: age seconds}.
+const readinessValue = (v: unknown): string =>
+  v && typeof v === "object"
+    ? Object.entries(v as Record<string, unknown>)
+        .map(([name, age]) => `${name} ${value(age, " s")}`)
+        .join(", ")
+    : String(v ?? "Unavailable");
+// The fence as GeoJSON for the map: [lat, lon] pairs, closed ring.
+const EMPTY = { type: "FeatureCollection", features: [] } as const;
+const fenceGeo = (pts: [number, number][]) =>
+  pts.length < 3
+    ? EMPTY
+    : {
+        type: "FeatureCollection",
+        features: [
+          {
+            type: "Feature",
+            properties: {},
+            geometry: {
+              type: "Polygon",
+              coordinates: [
+                [...pts, pts[0]].map(([lat, lon]) => [lon, lat]),
+              ],
+            },
+          },
+        ],
       };
-      ws.onmessage = (e) => {
-        if (stopped || webSocket.current !== ws) return;
-        let env: Envelope; try { env = JSON.parse(String(e.data)); } catch { return; }
-        if (env.kind === "telemetry") onTelemetry(env.data as Telemetry);
-        else if (env.kind === "map") grid.current = env.data as OccGrid;
-        else if (env.kind === "event") pushLog(`● ${(env.data as any).msg}`);
-        else if (env.kind === "ack") {
-          const d = env.data as any;
-          pushLog(`⤷ ack ${d.cmd}: ${d.result}${d.reason ? ` · ${d.reason}` : ""}`);
+const boundary = (text: string) =>
+  text
+    .trim()
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => {
+      const [lat, lon, ...extra] = line.split(",").map(Number);
+      if (extra.length || !Number.isFinite(lat) || !Number.isFinite(lon))
+        throw new Error("Enter latitude, longitude on each line");
+      return { lat, lon };
+    });
+export default function App() {
+  const [mode, setMode] = useState<"flight" | "testing">("flight"),
+    [theme, setTheme] = useState(localStorage.getItem("gcs-theme") || "light");
+  const [view, setView] = useState<"camera" | "slam" | "map" | "graphs">("map");
+  const activeEndpoint = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`;
+  const [hostState, setHostState] = useState<HostState | null>(null);
+  const [waypoints, setWaypoints] = useState('');
+  async function refreshHost() {
+    try { setHostState(await api('/api/state')); } catch { setHostState(null); }
+  }
+  useEffect(() => { void refreshHost(); const timer = window.setInterval(() => void refreshHost(), 2000); return () => window.clearInterval(timer); }, []);
+  const [linked, setLinked] = useState(false),
+    [received, setReceived] = useState(0),
+    [clock, setClock] = useState(Date.now()),
+    [telemetry, setTelemetry] = useState<Telemetry | null>(null);
+  const [events, setEvents] = useState<string[]>([]),
+    [error, setError] = useState("");
+  const [settings, setSettings] = useState(false),
+    [arenaOpen, setArenaOpen] = useState(false),
+    [lidarOpen, setLidarOpen] = useState(false);
+  const [task, setTask] = useState("mission"),
+    [action, setAction] = useState("stow"),
+    [height, setHeight] = useState(5);
+  const [review, setReview] = useState<{
+      cmd: string;
+      args: Record<string, unknown>;
+      label: string;
+    } | null>(null),
+    [busy, setBusy] = useState(false),
+    [starting, setStarting] = useState(false);
+  const [outcome, setOutcome] = useState<CommandOutcome | null>(null);
+  const [target, setTarget] = useState(""),
+    [fenceText, setFenceText] = useState(""),
+    [mapReady, setMapReady] = useState(false);
+  const [colours, setColours] = useState({
+    green: "",
+    orange: "",
+    red: "",
+  });
+  const [topic, setTopic] = useState("/percep/overlay"),
+    [videoError, setVideoError] = useState(false);
+  const [grid, setGrid] = useState<Grid | null>(null),
+    [gridReceived, setGridReceived] = useState(0),
+    [onlineMap, setOnlineMap] = useState(false),
+    [mapError, setMapError] = useState(false);
+  const history = useRef(new TelemetryHistory()),
+    socket = useRef<WebSocket | null>(null),
+    mapHost = useRef<HTMLDivElement>(null),
+    map = useRef<maplibregl.Map | null>(null),
+    marker = useRef<maplibregl.Marker | null>(null),
+    centered = useRef(false);
+  const pending = useRef(
+    new Map<
+      string,
+      { timer: number; resolve: (result: CommandOutcome) => void; cmd: string }
+    >(),
+  );
+  const fresh = linked && received > 0 && clock - received < 3000,
+    t = fresh ? telemetry : null,
+    fcu = freshFcu(t),
+    running = missionActive(t) || starting;
+  const selectedTask = mode === "flight" ? "mission" : task,
+    taskInfo = tasks.find((item) => item.id === selectedTask)!;
+  const canStart = !busy && !starting && startAllowed(t, fresh, selectedTask);
+  const record = (text: string) =>
+    setEvents((list) => [
+      ...list.slice(-149),
+      `${new Date().toLocaleTimeString()} ${text}`,
+    ]);
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    localStorage.setItem("gcs-theme", theme);
+  }, [theme]);
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      setClock(Date.now());
+      history.current.tick(performance.now(), Date.now());
+    }, 500);
+    return () => window.clearInterval(timer);
+  }, []);
+  useEffect(() => {
+    let disposed = false,
+      retry = 0;
+    const open = () => {
+      const streamUrl = new URL(activeEndpoint);
+      streamUrl.searchParams.set('map_encoding', 'rle');
+      const ws = new WebSocket(streamUrl);
+      socket.current = ws;
+      ws.onopen = () => {
+        if (disposed || socket.current !== ws) return;
+        setLinked(true);
+        record(`Connected to ${activeEndpoint}`);
+      };
+      ws.onmessage = (event) => {
+        if (disposed || socket.current !== ws) return;
+        try {
+          const envelope = JSON.parse(event.data);
+          if (envelope.kind === "telemetry") {
+            history.current.ingest(
+              envelope.data,
+              envelope.t,
+              performance.now(),
+              Date.now(),
+            );
+            setTelemetry(envelope.data);
+            setReceived(Date.now());
+            if (
+              age(envelope.data, "mission") < 3 &&
+              envelope.data.mission?.state !== "STARTING"
+            )
+              setStarting(false);
+          } else if (envelope.kind === "execution" || envelope.kind === "receipt") {
+            setOutcome({ ...envelope.data, cmd: "execution" });
+            setStarting(false);
+          } else if (envelope.kind === "map") {
+            setGrid(decodeGrid(envelope.data));
+            setGridReceived(Date.now());
+          } else if (envelope.kind === "event")
+            record(envelope.data.msg || "Runtime event");
+          else if (envelope.kind === "ack") {
+            const result = acknowledgement(envelope.data),
+              entry = pending.current.get(result.command_id);
+            if (entry) {
+              window.clearTimeout(entry.timer);
+              pending.current.delete(result.command_id);
+              entry.resolve(result);
+            }
+            setOutcome(result);
+            record(
+              `${result.cmd}: ${result.state}${result.reason ? `, ${result.reason}` : ""}`,
+            );
+          }
+        } catch {
+          setError("The runtime sent an invalid message.");
         }
       };
-      ws.onerror = () => {
-        if (!stopped && webSocket.current === ws) ws.close();
-      };
       ws.onclose = () => {
-        if (stopped || webSocket.current !== ws) return;
+        if (disposed || socket.current !== ws) return;
         setLinked(false);
-        retry = window.setTimeout(open, 2000);
+        history.current.disconnect();
+        for (const [id, entry] of pending.current) {
+          window.clearTimeout(entry.timer);
+          const result: CommandOutcome = {
+            command_id: id,
+            cmd: entry.cmd,
+            state: "Outcome unknown",
+            reason: "Connection lost; this command will not be replayed.",
+          };
+          entry.resolve(result);
+          setOutcome(result);
+        }
+        pending.current.clear();
+        if (!disposed) retry = window.setTimeout(open, 1500);
       };
     };
     open();
     return () => {
-      stopped = true;
-      cancelAnimationFrame(raf);
-      if (retry !== undefined) window.clearTimeout(retry);
-      const ws = webSocket.current;
-      if (ws) {
-        ws.onclose = null;
-        ws.close();
-        if (webSocket.current === ws) webSocket.current = null;
+      disposed = true;
+      window.clearTimeout(retry);
+      socket.current?.close();
+      for (const [id, entry] of pending.current) {
+        window.clearTimeout(entry.timer);
+        entry.resolve({
+          command_id: id,
+          cmd: entry.cmd,
+          state: "Outcome unknown",
+          reason: "Connection changed; no retry was sent.",
+        });
       }
+      pending.current.clear();
     };
-  }, [activeEndpoint, connectionNonce, inTauri]);
+  }, [activeEndpoint]);
+  async function send(
+    cmd: string,
+    args: Record<string, unknown> = {},
+  ): Promise<CommandOutcome> {
+    const ws = socket.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN)
+      throw new Error("Production runtime is disconnected.");
+    const id = commandId(),
+      submitted: CommandOutcome = {
+        command_id: id,
+        cmd,
+        state: "Submitted",
+        reason: "Awaiting runtime acknowledgement.",
+      };
+    setOutcome(submitted);
+    record(`${cmd}: Submitted`);
+    try {
+      const result = await api('/api/commands', {command_id:id, cmd, args, confirm:true});
+      setOutcome({...result, cmd});
+      return {...result, cmd};
+    } catch (e) {
+      const result: CommandOutcome = {...submitted, state: e instanceof ApiError ? 'Failed' : 'Outcome unknown', reason: e instanceof Error ? e.message : String(e)};
+      setOutcome(result);
+      return result;
+    }
+  }
 
+  async function perform(cmd: string, args: Record<string, unknown> = {}) {
+    setBusy(true);
+    setError("");
+    try {
+      const result = await send(cmd, args);
+      if (result.state === "Failed")
+        throw new Error(result.reason || "Runtime rejected the request");
+      if (cmd === "start") setStarting(true);
+      if (cmd === "abort" && result.state === "Accepted") setStarting(false);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setBusy(false);
+    }
+  }
+  const reviewedSend = (
+    cmd: string,
+    args: Record<string, unknown> = {},
+    danger = false,
+  ) => {
+    if (danger) {
+      setArenaOpen(false);
+      setLidarOpen(false);
+      setReview({ cmd, args, label: `Review ${cmd.replace(/_/g, " ")}` });
+    } else void perform(cmd, args);
+  };
   useEffect(() => {
-    if (!mapHost.current) return;
-    const gm = new maplibregl.Map({
+    if (view !== "map" || !mapHost.current) return;
+    const satellite = satelliteStyle(coverage, onlineMap, location.origin);
+    const m = new maplibregl.Map({
       container: mapHost.current,
-      center: [149.1652, -35.36324],
-      zoom: 18,
-      attributionControl: { compact: true },
+      center: coverage.initial.center as [number, number],
+      zoom: coverage.initial.zoom,
+      maxZoom: 19,
       style: {
         version: 8,
-        sources: {
-          satellite: {
-            type: "raster",
-            // Satellite arena tiles are bundled for offline competition use.
-            tiles: ["/satellite/{z}/{x}/{y}.jpg"],
-            tileSize: 256,
-            minzoom: 14,
-            maxzoom: 19,
-            attribution: "Tiles © Esri — Esri, Maxar, Earthstar Geographics, GIS Community",
+        sources: satellite.sources,
+        layers: [
+          {
+            id: "background",
+            type: "background",
+            paint: {
+              "background-color": theme === "dark" ? "#252627" : "#ecece8",
+            },
           },
-        },
-        layers: [{ id: "satellite", type: "raster", source: "satellite" }],
+          ...(satellite.layers as maplibregl.LayerSpecification[]),
+        ],
       },
     });
-    gm.addControl(new maplibregl.NavigationControl({ showCompass: true }), "top-right");
-    gm.on("load", () => {
-      gm.addSource("flight-trail", {
-        type: "geojson",
-        data: { type: "Feature", properties: {}, geometry: { type: "LineString", coordinates: gpsTrail.current } },
-      });
-      gm.addLayer({
-        id: "flight-trail", type: "line", source: "flight-trail",
-        paint: { "line-color": "#e8eef5", "line-width": 4, "line-opacity": 0.9 },
-      });
+    map.current = m;
+    // Diagnostic handle for browser checks of the map's sources and layers.
+    (mapHost.current as any).aerothonMap = m;
+    marker.current = new maplibregl.Marker({
+      color: theme === "dark" ? "#eee" : "#242424",
     });
-    geoMap.current = gm;
-    gpsMarker.current = new maplibregl.Marker({ color: "#d47a72" });
-    return () => { gpsMarker.current?.remove(); gm.remove(); geoMap.current = null; };
-  }, []);
-
-  function onTelemetry(d: Telemetry) {
-    latest.current = d;
-    trail.current.push([d.flight.x, d.flight.y]);
-    if (trail.current.length > 2000) trail.current.shift();
-    if (Number.isFinite(d.gps?.lat) && Number.isFinite(d.gps?.lon) &&
-        Math.abs(d.gps.lat) > 0.0001 && Math.abs(d.gps.lon) > 0.0001) {
-      const ll: [number, number] = [d.gps.lon, d.gps.lat];
-      gpsTrail.current.push(ll);
-      if (gpsTrail.current.length > 2000) gpsTrail.current.shift();
-      gpsMarker.current?.setLngLat(ll).addTo(geoMap.current!);
-      if (!mapCentered.current) {
-        geoMap.current?.jumpTo({ center: ll, zoom: 19 });
-        mapCentered.current = true;
+    centered.current = false;
+    setMapError(false);
+    m.addControl(new maplibregl.NavigationControl(), "top-right");
+    m.on("error", () => setMapError(true));
+    setMapReady(false);
+    // The judges' geofence: applied (filled) and the typed draft (dashed).
+    // Added once the style is parsed ("style.load"): "load" and
+    // isStyleLoaded() also wait for every tile, which may never finish.
+    const addFence = () => {
+      if (m.getSource("fence-applied")) return;
+      try {
+        m.addSource("fence-applied", { type: "geojson", data: EMPTY as any });
+        m.addSource("fence-draft", { type: "geojson", data: EMPTY as any });
+        m.addLayer({ id: "fence-applied-fill", type: "fill", source: "fence-applied",
+          paint: { "fill-color": "#e8a33d", "fill-opacity": 0.15 } });
+        m.addLayer({ id: "fence-applied-line", type: "line", source: "fence-applied",
+          paint: { "line-color": "#e8a33d", "line-width": 2.5 } });
+        m.addLayer({ id: "fence-draft-line", type: "line", source: "fence-draft",
+          paint: { "line-color": "#3d8be8", "line-width": 2, "line-dasharray": [2, 2] } });
+        setMapReady(true);
+      } catch {
+        /* Style not parsed yet; the next style event adds them. */
       }
-      const src = geoMap.current?.getSource("flight-trail") as GeoJSONSource | undefined;
-      src?.setData({ type: "Feature", properties: {}, geometry: { type: "LineString", coordinates: gpsTrail.current } });
-    }
-    const sc = (d as any).scan;
-    if (sc && sc.ranges) {
-      const R = sc.ranges, n = R.length;
-      for (let k = 0; k < n; k++) {
-        const r = R[k]; if (r == null) continue;
-        const a = -Math.PI + 2 * Math.PI * k / n;
-        const ex = d.flight.x + r * Math.cos(a), ey = d.flight.y + r * Math.sin(a);
-        cells.current.set(Math.round(ex / 0.15) + "," + Math.round(ey / 0.15), [ex, ey]);
-      }
-      if (cells.current.size > 15000) cells.current.clear();
-    }
-    setS(d);
+    };
+    // An inline style can finish parsing inside the constructor, before
+    // any listener exists, so try now as well as on every style event.
+    addFence();
+    m.on("style.load", addFence);
+    m.on("styledata", addFence);
+    m.on("load", addFence);
+    return () => {
+      marker.current?.remove();
+      m.remove();
+      map.current = null;
+    };
+  }, [view, onlineMap, theme]);
+  // Draw the fence: the applied polygon and whatever is typed in the box.
+  let draftFence: [number, number][] = [];
+  let draftError = "";
+  try {
+    draftFence = fenceText.trim()
+      ? boundary(fenceText).map((p) => [p.lat, p.lon] as [number, number])
+      : [];
+  } catch (reason) {
+    draftError = String(reason).replace(/^Error: /, "");
   }
-
-  function pushLog(l: string) {
-    setLog((x) => [...x.slice(-150), `${new Date().toLocaleTimeString()}  ${l}`]);
-    setTimeout(() => logRef.current?.scrollTo(0, 1e9), 0);
-  }
-  async function send(cmd: string, args: any = {}, danger = false) {
-    if (danger && !confirm(`Confirm command: ${cmd.toUpperCase()}?`)) return;
-    try {
-      if (inTauri) await invoke("send_command", { cmd, args });
-      else {
-        const ws = webSocket.current;
-        if (!ws || ws.readyState !== WebSocket.OPEN) throw new Error("drone WebSocket not connected");
-        ws.send(JSON.stringify({
-          v: 1, kind: "command", t: Date.now() / 1000,
-          data: { cmd_id: crypto.randomUUID(), cmd, args, confirm: true },
-        }));
-      }
-      pushLog(`→ ${cmd}`);
+  const draftKey = JSON.stringify(draftFence);
+  const appliedFence = t?.geofence_vertices ?? [];
+  const appliedKey = JSON.stringify(appliedFence);
+  useEffect(() => {
+    const m = map.current;
+    if (!m || !mapReady) return;
+    (m.getSource("fence-applied") as maplibregl.GeoJSONSource | undefined)
+      ?.setData(fenceGeo(appliedFence) as any);
+    (m.getSource("fence-draft") as maplibregl.GeoJSONSource | undefined)
+      ?.setData(fenceGeo(draftFence) as any);
+    if (mapHost.current) {
+      mapHost.current.dataset.fenceDraft = String(draftFence.length);
+      mapHost.current.dataset.fenceApplied = String(appliedFence.length);
     }
-    catch (e) { pushLog(`✗ ${cmd}: ${e}`); }
-  }
-  async function connect() {
-    try {
-      if (inTauri) await invoke("set_endpoint", { endpoint });
-      else {
-        setActiveEndpoint(endpoint.trim().replace(/\/$/, ""));
-        // Allow CONNECT to force a clean retry even when the URL is unchanged.
-        setConnectionNonce((value) => value + 1);
-      }
-      setLinked(false); pushLog(`→ connect ${endpoint}`);
+    const show = draftFence.length >= 3 ? draftFence : appliedFence;
+    if (show.length >= 3) {
+      const lons = show.map((p) => p[1]), lats = show.map((p) => p[0]);
+      m.fitBounds([[Math.min(...lons), Math.min(...lats)],
+                   [Math.max(...lons), Math.max(...lats)]],
+                  { padding: 40, maxZoom: 19, duration: 0 });
+      centered.current = true;
     }
-    catch (e) { pushLog(`✗ connection: ${e}`); }
-  }
-
-  const videoUrl = (() => {
-    try {
-      const u = new URL(endpoint);
-      u.protocol = u.protocol === "wss:" ? "https:" : "http:";
-      // The composite feed: the live camera with WHATEVER is currently
-      // detected drawn on it. This was pinned to /percep/qr/annotated -- the
-      // QR detector's private copy of the frame -- so during banner alignment
-      // the pane showed a nadir QR view with no banner box on it.
-      u.port = "8080"; u.pathname = "/stream"; u.search = `?topic=${videoTopic}&type=mjpeg`;
-      return u.toString();
-    } catch { return ""; }
-  })();
-
-  const f = S?.flight, m = S?.mission, p = S?.percep, sa = S?.safety;
-  const scans = S?.scans ?? [];
-  const cur = STEP[m?.state ?? ""] ?? -1;
-  const pill = (g: boolean | undefined, a: string, b: string, inv = false) =>
-    <span className={`pill ${g ? "ok" : inv ? "bad" : "warn"}`}>{g ? a : b}</span>;
-
-  // Red zone is a TRI-state, not a boolean. This panel used to render
-  // !redzone_visible as "CLEAR", so a detector that had never published
-  // anything — or one that could not see the ground at all — read as safe.
-  const redPill = (s: string | undefined) => {
-    const cls = s === "CLEAR" ? "ok" : s === "RED" ? "bad" : "warn";
-    const txt = s === "CLEAR" ? "CLEAR" : s === "RED" ? "RESTRICTED"
-      : s === "NOT_VISIBLE" ? "NO GROUND VIEW" : "UNKNOWN";
-    return <span className={`pill ${cls}`}>{txt}</span>;
-  };
-
-  const fmtVal = (v: unknown): string => {
-    if (v === null || v === undefined) return "—";
-    if (typeof v === "boolean") return v ? "yes" : "no";
-    if (typeof v === "number") return String(v);
-    if (typeof v === "object") return Object.entries(v as object)
-      .map(([k, a]) => `${k} ${a ?? "—"}`).join(" ");
-    return String(v);
-  };
-
+  }, [mapReady, draftKey, appliedKey]);
+  useEffect(() => {
+    const gps = t?.gps;
+    if (
+      view !== "map" ||
+      !map.current ||
+      !gps ||
+      age(t, "gps") >= 3 ||
+      gps.fix === "NO" ||
+      !Number.isFinite(gps.lat) ||
+      !Number.isFinite(gps.lon)
+    ) {
+      marker.current?.remove();
+      return;
+    }
+    const ll: [number, number] = [gps.lon, gps.lat];
+    marker.current?.setLngLat(ll).addTo(map.current);
+    if (!centered.current) {
+      map.current.jumpTo({ center: ll, zoom: 17 });
+      centered.current = true;
+    }
+  }, [t, view]);
   return (
-    <div className="gcs">
+    <div className="app">
       <header>
-        <div className="brand"><span className="logo-dot" /> AEROTHON <small>GCS</small></div>
-        <span className="badge mode">{m?.mode || "GUIDED"}</span>
-        <span className={`badge ${m?.armed ? "armed" : "disarmed"}`}>{m?.armed ? "ARMED" : "DISARMED"}</span>
-        <span className={`badge ${sa?.fcu_connected ? "connected" : "disconnected"}`}>
-          FCU {sa?.fcu_connected ? "CONNECTED" : "DISCONNECTED"}
-        </span>
-        <span className="badge">{m?.state || "STANDBY"}</span>
-        <div className="view-nav">
-          <button className={`view-btn ${view === "map" ? "active" : ""}`} onClick={() => setView("map")}>Flight Map</button>
-          <button className={`view-btn ${view === "cam" ? "active" : ""}`} onClick={() => setView("cam")}>Video</button>
-          <button className={`view-btn ${view === "slam" ? "active" : ""}`} onClick={() => setView("slam")}>SLAM</button>
+        <div className="wordmark">
+          AeroTHON <span>GCS</span>
         </div>
-        <div className="spacer" />
-        <div className="stat"><span className="k">GPS</span><span className="v mono">{(S as any)?.gps?.fix || "—"} · {S?.gps?.sats || 0}</span></div>
-        <div className="stat"><span className="k">Pos</span><span className="v mono">{f ? `${f.x.toFixed(1)}, ${f.y.toFixed(1)}` : "0, 0"}</span></div>
-        <div className="stat"><span className="k">EKF</span><span className="v">{(sa as any)?.ekf ? "OK" : "—"}</span></div>
-        <div className="stat"><span className="k">Time</span><span className="v mono">{(m as any)?.elapsed?.toFixed?.(1) || "0.0"}s</span></div>
-        <div className="stat connection-control">
-          <span className="k">GCS WebSocket · {linked ? "CONNECTED" : "DISCONNECTED"}</span>
-          <div className="endpoint-row">
-            <input aria-label="Drone WebSocket endpoint" value={endpoint}
-              onChange={(e) => setEndpoint(e.target.value)}
-              onKeyDown={(e) => { if (e.key === "Enter") connect(); }} />
-            <button onClick={connect}>CONNECT</button>
-          </div>
-        </div>
-        <div className="batt-container">
-          <div className="stat"><span className="k">Batt</span><span className="v mono">{S ? S.power.volt.toFixed(1) : 0}V</span></div>
-          <div className="batt-bar"><div className="batt-fill" style={{ width: `${S?.power.pct || 0}%` }} /></div>
-          <span className="batt-text mono">{S?.power.pct || 0}%</span>
+        <nav aria-label="Operating mode">
+          <button
+            aria-pressed={mode === "flight"}
+            onClick={() => {
+              setMode("flight");
+              setReview(null);
+            }}
+          >
+            Flight operations
+          </button>
+          <button
+            aria-pressed={mode === "testing"}
+            onClick={() => {
+              setMode("testing");
+              setReview(null);
+            }}
+          >
+            Testing
+          </button>
+        </nav>
+        <div className="header-end">
+          <span className="vehicle-kind">
+            {(() => {
+              const active = hostState?.profiles.find((x) => x.id === hostState?.profile_id);
+              return active ? `${active.name} · ${vehicleLabel(active)}` : vehicleLabel(null);
+            })()}
+          </span>
+          <button onClick={() => setArenaOpen(true)}>Arena</button>
+          <button onClick={() => setLidarOpen(true)}>Lidar calibration</button>
+          <button onClick={() => setSettings(!settings)}>Connections</button>
+          <button
+            aria-label="Switch theme"
+            onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
+          >
+            {theme === "dark" ? "Light" : "Dark"}
+          </button>
         </div>
       </header>
-
+      <section className="status-strip" aria-label="Aircraft status">
+        <Datum
+          label="Connection"
+          text={
+            fcu
+              ? "Live FCU"
+              : fresh
+                ? "FCU unavailable"
+                : linked
+                  ? "Waiting for telemetry"
+                  : "Disconnected"
+          }
+        />
+        <Datum
+          label="Aircraft mode"
+          text={fcu ? t?.mission.mode || "Unavailable" : "Unavailable"}
+        />
+        <Datum
+          label="Control owner"
+          text={
+            fcu
+              ? running
+                ? t?.execution?.control_owner || "Production runtime"
+                : "Transmitter / FCU"
+              : "Unavailable"
+          }
+        />
+        <Datum
+          label="Armed"
+          text={
+            fcu && typeof t?.mission.armed === "boolean"
+              ? t.mission.armed
+                ? "Yes"
+                : "No"
+              : "Unavailable"
+          }
+        />
+        <Datum
+          label="Battery"
+          text={value(age(t, "power") < 3 ? t?.power.pct : null, "%", 0)}
+        />
+        <Datum
+          label="GPS satellites"
+          text={value(age(t, "sats") < 3 ? t?.gps.sats : null, "", 0)}
+        />
+        <Datum
+          label="Height"
+          text={value(age(t, "pose") < 3 ? t?.flight.alt : null, " m")}
+        />
+        <Datum label="Execution" text={t?.execution ? `${t.execution.task}: ${t.execution.state} ${t.execution.stage || ''}` : t?.mission.state || "Unavailable"} />
+      </section>
+      {error && (
+        <p className="error" role="alert">
+          {error}
+        </p>
+      )}
+      {settings && <Connections state={hostState} refresh={refreshHost} />}
       <main>
-        {/* LEFT RAIL — HUD on top, all telemetry values stacked below (Mission Planner style) */}
-        <aside className="rail">
-          <div className="card hud-card">
-            <div className="hd">Primary Flight Display <span className="tag">HUD</span></div>
-            <div className="hud-body"><canvas ref={hud} width={380} height={300} /></div>
+        <section className="workspace">
+          <div
+            className="view-tabs"
+            role="tablist"
+            aria-label="Monitoring view"
+          >
+            {(["camera", "slam", "map", "graphs"] as const).map((tab) => (
+              <button
+                role="tab"
+                key={tab}
+                id={`tab-${tab}`}
+                aria-selected={view === tab}
+                aria-controls={`view-${tab}`}
+                onClick={() => setView(tab)}
+              >
+                {
+                  {
+                    camera: "Camera",
+                    slam: "SLAM",
+                    map: "Map",
+                    graphs: "Graphs",
+                  }[tab]
+                }
+              </button>
+            ))}
           </div>
-          <div className="card values">
-            <div className="sec">Flight Data</div>
-            <div className="tele">
-              <Cell k="Altitude" v={f?.alt?.toFixed(2)} u="m" />
-              <Cell k="Ground Speed" v={(f as any)?.gs?.toFixed(2)} u="m/s" />
-              <Cell k="Heading" v={Math.round((f as any)?.yaw_deg || 0)} u="°" />
-              <Cell k="Front Lidar" v={S?.nav.front_m?.toFixed(2)} u="m" />
-              <Cell k="Roll / Pitch" v={f ? `${(f as any).roll_deg?.toFixed(0)} / ${(f as any).pitch_deg?.toFixed(0)}` : "—"} small />
-              <Cell k="Centering" v={(S?.nav.centering_err || 0).toFixed(2)} u="m" small />
-            </div>
-            <div className="sec">Perception &amp; Interlock</div>
-            <div className="kv"><span className="dim">Start QR</span><span className="mono" style={{ color: "var(--accent)" }}>{p?.start_qr || "—"}</span></div>
-            <div className="kv"><span className="dim">Target Match</span>{pill(p?.target_match, "MATCHED", "SEARCHING")}</div>
-            <div className="kv"><span className="dim">Green Banner</span>{pill(p?.banner, "ALIGNED", "SCANNING")}</div>
-            <div className="kv"><span className="dim">Red Zone</span>{redPill(p?.redzone_status)}</div>
-            {/* ALIGNED is where the nose points; SQUARE ON is where the
-                aircraft stands. The stage will not advance through the gate
-                without the second, so the operator has to be able to watch
-                it converge rather than guess. */}
-            <div className="kv"><span className="dim">Square On</span>
-              <span className="mono">
-                {p?.square_angle_deg == null
-                  ? (p?.square_reason || "—")
-                  : `${p.square_angle_deg > 0 ? "+" : ""}${p.square_angle_deg}° @ ${p.square_standoff_m ?? "—"} m`}
-              </span></div>
-            {!!p?.redzone_exclusions?.length &&
-              <div className="kv"><span className="dim">Exclusions</span>
-                <span className="mono">{p.redzone_exclusions.length} mapped · {p.redzone_area_m2 ?? 0} m²</span></div>}
-            <div className="kv"><span className="dim">Interlock</span>{pill(sa?.ready, "GO", "STANDBY")}</div>
-            {/* Which of the eleven checks is holding, and what it measured. A
-                greyed-out ARM button with no reason is what this replaces. */}
-            {!!sa?.ready_items?.length &&
-              <div className="interlock">
-                {sa.ready_items.map((it) =>
-                  <div key={it.key} className={`ilk ${it.ok ? "ok" : "bad"}`}
-                       title={it.reason || `${it.label}: ok`}>
-                    <span className="ico">{it.ok ? "✓" : "✕"}</span>
-                    <span className="lbl">{it.label}</span>
-                    <span className="val mono">{fmtVal(it.value)}</span>
-                  </div>)}
-                {!!sa.ready_waived?.length &&
-                  <div className="ilk warn"><span className="ico">!</span>
-                    <span className="lbl">Waived</span>
-                    <span className="val mono">{sa.ready_waived.join(", ")}</span></div>}
-              </div>}
-            {/* WHY arming is blocked, in words, not just which row is red. */}
-            {!!sa?.ready_reasons?.length &&
-              <div className="kv reasons"><span className="dim">Blocking</span>
-                <span className="mono">{sa.ready_reasons.join(" · ")}</span></div>}
-            {/* Payload Delivery Accuracy is 15 rulebook marks; landing is 5.
-                Showing only the landing figure put the smaller number in
-                front of the operator and hid the larger one. */}
-            <div className="kv"><span className="dim">Delivery</span>
-              <span className="mono">
-                {m?.delivery_offset_m == null ? "—"
-                  : `${m.delivery_offset_m.toFixed(2)} m from pad`}</span></div>
-            <div className="kv"><span className="dim">Landing</span>
-              <span className="mono">{m?.landing_precision ?? "—"}</span></div>
-
-            <div className="sec">Mission Sequence</div>
-            <div className="checklist">
-              {CL.map(([k, label], i) => {
-                const done = S?.checklist[k]; const active = i === cur && !done;
-                return <div key={k} className={`ci ${done ? "done" : ""} ${active ? "active" : ""}`}>
-                  <span className="ico">{done ? "✓" : active ? "●" : ""}</span>{label}</div>;
-              })}
-            </div>
-          </div>
-        </aside>
-
-        {/* RIGHT STAGE — big map / SLAM / video, switched by the header view tabs */}
-        <section className="card stage">
-          <div className="hd">
-            {view === "cam" ? "Continuous Camera Feed" : view === "slam" ? "SLAM Occupancy & Costmap" : "Flight Map · Live"}
-            <span className="tag">{view === "cam" ? "web_video_server MJPEG" : view === "slam" ? "slam_toolbox · RPLidar C1" : "Satellite · live GPS track"}</span>
-          </div>
-          <div className="stage-body">
-            <div ref={mapHost} className="maplibre-host" style={{ display: view === "map" ? "block" : "none" }} />
-            <canvas ref={slam} width={960} height={620} style={{ display: view === "slam" ? "block" : "none" }} />
-            {view === "cam" && (
-              <div className="cam-wrap">
-                <img src={videoUrl} alt="Live camera feed"
-                  onError={(e) => { (e.target as HTMLElement).style.display = "none"; }} />
-                <div className="cam-tag tl">REC · {videoUrl || "set drone endpoint"}</div>
-                <div className="cam-tag br">
-                  <select value={videoTopic}
-                    onChange={(e) => setVideoTopic(e.target.value)}
-                    aria-label="camera feed">
-                    <option value="/percep/overlay">ALL DETECTIONS</option>
-                    <option value="/camera/image">RAW CAMERA</option>
-                    <option value="/percep/qr/annotated">QR ONLY</option>
-                    <option value="/percep/banner/annotated">BANNER ONLY</option>
-                    <option value="/percep/redzone/annotated">RED ZONE ONLY</option>
-                  </select>
+          <div
+            role="tabpanel"
+            id={`view-${view}`}
+            aria-labelledby={`tab-${view}`}
+          >
+            {view === "map" && (
+              <>
+                <div ref={mapHost} className="map-host" />
+                <label className="check">
+                  <input
+                    type="checkbox"
+                    checked={onlineMap}
+                    onChange={(e) => setOnlineMap(e.target.checked)}
+                  />
+                  Use online satellite imagery
+                </label>
+                <p className="view-note">
+                  {age(t, "gps") < 3
+                    ? `${value(t?.gps.lat, "°", 7)}, ${value(t?.gps.lon, "°", 7)}`
+                    : "Cached coverage overview; aircraft position is unavailable."}{" "}
+                  {onlineMap
+                    ? "Online imagery needs an internet connection."
+                    : `Offline imagery: ${coverage.regions.map((r) => `${r.name} (zoom ${r.minzoom}-${r.maxzoom})`).join(", ")}.`}
+                </p>
+                {mapError && (
+                  <p className="view-note">
+                    Imagery unavailable for this view. Change zoom or use online
+                    imagery; no substitute map is shown.
+                  </p>
+                )}
+              </>
+            )}
+            {view === "camera" && (
+              <>
+                <div className="camera-tools">
+                  <label>
+                    Camera view
+                    <select
+                      value={topic}
+                      onChange={(e) => {
+                        setTopic(e.target.value);
+                        setVideoError(false);
+                      }}
+                    >
+                      <option value="/percep/overlay">
+                        Composite detections
+                      </option>
+                      <option value="/image_raw">Raw camera</option>
+                      <option value="/percep/qr/annotated">QR</option>
+                      <option value="/percep/banner/annotated">Banner</option>
+                      <option value="/percep/redzone/annotated">
+                        Red zone
+                      </option>
+                    </select>
+                  </label>
                 </div>
-                <div className="gimbal-control">
-                  <span>CAMERA SERVO · {S?.gimbal?.pitch_deg?.toFixed(0) ?? 0}°</span>
-                  <button onClick={() => send("gimbal_pitch", { degrees: 0 })}>FORWARD</button>
-                  <button onClick={() => send("gimbal_pitch", { degrees: -45 })}>45° DOWN</button>
-                  <button onClick={() => send("gimbal_pitch", { degrees: -90 })}>DOWN</button>
-                </div>
-              </div>
+                {fresh && !videoError ? (
+                  <img
+                    className="camera-feed"
+                    src={videoUrl(activeEndpoint, topic)}
+                    alt="Live aircraft camera"
+                    onError={() => setVideoError(true)}
+                  />
+                ) : (
+                  <div className="empty-view camera-feed">
+                    Camera unavailable
+                  </div>
+                )}
+                <p className="view-note">
+                  Changing the displayed feed does not move the physical camera.
+                  Camera tilt is a separate reviewed command.
+                </p>
+                <button onClick={() => setVideoError(false)}>
+                  Retry video
+                </button>
+              </>
+            )}
+            {view === "slam" && (
+              <Slam
+                status={telemetry?.slam_status}
+                grid={grid}
+                current={gridReceived > 0 && clock - gridReceived < 3000}
+                scan={telemetry?.scan}
+                lidarFresh={age(telemetry, "lidar") < 2}
+                poseFresh={age(telemetry, "pose") < 2}
+                slamEnabled={
+                  hostState?.runtime === "Running" &&
+                  hostState.profiles.find((x) => x.id === hostState.profile_id)?.slam === true
+                }
+              />
+            )}
+            {view === "graphs" && (
+              <Suspense fallback={<p>Loading graphs…</p>}>
+                <Graphs history={history.current} theme={theme} live={fresh} />
+              </Suspense>
             )}
           </div>
+          <details>
+            <summary>Flight and mission details</summary>
+            <div className="details-grid">
+              <Datum
+                label="Roll / pitch"
+                text={
+                  age(t, "pose") < 3
+                    ? `${value(t?.flight.roll_deg, "°")} / ${value(t?.flight.pitch_deg, "°")}`
+                    : "Unavailable"
+                }
+              />
+              <Datum
+                label="Heading"
+                text={value(age(t, "pose") < 3 ? t?.flight.yaw_deg : null, "°")}
+              />
+              <Datum
+                label="Ground speed"
+                text={value(
+                  age(t, "velocity") < 3 ? t?.flight.gs : null,
+                  " m/s",
+                )}
+              />
+              <Datum
+                label="Front lidar range"
+                text={value(age(t, "lidar") < 3 ? t?.nav.front_m : null, " m")}
+              />
+              <Datum
+                label="Gap bearing"
+                text={value(
+                  age(t, "avoidance") < 3 && age(t, "lidar") < 3
+                    ? ((t?.nav.centering_err ?? NaN) * 180) / Math.PI
+                    : null,
+                  "°",
+                )}
+              />
+              <Datum
+                label="EKF"
+                text={
+                  age(t, "ekf") < 3
+                    ? String(t?.safety.ekf ?? "Unavailable")
+                    : "Unavailable"
+                }
+              />
+              <Datum
+                label="FC fence"
+                text={
+                  age(t, "fence") < 3
+                    ? t?.safety.geofence || "Unavailable"
+                    : "Unavailable"
+                }
+              />
+              <Datum
+                label="Delivery error"
+                text={value(t?.mission.delivery_offset_m, " m")}
+              />
+              <Datum
+                label="Landing"
+                text={t?.mission.landing_precision || "Unavailable"}
+              />
+              <Datum
+                label="Mission result"
+                text={
+                  t?.mission.result
+                    ? `${t.mission.result}: ${t.mission.result_reason || ""}`
+                    : "Unavailable"
+                }
+              />
+            </div>
+            <p className="view-note">
+              Front lidar range is not aircraft clearance. Mission completion,
+              disarm and physical delivery are separate observations.
+            </p>
+            {t?.checklist && (
+              <p>
+                {Object.entries(t.checklist)
+                  .map(
+                    ([step, done]) =>
+                      `${step}: ${done ? "observed" : "not confirmed"}`,
+                  )
+                  .join(" · ")}
+              </p>
+            )}
+          </details>
+          <section className="observations">
+            <h2>Detections</h2>
+            <p className="observation-line">
+              Start QR: {t?.percep.start_qr || "No payload read"} · Delivery
+              target:{" "}
+              {t?.percep.mission_target === "<start marker appearance>"
+                ? "start marker pattern"
+                : t?.percep.mission_target || "Not set"}{" "}
+              · Pattern: {t?.percep.qr_reference ? "captured" : "not captured"}{" "}
+              · Pad:{" "}
+              {t?.percep.target_match
+                ? `Matched (${(t.percep.qr_match_basis ?? []).join(", ") || "payload"})`
+                : "Unconfirmed"}{" "}
+              · Banner:{" "}
+              {t?.percep.banner ? "Detected" : "Unconfirmed"} · Red zone:{" "}
+              {t?.percep.redzone_status || "UNKNOWN"}
+            </p>
+            <p className="view-note">
+              Square on:{" "}
+              {t?.percep.square_angle_deg == null
+                ? t?.percep.square_reason || "Unavailable"
+                : `${value(t.percep.square_angle_deg, "°")} at ${value(t.percep.square_standoff_m, " m")}`}{" "}
+              · {t?.percep.redzone_exclusions?.length || 0} mapped red
+              exclusions
+            </p>
+            <p className="view-note">
+              {["qr", "banner", "red"]
+                .map(
+                  (kind) =>
+                    `${kind}: ${value(t?.detector_rates?.[kind]?.hz, " Hz")}`,
+                )
+                .join(" · ")}
+            </p>
+            <table>
+              <thead>
+                <tr>
+                  <th>Kind</th>
+                  <th>Payload</th>
+                  <th>Status</th>
+                  <th>Reason</th>
+                  <th>Count</th>
+                </tr>
+              </thead>
+              <tbody>
+                {t?.scans?.map((row) => (
+                  <tr key={row.key}>
+                    <td>{row.kind}</td>
+                    <td>{row.payload || "Undecoded"}</td>
+                    <td>{row.matched ? "Matched" : row.status}</td>
+                    <td>{row.reason}</td>
+                    <td>{row.count}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </section>
         </section>
-
-        {/* RIGHT RAIL — the scan ledger. Everything decoded, identified or
-            refused, in the order it happened, with matches tagged. Before
-            this, a scan existed only as a line in a log nobody reads while
-            flying, and the operator could not tell afterwards what the
-            aircraft had actually read. */}
-        <aside className="rail scanrail">
-          <div className="card scans">
-            <div className="hd">Scanned &amp; Detected
-              <span className="tag">{scans.length} observation{scans.length === 1 ? "" : "s"}</span>
+        <aside className="task-area">
+          <h2>{mode === "flight" ? "Normal mission" : "Test task"}</h2>
+          {mode === "testing" && (
+            <label>
+              Task
+              <select
+                value={task}
+                disabled={running}
+                onChange={(e) => {
+                  setTask(e.target.value);
+                  setReview(null);
+                }}
+              >
+                {tasks.map((item) => (
+                  <option key={item.id} value={item.id}>
+                    {item.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+          <p>{taskInfo.description}</p>
+          {selectedTask === "mechanism" && (
+            <label>
+              Mechanism action
+              <select
+                value={action}
+                onChange={(e) => setAction(e.target.value)}
+              >
+                {["lower", "release", "stow", "stop"].map((name) => (
+                  <option key={name}>{name}</option>
+                ))}
+              </select>
+            </label>
+          )}
+          {taskInfo.movement && selectedTask !== 'mission' && <label>Test height above home (m)<input type="number" min={1} max={10} value={height} onChange={e => setHeight(Number(e.target.value))}/></label>}
+          {selectedTask.startsWith('delivery_') && <label>QR payload to verify<input value={target} onChange={e => setTarget(e.target.value)} /></label>}
+          {['delivery_gps','avoidance_route'].includes(selectedTask) && <label>GPS waypoints (latitude, longitude per line)<textarea value={waypoints} onChange={e => setWaypoints(e.target.value)} /></label>}
+          <p className="task-note">
+            {selectedTask === "mechanism"
+              ? "Disarmed bench task. Accepted release does not prove detachment."
+              : "Flight tasks use production behaviours and readiness checks. Passive QR and SLAM tasks observe without arming. No browser joystick."}
+          </p>
+          <button
+            disabled={!canStart}
+            onClick={() => {
+              const request = taskCommand(selectedTask, action, {height, target, waypoints: waypoints.trim() ? boundary(waypoints) : []});
+              setReview({ ...request, label: `Start ${taskInfo.label}` });
+            }}
+          >
+            Review start
+          </button>
+          <button
+            disabled={!linked || busy}
+            onClick={() =>
+              setReview({
+                cmd: "stop",
+                args: {},
+                label: "Stop and recover using the production abort procedure",
+              })
+            }
+          >
+            Stop and return
+          </button>
+          {review && (
+            <section className="review">
+              <h3>{review.label}</h3>
+              <p>Vehicle: {hostState?.profile_id ?? 'None'}</p>
+              <p>
+                Mode: {fcu ? t?.mission.mode : "Unavailable"} · Armed:{" "}
+                {fcu ? (t?.mission.armed ? "Yes" : "No") : "Unavailable"}
+              </p>
+              <p>
+                Runtime acceptance does not confirm the aircraft outcome. Stop
+                uses the current stage-aware LAND/RTL procedure.
+              </p>
+              <button
+                disabled={
+                  busy || !reviewAllowed(t, linked, review.cmd, review.args)
+                }
+                onClick={() => {
+                  const request = review;
+                  setReview(null);
+                  void perform(request.cmd, request.args);
+                }}
+              >
+                Confirm{" "}
+                {review.cmd === "start"
+                  ? "Start"
+                  : "command"}
+              </button>
+              <button onClick={() => setReview(null)}>Cancel</button>
+            </section>
+          )}
+          {outcome && (
+            <p role="status">
+              {outcome.cmd}: {outcome.state}. {outcome.reason}
+            </p>
+          )}
+          <details open>
+            <summary>Readiness</summary>
+            {!fresh && <p>Readiness unavailable</p>}
+            {t?.safety.ready_reasons?.map((reason) => (
+              <p key={reason}>{reason}</p>
+            ))}
+            {t?.safety.ready_items?.map((item) => (
+              <div className="readiness-row" key={item.key}>
+                <span>
+                  {item.label}: {item.ok ? "Ready" : "Blocked"}
+                </span>
+                <span>
+                  {readinessValue(item.value)} · {item.reason}
+                </span>
+              </div>
+            ))}
+            {fresh && !t?.safety.ready && (
+              <p>
+                {t?.mission.mode !== "GUIDED"
+                  ? "GUIDED mode is required for flight tasks."
+                  : "Correct the named inputs before starting."}
+              </p>
+            )}
+          </details>
+          <details>
+            <summary>Organiser inputs</summary>
+            <button onClick={() => setArenaOpen(true)}>Arena dimensions</button>
+            <button onClick={() => setLidarOpen(true)}>
+              Lidar calibration
+            </button>
+            <Field label="Target QR payload" text={target} change={setTarget} />
+            <button
+              disabled={!fresh || busy}
+              onClick={() => void perform("set_target", { target })}
+            >
+              Set target
+            </button>
+            {(["green", "orange", "red"] as const).map((name) => (
+              <Field
+                key={name}
+                label={name === "red" ? "red zone HEX" : `${name} banner HEX`}
+                text={colours[name]}
+                change={(shade) => setColours({ ...colours, [name]: shade })}
+              />
+            ))}
+            <button
+              disabled={!fcu || busy || t?.mission.armed !== false || !Object.values(colours).every(c => /^#[0-9a-fA-F]{6}$/.test(c))}
+              onClick={() =>
+                reviewedSend("set_banner_colours", { colours }, true)
+              }
+            >
+              Apply banner colours
+            </button>
+            <p>Enter all three organiser codes as #RRGGBB. Applied: {t?.banner_colours ? Object.entries(t.banner_colours).map(([name,hex]) => `${name} ${hex}`).join(' · ') : 'Not configured'}</p>
+            <label>
+              Geofence: the judges&apos; coordinates, one
+              &quot;latitude, longitude&quot; per line
+              <textarea
+                rows={7}
+                value={fenceText}
+                placeholder={["-35.3634507, 149.1650815", "-35.3634507, 149.1659792", "..."].join("\n")}
+                onChange={(e) => setFenceText(e.target.value)}
+              />
+            </label>
+            <p className="view-note">
+              {draftError
+                ? draftError
+                : draftFence.length
+                  ? `${draftFence.length} points${draftFence.length === 6 ? "" : " (the judges give 6)"} · drawn dashed on the Map tab`
+                  : "Paste the coordinates; the polygon is drawn on the Map tab."}
+            </p>
+            <button
+              disabled={!fcu || busy || t?.mission.armed !== false || draftFence.length < 3 || Boolean(draftError)}
+              onClick={() => {
+                try {
+                  reviewedSend(
+                    "set_geofence",
+                    { vertices: boundary(fenceText) },
+                    true,
+                  );
+                } catch (reason) {
+                  setError(String(reason));
+                }
+              }}
+            >
+              Apply geofence
+            </button>
+            <p className="view-note">
+              Applied: {appliedFence.length ? `${appliedFence.length} points (filled on the map)` : "none"}.
+              If the points surround take-off they are the arena fence and
+              the aircraft searches the fenced field beyond the corridor exit;
+              if take-off lies outside them they are the delivery zone and the
+              aircraft enforces a fence 10 m round the zone and take-off.
+              Readiness shows which. No separate delivery-zone corners are
+              needed. Aircraft validation remains authoritative.
+            </p>
+          </details>
+          <details>
+            <summary>Aircraft controls</summary>
+            <p>
+              Transmitter takeover and FCU failsafes retain priority. Recovery
+              remains available when readiness is blocked.
+            </p>
+            <div className="actions">
+              <button
+                disabled={!fcu || busy || running}
+                onClick={() =>
+                  reviewedSend("set_mode", { mode: "GUIDED" }, true)
+                }
+              >
+                GUIDED
+              </button>
+              <button
+                disabled={
+                  !fcu ||
+                  !t?.safety.ready ||
+                  t?.mission.mode !== "GUIDED" ||
+                  busy ||
+                  running
+                }
+                onClick={() => reviewedSend("arm", {}, true)}
+              >
+                Arm
+              </button>
+              <button
+                disabled={
+                  !fcu ||
+                  busy ||
+                  t?.mission.armed !== true ||
+                  t?.safety.on_ground !== true ||
+                  age(t, "extended_state") >= 3
+                }
+                onClick={() => reviewedSend("disarm", {}, true)}
+              >
+                Disarm
+              </button>
+              <button
+                disabled={!linked || busy}
+                onClick={() => reviewedSend("land", {}, true)}
+              >
+                Land
+              </button>
+              <button
+                disabled={!linked || busy}
+                onClick={() => reviewedSend("set_mode", { mode: "RTL" }, true)}
+              >
+                RTL
+              </button>
+              <button
+                disabled={!linked || busy}
+                onClick={() => reviewedSend("abort", {}, true)}
+              >
+                Abort
+              </button>
             </div>
-            <div className="scanlist">
-              {scans.length === 0 && <div className="scanempty">nothing scanned yet</div>}
-              {scans.map((r) => (
-                <div key={r.key} className={"scanrow " + r.status.toLowerCase()}>
-                  <div className="scanhead">
-                    <span className="scankind">{r.kind.toUpperCase()}</span>
-                    <span className="scanpayload mono">
-                      {r.payload || <em>refused</em>}
-                    </span>
-                    {r.matched && <span className="scantag match">MATCH</span>}
-                    {!r.matched && r.status === "IDENTIFIED" &&
-                      <span className="scantag ident">ID</span>}
-                    {r.status === "REJECTED" &&
-                      <span className="scantag rej">REJECTED</span>}
-                  </div>
-                  {r.reason && <div className="scanreason">{r.reason}</div>}
-                  <div className="scanmeta mono">
-                    {r.stage || "—"} · {r.count}x
-                    {r.via ? ` · via ${r.via}` : ""}
-                    {r.t ? ` · t+${r.t.toFixed(0)}s` : ""}
-                  </div>
-                </div>
-              ))}
+            <label>
+              Takeoff height above home, metres
+              <input
+                type="number"
+                min="1"
+                max="10"
+                value={height}
+                onChange={(e) => setHeight(Number(e.target.value))}
+              />
+            </label>
+            <button
+              disabled={
+                !fcu ||
+                !t?.safety.ready ||
+                t?.mission.mode !== "GUIDED" ||
+                busy ||
+                running
+              }
+              onClick={() => reviewedSend("takeoff", { alt: height }, true)}
+            >
+              Review takeoff
+            </button>
+            <div className="actions">
+              <button
+                disabled={!fcu || busy}
+                onClick={() =>
+                  reviewedSend("gimbal_pitch", { degrees: 0 }, true)
+                }
+              >
+                Camera forward
+              </button>
+              <button
+                disabled={!fcu || busy}
+                onClick={() =>
+                  reviewedSend("gimbal_pitch", { degrees: -90 }, true)
+                }
+              >
+                Camera down
+              </button>
             </div>
-          </div>
+            <p className="view-note">
+              Winch controls are under Testing → Mechanism only. Current
+              hardware has no GPIO encoder acquisition.
+            </p>
+          </details>
         </aside>
       </main>
-
       <footer>
-        <div className="btns">
-          <button className="primary" onClick={() => send("set_mode", { mode: "GUIDED" })}>GUIDED</button>
-          <button disabled={!sa?.ready} onClick={() => send("arm", {}, true)}>ARM</button>
-          <button disabled={!sa?.ready} onClick={() => send("takeoff", { alt: 5.0 })}>TAKEOFF</button>
-          <button disabled={!sa?.ready} className="primary" onClick={() => send("start_mission", {}, true)}>START M2</button>
-          <button onClick={() => send("disarm", {}, true)}>DISARM</button>
-          <button className="warn" onClick={() => send("land", {})}>LAND</button>
-          <button className="warn" onClick={() => send("set_mode", { mode: "RTL" }, true)}>RTL</button>
-          <button className="danger" onClick={() => send("abort", {}, true)}>ABORT</button>
-        </div>
-        <div className="log mono" ref={logRef}>{log.map((l, i) => <div key={i}>{l}</div>)}</div>
+        <details open>
+          <summary>Events</summary>
+          <div className="event-log">
+            {events.length
+              ? events.map((event, index) => <div key={index}>{event}</div>)
+              : "No events yet"}
+          </div>
+        </details>
       </footer>
+      {arenaOpen && (
+        <ArenaDimensions
+          S={t}
+          connected={fcu}
+          send={reviewedSend}
+          onClose={() => setArenaOpen(false)}
+        />
+      )}
+      {lidarOpen && (
+        <LidarCalibration
+          S={t}
+          connected={fcu}
+          send={reviewedSend}
+          onClose={() => setLidarOpen(false)}
+        />
+      )}
     </div>
   );
 }
-
-function Cell({ k, v, u, small }: { k: string; v: any; u?: string; small?: boolean }) {
-  return <div className="cell"><div className="k">{k}</div>
-    <div className="v mono" style={small ? { fontSize: 14 } : undefined}>{v ?? "—"}{u && <small> {u}</small>}</div></div>;
+function Datum({ label, text }: { label: string; text: string }) {
+  return (
+    <dl>
+      <dt>{label}</dt>
+      <dd>{text}</dd>
+    </dl>
+  );
+}
+function Field({
+  label,
+  text,
+  change,
+}: {
+  label: string;
+  text: string;
+  change: (text: string) => void;
+}) {
+  return (
+    <label>
+      {label}
+      <input value={text} onChange={(event) => change(event.target.value)} />
+    </label>
+  );
 }

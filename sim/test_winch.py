@@ -102,9 +102,9 @@ class WinchTests(unittest.TestCase):
         self.advance(2.0)
         self.assertGreater(self.node.payout, before)
 
-    def test_lowering_reaches_ground_state(self):
+    def test_estimated_ground_travel_does_not_claim_ground_contact(self):
         self.lower_to_ground(4.0)
-        self.assertIn(self.node.state, ("AT_GROUND",))
+        self.assertEqual(self.node.state, "LOWERING")
         self.assertTrue(self.node.at_ground() or self.node.at_limit())
 
     def test_payout_never_exceeds_spool(self):
@@ -243,3 +243,87 @@ class WinchTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class FakeFuture:
+    def __init__(self):
+        self.callbacks, self.reply = [], None
+
+    def add_done_callback(self, cb):
+        self.callbacks.append(cb)
+
+    def result(self):
+        return self.reply
+
+    def finish(self, success=True, result=0):
+        from types import SimpleNamespace
+        self.reply = SimpleNamespace(success=success, result=result)
+        for cb in self.callbacks:
+            cb(self)
+
+
+class FakeCommandClient:
+    def __init__(self, ready=True):
+        self.ready, self.sent = ready, []
+
+    def service_is_ready(self):
+        return self.ready
+
+    def call_async(self, req):
+        f = FakeFuture()
+        self.sent.append((req, f))
+        return f
+
+
+class MavlinkWinchTests(unittest.TestCase):
+    """16 Oct audit: on the default mavlink backend the payout estimate grew
+    while nothing moved (command unsent or refused), and at 0.30 m/s while
+    ArduPilot's length control reeled at WNCH_RATE_MAX (1.0 m/s)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.owns = not rclpy.ok()
+        if cls.owns:
+            rclpy.init()
+
+    @classmethod
+    def tearDownClass(cls):
+        if cls.owns and rclpy.ok():
+            rclpy.shutdown()
+
+    def setUp(self):
+        from rclpy.parameter import Parameter
+        self.node = WinchNode(parameter_overrides=[
+            Parameter("backend", Parameter.Type.STRING, "mavlink"),
+            Parameter("fc_rate_max_mps", Parameter.Type.DOUBLE, 0.30)])
+        self.node.pub_status.publish = lambda *_: None
+        self.client = FakeCommandClient()
+        self.node.cli_cmd = self.client
+        self.node._on_pose(pose(5.0))
+
+    def tearDown(self):
+        self.node.destroy_node()
+
+    def advance(self, seconds, step=0.1):
+        for _ in range(int(seconds / step)):
+            self.node.integrate(step)
+
+    def test_no_payout_until_the_fc_accepts(self):
+        self.node._on_cmd(String(data="lower"))
+        self.advance(2.0)
+        self.assertEqual(self.node.payout, 0.0, "estimate grew with nothing accepted")
+        self.client.sent[-1][1].finish()
+        self.advance(2.0)
+        self.assertAlmostEqual(self.node.payout, 0.60, places=2)   # FC's rate
+
+    def test_a_refused_command_is_a_fault(self):
+        self.node._on_cmd(String(data="lower"))
+        self.client.sent[-1][1].finish(success=False, result=3)    # UNSUPPORTED
+        self.assertEqual(self.node.state, "FAULT")
+        self.assertIn("refused DO_WINCH lower", self.node.fault)
+
+    def test_an_unsent_command_is_a_fault(self):
+        self.client.ready = False
+        self.node._on_cmd(String(data="lower"))
+        self.assertEqual(self.node.state, "FAULT")
+        self.assertEqual(self.client.sent, [])

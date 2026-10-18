@@ -1,0 +1,54 @@
+{
+  "date": "2026-10-16",
+  "triage": "ready-for-human",
+  "problems": {
+    "lidar_not_spinning": {
+      "status": "recovered after physical reconnect and Pi cold restart; runtime not reconnected",
+      "evidence": [
+        "runtime.log: last sllidar 'current scan mode' 12:09; from 18:47 every respawn SL_RESULT_OPERATION_TIMEOUT (199+ times) on USB 3-1, 1-2, 3-1",
+        "raw probe with launch SIGSTOPped and port free: 0 bytes at 460800/115200/1000000 baud for GET_INFO/GET_HEALTH and after RESET; CP2102N enumerated, DTR/RTS set",
+        "Pi then dropped off the network (throttled 0xf0000, under-voltage occurred) and cold-restarted (power_reset 0)",
+        "after restart, 19:26: GET_INFO a55a14...41 02 01 12 7c46e18ac1ea9ed2b29c92f5ffe2466c (model 0x41, fw 1.02, hw 18, same S/N), GET_HEALTH status 0"
+      ],
+      "conclusion": "silent C1 head behind a working adapter: wedged head or its lead, not driver/QoS/port; cp210x PURGE -110 at close also occurs while the lidar answers and is not a fault indicator",
+      "blockers": ["Pi 5 supply on jumper wires still browns out under runtime load; the user is reworking it before hardware tests"]
+    },
+    "gate_pause_campaign": {
+      "status": "inconclusive: confounded by onboard CPU starvation",
+      "evidence_dir": "logs/e2e_gatepause_20261016",
+      "source": "9e4cee6 + worktree (worktree.diff / worktree.sha256 in evidence dir); differs from e2e_final only in gate_braking.py, stream_rate_keeper.py, set_stream_rates.py, mission2.launch.py, mission_bringup/setup.py",
+      "results": {
+        "calm": "15/24 navigation pass (e2e_final 23/24)",
+        "field": "7/12 (e2e_final 10/12)",
+        "failure_mode": "9 x ReturnCorridor STUCK after velocity_controller 'no gap' backoffs; 0 gate-braking aborts (1 in e2e_final)"
+      },
+      "starvation": {
+        "lidar_receipt_gaps_over_0p3s": {"e2e_final": 4, "e2e_gatepause": 258},
+        "receipt_lag_p99_s": {"e2e_final": "0.01-0.02", "e2e_gatepause": "0.02-0.20"},
+        "world_rtf": "2.00 in both"
+      },
+      "notes": [
+        "headless campaign does not start stream_rate_keeper; the rate cut is untested there",
+        "velocity_controller and corridor source byte-identical between campaigns"
+      ],
+      "next": "same-batch A/B of 9e4cee6 vs this source on an idle machine, when the user allows tests again"
+    },
+    "offline_checks": {
+      "reduced_suite": "2070 passed, 8 skipped (reduced_suite.log); frontend step failed only on missing node in non-login WSL",
+      "frontend": "25 passed, tsc ok, vite build ok with nvm node v24.18.0 (frontend_build.log)",
+      "gcs_targeted": "157 passed, 10 skipped after aggregator raw=True (web robustness, aggregator, real-path wiring, contracts, readiness, lidar calibration, camera exposure, Pi ROS runtime)",
+      "raw_image_check": "rclpy raw=True Image subscription delivered bytes; SensorMetric.observe_raw read stamp 1792158400.25"
+    },
+    "deploy": {
+      "host": "pi5@192.168.137.190",
+      "files": {
+        "src/aerothon_gcs/gcs_aggregator/gcs_aggregator/aggregator.py": "3f9b2bb5e285",
+        "src/aerothon_gcs/gcs_aggregator/gcs_aggregator/sensor_metrics.py": "079448d3fb38",
+        "src/aerothon_runtime/aerothon_runtime/execution_node.py": "5151fed9f962"
+      },
+      "backup": "/home/pi5/.local/state/aerothon/backup-gcsraw-20261016/",
+      "verified": "container imports resolve to /workspace/src copies with matching hashes; sllidar_node resolves to an executable build",
+      "effective": "next GCS Connect"
+    }
+  }
+}

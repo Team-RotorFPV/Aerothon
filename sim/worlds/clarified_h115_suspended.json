@@ -1,0 +1,119 @@
+{
+  "schema": "aerothon-world/1",
+  "name": "clarified_h115_suspended",
+  "takeoff": {
+    "x": -4.2,
+    "y": 3.2,
+    "yaw_deg": -25
+  },
+  "corridor": {
+    "x": 2,
+    "y": 2,
+    "yaw_deg": 5,
+    "length": 10.0,
+    "width": 3.5,
+    "wall_height": 3.048
+  },
+  "return_corridor": {
+    "linked": true,
+    "length": 10.0,
+    "width": 3.5,
+    "wall_height": 3.048,
+    "obstacles": [
+      {
+        "u": 1.4,
+        "v": 0.875,
+        "w": 0.35,
+        "d": 1.75,
+        "h": 2.896,
+        "yaw_deg": 0.0
+      },
+      {
+        "u": 3.8,
+        "v": -0.875,
+        "w": 0.35,
+        "d": 1.75,
+        "h": 2.896,
+        "yaw_deg": 0.0
+      },
+      {
+        "u": 6.2,
+        "v": 0.875,
+        "w": 0.35,
+        "d": 1.75,
+        "h": 2.896,
+        "yaw_deg": 0.0
+      },
+      {
+        "u": 8.6,
+        "v": -0.875,
+        "w": 0.35,
+        "d": 1.75,
+        "h": 2.896,
+        "yaw_deg": 0.0
+      }
+    ]
+  },
+  "delivery_zone": {
+    "x": 41.311,
+    "y": 0,
+    "w": 40,
+    "h": 30
+  },
+  "geofence": {
+    "mode": "auto",
+    "margin": 6
+  },
+  "red_zones": [
+    {
+      "x": 46.311,
+      "y": 5,
+      "w": 1.524,
+      "h": 1.524,
+      "yaw_deg": 0.0
+    }
+  ],
+  "pads": {
+    "a": {
+      "x": 29.311,
+      "y": 10
+    },
+    "b": {
+      "x": 54.811,
+      "y": 13
+    },
+    "c": {
+      "x": 31.311,
+      "y": 1
+    },
+    "d": {
+      "x": 41.311,
+      "y": -10
+    },
+    "e": {
+      "x": 53.311,
+      "y": -6
+    }
+  },
+  "decoys": [],
+  "start_target": "b",
+  "qr": {
+    "start_m": 1.0,
+    "target_m": 1.0
+  },
+  "banner": {
+    "board_bottom_m": 1.898,
+    "width_m": 3.5,
+    "height_m": 1.15,
+    "mount": "rod",
+    "placement": "suspended",
+    "orange": true,
+    "lettered": false,
+    "colours": {
+      "green": "#07A03D",
+      "orange": "#EB5A0A",
+      "red": "#C4161C"
+    }
+  },
+  "_note": "Built by world_from_dimensions.py from the GCS dimensions (banner 3.5 x 1.15 m, suspended; QR 1 m; red zone 1.524 m; walls 3.048 m; navigation 2.438 m); delivery zone moved 8.3 m clear of the corridors"
+}

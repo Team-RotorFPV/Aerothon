@@ -278,6 +278,15 @@ cleanup() {
 trap cleanup SIGINT SIGTERM EXIT
 
 # 3. Start MAVLink Router (Splits telemetry to MAVROS & Mission Planner)
+#
+# TEMPORARY PORT SHIFT. With WSL in mirrored networking this machine's
+# localhost IS Windows' localhost, so a Mission Planner talking to a real drone
+# on 14550/14551 also hears the simulator. AEROTHON_SITL_PORT_SHIFT=N moves
+# every simulator MAVLink UDP port by N (MAVProxy's two outputs, SITL SERIAL1,
+# the router and MAVROS). Unset, every port is exactly as before.
+SHIFT="${AEROTHON_SITL_PORT_SHIFT:-0}"
+export AEROTHON_SITL_PORT_SHIFT="$SHIFT"
+MAVROS_PORT=$((14555 + SHIFT))
 if [[ -n "${AEROTHON_MISSION_PLANNER_IP:-}" ]]; then
     MP_HOST="$AEROTHON_MISSION_PLANNER_IP"
     MP_PORT="${AEROTHON_MISSION_PLANNER_PORT:-14550}"
@@ -289,7 +298,7 @@ else
     # which is what Mission Planner should listen on. Send the router's own
     # GCS fan-out to a different port so the two paths do not duplicate.
     MP_HOST="127.0.0.1"
-    MP_PORT="${AEROTHON_MISSION_PLANNER_PORT:-14553}"
+    MP_PORT="${AEROTHON_MISSION_PLANNER_PORT:-$((14553 + SHIFT))}"
 fi
 # Router FCU input must match where the SITL side actually sends MAVLink.
 # ardupilot_gz's robot.launch.py computes mavlink_out = 14550 + port_offset and
@@ -304,11 +313,17 @@ fi
 # 14560 is SITL SERIAL1, given to the router by sim_full.launch.py.
 # 14550 is MAVProxy's --out and is deliberately NOT used: streams
 # requested through MAVProxy are reset to its 4 Hz default.
-FCU_IN_PORT="${AEROTHON_FCU_IN_PORT:-14560}"
-ROUTER_GCS_PORT="${AEROTHON_ROUTER_GCS_PORT:-14552}"
+FCU_IN_PORT="${AEROTHON_FCU_IN_PORT:-$((14560 + SHIFT))}"
+ROUTER_GCS_PORT="${AEROTHON_ROUTER_GCS_PORT:-$((14552 + SHIFT))}"
 
-echo "[1/5] Starting MAVLink Router (FCU in ${FCU_IN_PORT}; MAVROS 14555; GCS -> ${MP_HOST}:${MP_PORT})..."
-python3 "$SCRIPT_DIR/mav_router.py" --fcu-in "$FCU_IN_PORT" --mavros-port 14555 \
+if [[ "${AEROTHON_LAPTOP_SERVICES_ONLY:-0}" == 1 ]]; then
+    "${AEROTHON_GATEWAY_PYTHON:-python3}" -m aerothon_runtime.gateway --fcu-udp "$FCU_IN_PORT" \
+      --port "${AEROTHON_GATEWAY_PORT:-8090}" --mavlink-port "${AEROTHON_GATEWAY_MAVLINK_PORT:-5762}" \
+      --camera-channel 9 --winch-channel 10 --winch-rate 1.0 &
+    PIDS+=($!)
+else
+echo "[1/5] Starting MAVLink Router (FCU in ${FCU_IN_PORT}; MAVROS ${MAVROS_PORT}; GCS -> ${MP_HOST}:${MP_PORT}; port shift ${SHIFT})..."
+python3 "$SCRIPT_DIR/mav_router.py" --fcu-in "$FCU_IN_PORT" --mavros-port "$MAVROS_PORT" \
     --gcs-port "$ROUTER_GCS_PORT" --gcs-host "$MP_HOST" --gcs-out-port "$MP_PORT" &
 PIDS+=($!)
 sleep 1
@@ -317,6 +332,7 @@ sleep 1
 echo "[2/5] Starting built three-tab GCS on http://localhost:8899..."
 python3 -m http.server 8899 -d "$WORKSPACE_ROOT/src/aerothon_gcs/tauri_app/dist" >/dev/null 2>&1 &
 PIDS+=($!)
+fi
 
 echo "======================================================================"
 echo " [MISSION PLANNER CONNECTION]"
@@ -324,7 +340,7 @@ echo "   -> Open Mission Planner / QGroundControl"
 if [[ -n "${AEROTHON_MISSION_PLANNER_IP:-}" ]]; then
     echo "   -> Mission Planner: UDP listen on ${MP_PORT} (router target ${MP_HOST}:${MP_PORT})"
 else
-    echo "   -> Mission Planner (SITL): UDP listen on 14551  <- direct from MAVProxy"
+    echo "   -> Mission Planner (SITL): UDP listen on $((14551 + SHIFT))  <- direct from MAVProxy"
     echo "   -> Router GCS fan-out also available on ${MP_HOST}:${MP_PORT}"
 fi
 echo "   -> Web GCS URL: http://localhost:8899/"
@@ -396,6 +412,16 @@ export AEROTHON_AIRFRAME="${AEROTHON_AIRFRAME:-cad}"
 # The pad size the world is built with (materialize_world.py's default) is
 # the size the mission's sweep has to plan for.
 export AEROTHON_TARGET_QR_M="${AEROTHON_TARGET_QR_M:-3.0}"
+# The arming interlock waits for the GCS's arena dimensions. A run that hands
+# the mission its arena as these launch values, with no GCS preset applied,
+# waives that item (reported WAIVED, never shown as supplied).
+if [[ -z "${AEROTHON_REQUIRE_ARENA_DIMENSIONS:-}" ]]; then
+    if [[ -n "${AEROTHON_GCS_PRESET:-}" ]]; then
+        export AEROTHON_REQUIRE_ARENA_DIMENSIONS=1
+    else
+        export AEROTHON_REQUIRE_ARENA_DIMENSIONS=0
+    fi
+fi
 if [[ "$AEROTHON_AIRFRAME" == "iris" ]]; then
     export AEROTHON_CAMERA_HFOV="${AEROTHON_CAMERA_HFOV:-1.0472}"
 else
@@ -534,6 +560,16 @@ if [[ "${AEROTHON_SUPPLY_DELIVERY_ZONE:-1}" == "1" ]] && command -v ros2 >/dev/n
     PIDS+=($!)
 fi
 
+# The organisers also give each banner's shade as a HEX code. The banners
+# carry no text, so colour is what identifies the corridor the aircraft may
+# use, and gcs_readiness holds the interlock until the shades arrive.
+# Set AEROTHON_SUPPLY_BANNER_COLOURS=0 to drive them from the GCS instead.
+if [[ "${AEROTHON_SUPPLY_BANNER_COLOURS:-1}" == "1" ]] && command -v ros2 >/dev/null 2>&1; then
+    echo "[4/5] Supplying the banner colours (${AEROTHON_BANNER_COLOURS:-simulator defaults})..."
+    python3 "$SCRIPT_DIR/publish_banner_colours.py" &
+    PIDS+=($!)
+fi
+
 # SITL's saved parameters (eeprom.bin, in the directory it starts in) beat
 # every --defaults file. A learned MOT_THST_HOVER of 0.324 -- the Iris's hover
 # throttle -- survived into every run on the team airframe, which hovers at
@@ -547,8 +583,11 @@ fi
 # 6. Launch Full Simulation Stack (SITL + ROS 2 + SLAM + RViz)
 echo "[5/5] Launching Gazebo Harmonic + ROS 2 Stack + slam_toolbox + RViz 2..."
 if command -v ros2 >/dev/null 2>&1; then
-    ros2 launch sim_gazebo sim_full.launch.py \
-        fcu_url:=udp://127.0.0.1:14555@127.0.0.1:14556 rviz:="$RVIZ_ARG" slam:=true \
+    production=true
+    mapping=true
+    if [[ "${AEROTHON_LAPTOP_SERVICES_ONLY:-0}" == 1 ]]; then production=false; mapping=false; RVIZ_ARG=false; fi
+    ros2 launch sim_gazebo sim_full.launch.py mission_stack:="$production" \
+        fcu_url:=udp://127.0.0.1:${MAVROS_PORT}@127.0.0.1:$((MAVROS_PORT + 1)) rviz:="$RVIZ_ARG" slam:="$mapping" \
         stream_rate_keeper:="${AEROTHON_STREAM_KEEPER:-true}" \
         start_gz_server:=false gui:=false
 else

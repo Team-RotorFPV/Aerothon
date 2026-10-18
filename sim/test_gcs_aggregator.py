@@ -43,7 +43,12 @@ class TestGCSAggregator(unittest.TestCase):
             self.node.pub_target = MagicMock()
             self.node.pub_start = MagicMock()
             self.node.pub_delivery_zone = MagicMock()
+            self.node.pub_banner_colours = MagicMock()
+            self.node.pub_test_part = MagicMock()
             self.node.state["safety"]["ready"] = True
+            # The aircraft is in the mode the autonomy flies in. Every start
+            # now requires it, so a test that starts one has to say so.
+            self.node.state["mission"]["mode"] = "GUIDED"
 
     def test_euler_deg_conversion(self):
         """Test quaternion to euler degrees conversion."""
@@ -91,6 +96,79 @@ class TestGCSAggregator(unittest.TestCase):
         result, reason = self.node._dispatch("set_delivery_zone", {})
         self.assertEqual(result, "rejected")
         self.assertIn("four", reason)
+
+    # ---- nothing autonomous starts outside GUIDED ---- #
+
+    def test_a_start_outside_guided_is_refused_with_the_mode_in_the_reason(self):
+        """The stack flies by streaming setpoints, which only GUIDED acts on.
+
+        In AUTO the FCU runs an uploaded waypoint mission and ignores them, so
+        a mission "started" there publishes setpoints nothing obeys while the
+        operator believes the aircraft is flying itself.
+        """
+        for mode in ("STABILIZE", "AUTO", "LOITER", "RTL", ""):
+            self.node.state["mission"]["mode"] = mode
+            for cmd, args in (("start_mission", {}), ("takeoff", {"alt": 5.0}),
+                              ("arm", {}), ("start_test", {"part": "search"})):
+                result, reason = self.node._dispatch(cmd, args)
+                self.assertEqual(result, "rejected", f"{cmd} in {mode!r}")
+                self.assertIn("GUIDED required", reason)
+                self.assertIn(mode or "unknown", reason)
+
+    def test_in_guided_the_same_starts_are_accepted(self):
+        self.node.state["mission"]["mode"] = "GUIDED"
+        for cmd, args in (("start_mission", {}), ("takeoff", {"alt": 5.0}),
+                          ("arm", {}), ("start_test", {"part": "search"})):
+            # Independent requests: a previous execution has ended. The
+            # duplicate/concurrent-start contract is covered separately.
+            self.node.state["mission"]["state"] = "IDLE"
+            result, _ = self.node._dispatch(cmd, args)
+            self.assertEqual(result, "accepted", cmd)
+
+    def test_recovery_stays_available_in_any_mode(self):
+        """An interlock that blocks ABORT is worse than no interlock."""
+        for mode in ("STABILIZE", "AUTO", ""):
+            self.node.state["mission"]["mode"] = mode
+            self.node.state["safety"]["ready"] = False
+            for cmd, args in (("abort", {}), ("land", {}), ("disarm", {}),
+                              ("set_mode", {"mode": "RTL"}),
+                              ("gimbal_pitch", {"degrees": -90}),
+                              ("winch", {"action": "stow"})):
+                result, reason = self.node._dispatch(cmd, args)
+                self.assertEqual(result, "accepted", f"{cmd} in {mode!r}: {reason}")
+
+    def test_an_unknown_test_part_is_refused(self):
+        result, reason = self.node._dispatch("start_test", {"part": "wiggle"})
+        self.assertEqual(result, "rejected")
+        self.assertIn("unknown test part", reason)
+
+    def test_a_test_part_is_published_before_the_start(self):
+        result, _ = self.node._dispatch("start_test", {"part": "return_corridor"})
+        self.assertEqual(result, "accepted")
+        self.assertEqual(self.node.state["mission"]["part"], "return_corridor")
+        self.node.pub_test_part.publish.assert_called_once()
+        self.assertEqual(self.node.pub_test_part.publish.call_args[0][0].data,
+                         "return_corridor")
+
+    # ---- the organisers' banner colours ---- #
+
+    def test_supplied_banner_colours_are_published_normalised(self):
+        result, reason = self.node._dispatch("set_banner_colours", {
+            "colours": {"green": "#07a03d", "orange": "#EB5A0A", "red": "#C4161C"}})
+        self.assertEqual(result, "accepted", reason)
+        payload = json.loads(self.node.pub_banner_colours.publish.call_args[0][0].data)
+        self.assertEqual(payload["colours"],
+                         {"green": "#07A03D", "orange": "#EB5A0A", "red": "#C4161C"})
+
+    def test_banner_colours_are_refused_rather_than_silently_dropped(self):
+        for bad in ({"green": "teal", "orange": "#EB5A0A"},
+                    {"green": "#07A03D"},
+                    {"green": "#07A03D", "orange": "#EB5A0A", "mauve": "#AA88CC"},
+                    {}):
+            result, reason = self.node._dispatch("set_banner_colours", {"colours": bad})
+            self.assertEqual(result, "rejected", f"{bad} was accepted")
+            self.assertTrue(reason)
+        self.node.pub_banner_colours.publish.assert_not_called()
 
     def test_battery_telemetry_safety_flag(self):
         """Test battery low voltage correctly updates safety state."""
@@ -374,14 +452,20 @@ class ScanLedgerTests(unittest.TestCase):
         """Two runs' markers in one list, with nothing to say which was which,
         is worse than no list."""
         self.node.state["safety"]["ready"] = True
+        # Starting a run now requires the mode the autonomy flies in.
+        self.node.state["mission"]["mode"] = "GUIDED"
         self.node.pub_start = MagicMock()
+        self.node.pub_test_part = MagicMock()
         self._qr(accepted="PAD_A")
         self.node._dispatch("start_mission", {})
         self.assertEqual(self.ledger(), [])
 
     def test_the_sequence_numbers_restart_with_the_new_run(self):
         self.node.state["safety"]["ready"] = True
+        # Starting a run now requires the mode the autonomy flies in.
+        self.node.state["mission"]["mode"] = "GUIDED"
         self.node.pub_start = MagicMock()
+        self.node.pub_test_part = MagicMock()
         self._qr(accepted="PAD_A")
         self.node._dispatch("start_mission", {})
         self._qr(accepted="PAD_B")
@@ -463,6 +547,7 @@ class MapForwardingTests(unittest.TestCase):
         self.node._publish_snapshot()
 
     def test_a_connected_gcs_still_gets_both(self):
+        self.node._clock = MagicMock()
         self.node._ws_clients = {object()}
         sent = []
         self.node._broadcast = sent.append
@@ -470,6 +555,9 @@ class MapForwardingTests(unittest.TestCase):
         grid.info.width, grid.info.height = 3, 2
         grid.info.resolution = 0.05
         grid.info.origin.position.x = grid.info.origin.position.y = 0.0
+        grid.info.origin.orientation = MagicMock(x=0.0, y=0.0, z=0.0, w=1.0)
+        grid.header.frame_id = "map"
+        grid.header.stamp.sec, grid.header.stamp.nanosec = 12, 0
         grid.data = [0, 100, -1, -1, 0, 0]
         self.node._last_map = 0.0
         self.node._on_map(grid)

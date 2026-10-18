@@ -1,0 +1,15 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>aerothon_slam_grid</name>
+  <version>0.1.0</version>
+  <description>Inclusive occupancy-grid bounds for the pinned slam_toolbox 2.8.5 mapper.</description>
+  <maintainer email="sarthakkhubchandanik@gmail.com">Team Rotor FPV</maintainer>
+  <license>LGPL-3.0-or-later</license>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <depend>slam_toolbox</depend>
+  <depend>rclcpp</depend>
+  <depend>rclcpp_lifecycle</depend>
+  <depend>geometry_msgs</depend>
+  <depend>tf2_geometry_msgs</depend>
+  <export><build_type>ament_cmake</build_type></export>
+</package>

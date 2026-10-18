@@ -53,12 +53,19 @@ def make_controller():
         params = {
             'alt_hold_gain': 0.8, 'max_vz': 0.6, 'rate_hz': 20.0,
             'scan_topic': '/scan',
+            'passage_half_width': 0.7, 'vel_response_s': 0.6,
+            'airframe_radius': 0.025,
+            'braking_accel_mps2': 0.5,
         }
         with patch('rclpy.node.Node.get_parameter',
                    side_effect=lambda n: MagicMock(
                        value=params.get(n, 0.0))):
             c = VelocityController()
-    c._g = lambda n: {'alt_hold_gain': 0.8, 'max_vz': 0.6}.get(n, 0.0)
+    c._g = lambda n: params.get(n, 0.0)
+    c._now = lambda: 1.0
+    # Horizontal publication now also requires fresh flight observations.
+    # This isolated altitude fixture has a frozen clock and immediate delivery.
+    c._pose_t = c._scan_t = 1.0
     return c
 
 
@@ -69,7 +76,9 @@ class AltitudeIsKnownTests(unittest.TestCase):
         self.c = make_controller()
 
     def test_the_pose_handler_keeps_the_ALTITUDE(self):
-        m = MagicMock()
+        from geometry_msgs.msg import PoseStamped
+        m = PoseStamped()
+        m.pose.orientation.w = 1.0
         m.pose.position.x, m.pose.position.y, m.pose.position.z = 1.0, 2.0, 3.4
         self.c._on_pose(m)
         self.assertAlmostEqual(self.c._alt, 3.4,
@@ -160,6 +169,8 @@ class ThePublishedSetpointCarriesItTests(unittest.TestCase):
         self.c.get_clock = MagicMock()      # no real node behind this
 
     def _publish_once(self):
+        import numpy as np
+        self.c._planner.observe(np.linspace(-3.14,3.14,500),np.full(500,12.0))
         self.c._publish(0.5, 0.0, 3.0, 0.0, {})
         return self.sent[-1]
 

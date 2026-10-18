@@ -74,219 +74,123 @@ class DetectorTests(unittest.TestCase):
 
 
 class WinchGazeboBackendTests(unittest.TestCase):
-    """backend:=gazebo drives the hook and lets the payload go."""
-
+    """The winch commands travel; it never receives simulator contact truth."""
     @classmethod
     def setUpClass(cls):
         import rclpy
-        if not rclpy.ok():
-            rclpy.init()
+        if not rclpy.ok(): rclpy.init()
 
     def setUp(self):
-        from std_msgs.msg import String
-        from geometry_msgs.msg import PoseStamped, TwistStamped
         from winch_ctrl.winch_node import WinchNode
-        self.String = String
         self.node = WinchNode()
         self.node._enable_gazebo()
-        self.payout, self.detach = [], []
-        self.node.pub_gz_payout.publish = lambda m: self.payout.append(m.data)
-        self.node.pub_gz_detach.publish = lambda m: self.detach.append(m)
-        self.node.pub_status.publish = lambda m: None
-        p = PoseStamped()
-        p.pose.position.z = 5.0
-        self.node._on_pose(p)
-        for _ in range(10):
-            self.node._on_vel(TwistStamped())
 
-    def tearDown(self):
-        self.node.destroy_node()
+    def tearDown(self): self.node.destroy_node()
 
-    def tick(self, n, dt=0.1):
-        for _ in range(n):
-            self.node._last_tick = self.node._now() - dt
-            self.node._tick()
+    def test_lowering_drives_commanded_travel(self):
+        from std_msgs.msg import String
+        self.node._on_cmd(String(data='lower'))
+        self.node.integrate(1)
+        self.assertGreater(self.node.payout, 0)
 
-    def test_lowering_drives_the_hook_down(self):
-        self.node._on_cmd(self.String(data="lower"))
-        self.tick(30)
-        self.assertGreater(self.payout[-1], self.payout[0])
-        self.assertAlmostEqual(self.payout[-1], self.node.payout, places=6)
-        self.assertEqual(self.detach, [])
+    def test_altitude_does_not_stop_lowering_as_if_contact_was_measured(self):
+        self.node._alt = 2
+        self.node.state = 'LOWERING'
+        self.node.integrate(10)
+        self.assertEqual(self.node.state, 'LOWERING')
+        self.node.integrate(20)
+        self.assertEqual(self.node.state, 'AT_LIMIT')
 
-    def _hook(self, mode):
-        import rclpy.parameter as rp
-        self.node.set_parameters([rp.Parameter("hook", rp.Parameter.Type.STRING, mode)])
+    def test_no_simulator_truth_subscription_or_detach_publisher(self):
+        import inspect
+        from winch_ctrl.winch_node import WinchNode
+        code = inspect.getsource(WinchNode)
+        self.assertNotIn('/sim/payload_pose', code)
+        self.assertNotIn('/winch/gz/detach', code)
+        self.assertNotIn('_gravity_hook', code)
 
-    def _payload_at(self, z):
-        from geometry_msgs.msg import Pose
-        m = Pose()
-        m.position.z = z
-        self.node._on_payload_pose(m)
+    def test_status_reports_estimates_and_unknown_physical_state(self):
+        capture = []
+        self.node.pub_status.publish = lambda m: capture.append(m.data)
+        self.node.publish_status()
+        import json
+        status = json.loads(capture[-1])
+        self.assertIsNone(status['ground'])
+        self.assertIsNone(status['released'])
+        self.assertIn('no encoder', status['payout_basis'])
 
-    def _lower_to_ground(self):
-        self.node._on_cmd(self.String(data="lower"))
-        for _ in range(400):
-            self.node.integrate(0.1)
-            if self.node.at_ground():
-                break
-
-    # ---- the team's gravity hook (the default) ---- #
-    def test_the_gravity_hook_lets_go_once_the_payload_rests(self):
-        """The motor lowers the hook; the hook drops out of the payload's
-        loop by itself when the payload is down and the line goes slack."""
-        self._lower_to_ground()
-        self._payload_at(0.04)                 # resting on its 0.08 m base
-        self.tick(8)
-        self.assertEqual(len(self.detach), 5)
-        self.assertTrue(self.node.hook_open)
-
-    def test_the_gravity_hook_pays_out_past_the_ground_for_slack(self):
-        """First flight on the team airframe: the winch stopped at altitude
-        minus 0.25 m, the payload hung 0.19 m up, the hook never went slack,
-        and the payload flew home. Down means the line is longer than the
-        altitude."""
-        self._lower_to_ground()
-        self.assertGreaterEqual(self.node.payout, 5.0 + 0.1 - 1e-6)
-        self._hook("command")
-        self.node.payout = 4.8
-        self.assertTrue(self.node.at_ground(), "an actuated hook opens hanging")
-
-    def test_a_payload_resting_on_the_pad_is_let_go_when_the_line_slackens(self):
-        """Second flight: the payload came to rest on the 8 cm target pad,
-        above the bare-ground height test, and was never released."""
-        self.node._on_cmd(self.String(data="lower"))
-        for payout, z in ((3.0, 1.1), (3.06, 1.04), (3.12, 0.98),   # following
-                          (3.18, 0.12), (3.24, 0.12), (3.30, 0.12), (3.36, 0.12)):
-            self.node.payout = payout
-            self._payload_at(z)
-            self.node._gravity_hook()
-        self.assertTrue(self.node.hook_open)
-
-    def test_a_payload_still_following_the_line_is_not_let_go(self):
-        self.node._on_cmd(self.String(data="lower"))
-        for k in range(8):
-            self.node.payout = 2.0 + 0.06 * k
-            self._payload_at(3.0 - 0.06 * k)
-            self.node._gravity_hook()
-        self.assertFalse(self.node.hook_open)
-
-    def test_a_hanging_payload_is_never_let_go(self):
-        self._lower_to_ground()
-        self._payload_at(0.9)                  # still in the air
-        self.tick(8)
-        self.assertEqual(self.detach, [])
-        self._payload_at(0.13)                 # on the hook, aircraft on the pad
-        self.node.payout = 0.0
-        self.tick(8)
-        self.assertEqual(self.detach, [])
-
-    def test_a_release_command_opens_nothing_on_a_gravity_hook(self):
-        self._lower_to_ground()
-        self._payload_at(0.9)
-        self.node._on_cmd(self.String(data="release"))
-        self.assertTrue(self.node.released)   # the mission's bookkeeping
-        self.tick(8)
-        self.assertEqual(self.detach, [], "a gravity hook has nothing to open")
-
-    # ---- an actuated release ---- #
-    def test_release_detaches_the_payload_and_resends(self):
-        self._hook("command")
-        self.node._on_cmd(self.String(data="lower"))
-        for _ in range(400):
-            self.node.integrate(0.1)
-            if self.node.at_ground():
-                break
-        self.node._on_cmd(self.String(data="release"))
-        self.assertTrue(self.node.released)
-        self.tick(8)
-        self.assertEqual(len(self.detach), 5)
+    def test_repeated_intents_are_idempotent_and_stop_reaches_backend(self):
+        from std_msgs.msg import String
+        actions = []
+        self.node._send_backend = lambda action: actions.append(action)
+        for _ in range(5): self.node._on_cmd(String(data='lower'))
+        self.assertEqual(actions, ['lower'])
+        self.node._on_cmd(String(data='stop'))
+        self.assertEqual(actions, ['lower', 'stop'])
+        for _ in range(5): self.node._on_cmd(String(data='stow'))
+        self.assertEqual(actions, ['lower', 'stop', 'stow'])
 
 
 class CameraConfirmationTests(unittest.TestCase):
-    """WinchDrop phases 3-5: stow over the pad, confirm with the camera, climb."""
+    def test_exhaustion_stows_before_continuing_without_claiming_delivery(self):
+        from mission_bt.mission_tree import WinchDrop
+        from mission_bt.delivery_observer import calibration
+        mav = FakeMav()
+        commands = []
+        mav.delivery_load_profile = calibration([.26]*40, [.24]*40)
+        mav.winch_status = {'payout_estimate_m': 6, 'fault': ''}
+        mav.winch = commands.append
+        leaf = WinchDrop(mav)
+        leaf.initialise(); leaf.phase = 1
+        leaf.observer.started = 0
+        leaf.observer.attempt = 3
+        leaf.observer._retry(0, 'camera inconclusive')
+        self.assertEqual(leaf.update(), py_trees.common.Status.RUNNING)
+        self.assertEqual(commands[-1], 'stow')
+        self.assertEqual(leaf.phase, 1)
+        self.assertEqual(mav.modes, [])
+        mav.winch_status['payout_estimate_m'] = 0
+        self.assertEqual(leaf.update(), py_trees.common.Status.RUNNING)
+        self.assertEqual(leaf.phase, 5)
+        self.assertFalse(mav.delivery_confirmed)
+        mav._pos = (leaf.drop_x, leaf.drop_y, leaf.cruise_alt)
+        self.assertEqual(leaf.update(), py_trees.common.Status.SUCCESS)
+        self.assertEqual(mav.modes, [])
 
-    def build(self, det, alt=5.0, pad_in_frame=True):
+    def test_stale_winch_status_cannot_certify_recovery_completion(self):
         from mission_bt.mission_tree import WinchDrop
         mav = FakeMav()
-        mav._pos = (20.0, 3.0, alt)
-        mav._alt = alt
-        mav.qr_off = (0.0, 0.0) if pad_in_frame else None
-        mav.winch = lambda c: None
-        mav.winch_status = {"released": True, "payout_m": 0.0}
-        mav.payload_seen = (lambda: det) if not callable(det) else det
-        leaf = WinchDrop(mav, 5.0, 10.0, hfov_rad=HFOV, image_w_px=1280,
-                         image_h_px=720, confirm_timeout_ticks=40)
-        leaf.initialise()
-        leaf.phase = 3
-        leaf.drop_x, leaf.drop_y = 20.0, 3.0
-        return leaf, mav
+        mav.winch_status = {'payout_estimate_m': 0, 'fault': ''}
+        mav.winch_status_fresh = lambda: False
+        mav.winch = lambda cmd: None
+        leaf = WinchDrop(mav)
+        leaf.initialise(); leaf.phase = 1
+        leaf.observer.attempt = 3
+        leaf.observer._retry(0, 'camera inconclusive')
+        self.assertEqual(leaf.update(), py_trees.common.Status.FAILURE)
+        self.assertFalse(mav.delivery_confirmed)
 
-    def run_until(self, leaf, phase, n=100):
-        for _ in range(n):
-            leaf.update()
-            if leaf.phase >= phase:
-                return
-
-    def test_a_payload_on_the_ground_is_confirmed_and_measured_against_the_pad(self):
-        px = payload_px(5.0)
-        det = {"visible": True, "x": 0.1, "y": 0.0, "w_px": round(px),
-               "h_px": round(px), "img_w": 1280}
-        leaf, mav = self.build(det)
-        self.run_until(leaf, 5)
-        self.assertIs(mav.delivery_confirmed, True)
-        half_w = 5.0 * math.tan(HFOV / 2)
-        self.assertAlmostEqual(mav.delivery_offset_m, 0.1 * half_w, places=3)
-        self.assertIn("confirmed on the ground by the camera", mav.delivery_note)
-
-    def test_it_waits_for_the_hook_to_wind_up_first(self):
-        px = payload_px(5.0)
-        det = {"visible": True, "x": 0.0, "y": 0.0, "w_px": round(px), "h_px": round(px)}
-        leaf, mav = self.build(det)
-        mav.winch_status = {"released": True, "payout_m": 3.0}   # still paying in
-        for _ in range(20):
-            leaf.update()
-        self.assertEqual(leaf.phase, 3)
-        self.assertIsNone(mav.delivery_confirmed)
-
-    def test_a_blob_of_the_wrong_size_is_not_a_payload_on_the_ground(self):
-        """Still on the hook just under the camera it would look huge."""
-        det = {"visible": True, "x": 0.0, "y": 0.0, "w_px": 250, "h_px": 250}
-        leaf, mav = self.build(det)
-        self.run_until(leaf, 5)
-        self.assertIs(mav.delivery_confirmed, False)
-        self.assertIn("NOT confirmed", mav.delivery_note)
-        self.assertIn("px", mav.delivery_note)
-
-    def test_no_payload_in_view_is_not_confirmed(self):
-        leaf, mav = self.build({"visible": False})
-        self.run_until(leaf, 5)
-        self.assertIs(mav.delivery_confirmed, False)
-
-    def test_one_frame_is_not_enough(self):
-        px = payload_px(5.0)
-        good = {"visible": True, "x": 0.0, "y": 0.0, "w_px": round(px), "h_px": round(px)}
-        seq = iter([good] + [{"visible": False}] * 200)
-        leaf, mav = self.build(lambda: next(seq))
-        self.run_until(leaf, 5)
-        self.assertIs(mav.delivery_confirmed, False)
-
-    def test_after_confirming_it_climbs_back(self):
-        px = payload_px(5.0)
-        det = {"visible": True, "x": 0.0, "y": 0.0, "w_px": round(px), "h_px": round(px)}
-        leaf, mav = self.build(det)
-        self.run_until(leaf, 5)
-        mav._pos = (20.0, 3.0, 10.0)
-        self.assertEqual(leaf.update(), py_trees.common.Status.SUCCESS)
+    def test_commanded_release_cannot_confirm_delivery(self):
+        from mission_bt.mission_tree import WinchDrop
+        mav = FakeMav()
+        mav.winch_status = {'released': True, 'ground': True, 'payout_m': 0}
+        mav.winch = lambda cmd: None
+        mav.payload_seen = lambda: {'visible': True, 'stamp': 1, 'w_px': 22, 'h_px': 11}
+        leaf = WinchDrop(mav)
+        leaf.initialise(); leaf.phase = 1
+        self.assertEqual(leaf.update(), py_trees.common.Status.FAILURE)
+        self.assertFalse(mav.delivery_confirmed)
+        self.assertIn('calibration', mav.delivery_note)
 
 
 class LandOutcomeTests(unittest.TestCase):
 
-    def land(self, confirmed):
+    def land(self, confirmed, basis=None):
         from mission_bt.mission_tree import Land
         mav = FakeMav()
         mav.results = []
         mav.delivery_confirmed = confirmed
+        mav.delivery_confirmation_basis = basis
         mav.delivery_offset_m = 0.2
         mav.state = type("S", (), {"armed": False, "connected": True})()
         mav.connected = lambda: True
@@ -306,6 +210,12 @@ class LandOutcomeTests(unittest.TestCase):
         state, reason = self.land(True)
         self.assertEqual(state, "COMPLETED")
         self.assertIn("seen on the ground by the camera", reason)
+
+    def test_motor_confirmation_is_not_misreported_as_visual_proof(self):
+        state, reason = self.land(True, 'calibrated_motor_output_after_retraction')
+        self.assertEqual(state, 'COMPLETED')
+        self.assertIn('unloaded motor effort', reason)
+        self.assertNotIn('seen on the ground by the camera', reason)
 
 
 class GroundTruthGradingTests(unittest.TestCase):
@@ -378,7 +288,7 @@ class GazeboWiringTests(unittest.TestCase):
 
     def test_the_bridge_carries_payout_detach_and_ground_truth(self):
         cfg = (ROOT / "src/aerothon_sim/sim_gazebo/config/gz_bridge.yaml").read_text()
-        for topic in ("/aerothon/winch/payout", "/aerothon/payload/detach",
+        for topic in ("/aerothon/winch/payout",
                       "/model/aerothon_payload/pose"):
             self.assertIn(topic, cfg)
 

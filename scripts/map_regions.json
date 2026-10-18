@@ -1,0 +1,7 @@
+{
+  "comment": "Offline satellite regions held in the Pi's tile cache (state-dir map-tiles), fetched by scripts/download_map_tiles.py. Bounds are [west, south, east, north] degrees. The GCS draws each as its own raster layer, coarse (low minzoom) under detail, above the bundled simulator tiles.",
+  "initial": {"center": [79.1559, 12.9692], "zoom": 16},
+  "regions": [
+    {"name": "VIT Vellore", "bounds": [79.1374, 12.9512, 79.1744, 12.9872], "minzoom": 0, "maxzoom": 19}
+  ]
+}

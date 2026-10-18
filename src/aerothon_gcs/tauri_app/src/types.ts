@@ -1,5 +1,5 @@
-// Mirrors the aggregator schema (docs/ARCHITECTURE.md §7.1).
-// In production, GENERATE this from the Rust structs with ts-rs so it never drifts.
+// Browser contract for gcs_aggregator. Arena fields are exported directly
+// from mission_bt; compatibility is checked by the GCS regression tests.
 
 // One line of the Q27 arming interlock (gcs_aggregator/readiness.py).
 export interface ReadinessItem {
@@ -11,8 +11,47 @@ export interface ReadinessItem {
 }
 
 export interface Telemetry {
+  banner_colours?: Record<string,string>;
+  geofence_vertices?: [number, number][];
+  execution?: {task:string; state:string; stage?:string; control_owner?:string};
+  runtime_health?: {fresh:boolean};
+  sensor_diagnostics?: {
+    vibration_mps2: (number | null)[] | null;
+    clipping: (number | null)[] | null;
+    magnetic_ut: (number | null)[] | null;
+    magnetic_strength_ut: number | null;
+    magnetic_units_basis?: string | null;
+    magnetic_frame: string | null;
+    magnetic_capture_stamp: number | null;
+  };
+  devices?: {
+    [key:string]: DeviceMetric | undefined;
+    camera?: DeviceMetric;
+    lidar?: DeviceMetric;
+    clock?: { ok: boolean; reason?: string };
+  };
+  winch?: {
+    payout_estimate_m?: number | null;
+    measured_payout_m?: number | null;
+    measurement_age_s?: number | null;
+    state?: string;
+    release_requested?: boolean;
+  };
+  detector_rates?: Record<
+    string,
+    {
+      hz: number | null;
+      capture_stamp: number;
+      processed_stamp: number | null;
+      received: number;
+    }
+  >;
+  sample_age_s?: Record<string, number>;
   mission: {
-    selected: string | null; state: string; armed: boolean; mode: string;
+    selected: string | null;
+    state: string;
+    armed: boolean;
+    mode: string;
     elapsed?: number;
     // Delivery accuracy is 15 rulebook marks and was measured nowhere; it is
     // carried as a NUMBER so the panel can compare and threshold it, not just
@@ -23,14 +62,25 @@ export interface Telemetry {
     result_reason?: string | null;
   };
   flight: {
-    x: number; y: number; alt: number;
-    gs?: number; roll_deg?: number; pitch_deg?: number; yaw_deg?: number;
+    x: number;
+    y: number;
+    alt: number;
+    gs?: number;
+    roll_deg?: number;
+    pitch_deg?: number;
+    yaw_deg?: number;
   };
   gps: { lat: number; lon: number; sats: number; fix?: string };
-  power: { volt: number; pct: number };
+  power: { volt: number; pct: number; current_a?: number | null };
   nav: { front_m: number; centering_err: number; cmd_vx: number };
   percep: {
-    start_qr: string; target_match: boolean; banner: boolean;
+    start_qr: string;
+    target_match: boolean;
+    mission_target?: string;
+    qr_reference?: boolean;
+    qr_match_basis?: string[];
+    qr_appearance_score?: number | null;
+    banner: boolean;
     redzone_visible: boolean;
     // Tri-state. "CLEAR" means the camera looked at the ground and saw none;
     // "NOT_VISIBLE" means it could not see the ground at all. The old boolean
@@ -48,15 +98,57 @@ export interface Telemetry {
     square_reason?: string;
   };
   safety: {
-    ready: boolean; fcu_connected?: boolean; ekf?: boolean; geofence?: string;
+    ready: boolean;
+    on_ground?: boolean;
+    fcu_connected?: boolean;
+    ekf?: boolean;
+    geofence?: string;
     ready_items?: ReadinessItem[];
     ready_reasons?: string[];
     ready_waived?: string[];
   };
   checklist: Record<string, boolean>;
-  scan?: { yaw_deg: number; ranges: (number | null)[] };
+  // Arena dimensions (mission_bt/arena_dimensions.py): the field list, the
+  // presets, and what mission_bt reports it actually applied.
+  dimension_fields?: DimensionField[];
+  dimension_presets?: { builtin: Record<string, Dimensions>; saved: Record<string, Dimensions> };
+  arena_dimensions?: {
+    sent: Dimensions | null; applied: Dimensions | null;
+    params?: Record<string, unknown> | null; ok?: boolean; reason: string;
+  } | null;
+  // Lidar calibration mode (gcs_aggregator/lidar_calibration.py): bearings
+  // in degrees CCW from the nose (corrected) or the lidar's own 0 (raw).
+  lidar_cal?: {
+    raw_fresh: boolean;
+    raw_nearest: [number, number] | null;
+    body_nearest: [number, number] | null;
+    geometry?: Record<string, number> | null;
+    background_ready?: boolean;
+    samples?: number;
+    capture_details?: Record<string, {samples:number; beams:number; spread_m:number; spread_deg:number}>;
+    scan?: import('./lidarGeometry').Scan;
+    captures: { ahead?: [number, number] | null; port?: [number, number] | null;
+                far?: [number, number] | null; starboard?: [number, number] | null };
+    result: { yaw_deg: number; mirrored: boolean; error_deg: number;
+              validation_error_m?:number; range_scale?:number; range_bias_m?:number;
+              ok: boolean; reason: string } | null;
+    applied: { yaw_deg: number; mirrored: boolean; source: string;
+               reason: string; geometry_measured?:boolean } | null;
+  };
+  slam_status?: {source?:string;state?:string;reason?:string};
+  scan?: { yaw_deg: number; ranges: (number | null)[];
+           angle_min?: number; angle_step?: number; range_min?:number;range_max?:number;
+           frame?:string;stamp?:number };
   scans?: ScanRow[];
   gimbal?: { pitch_deg: number };
+}
+
+export interface DeviceMetric {
+  ok: boolean;
+  reason?:string;
+  hz?: number | null; // Gateway receipt rate, measured in steady time.
+  receipt_age_s?: number | null;
+  capture_age_s?: number | null; // Vehicle clock minus capture timestamp.
 }
 
 // One observation the aircraft made: a marker it decoded, a banner it read, or
@@ -85,7 +177,18 @@ export interface ScanRow {
 
 export interface Envelope {
   v: number;
-  kind: "telemetry" | "event" | "ack" | "map";
+  kind: "telemetry" | "event" | "ack" | "map" | "execution" | "receipt";
   t: number;
   data: any;
 }
+
+// group -> field -> value. Lengths in metres; the two choice fields are strings.
+export type Dimensions = Record<string, Record<string, number | string>>;
+
+export interface DimensionField {
+  group: string; key: string; label: string;
+  default: number; min: number; max: number;
+  // What the algorithms do with it; null means recorded only.
+  used_by: string | null;
+}
+

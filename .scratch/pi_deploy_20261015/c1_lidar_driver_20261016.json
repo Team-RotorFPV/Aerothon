@@ -1,0 +1,28 @@
+{
+  "problem": "Pi GCS SLAM tab showed no lidar and the lidar did not spin. The fitted unit is a Slamtec RPLIDAR C1 (USB CP2102N 10c4:ea60, firmware 1.02, hardware rev 18), not the LD06 the runtime launched. The C1 spins only after a start-scan command; ldlidar_stl_ros2 at 230400 never sent one and exited with 'ldlidar communication is abnormal'.",
+  "scope": "Sensor driver selection only. No mission, avoidance or scan-processing decision changed.",
+  "changes": {
+    "src/aerothon_mission/mission_bringup/launch/mission2.launch.py": "new lidar_model arg (default c1): sllidar_ros2 sllidar_node, 460800 baud, Standard mode, angle_compensate, frame base_scan, scan remapped to scan_raw; ld06 keeps the old driver",
+    "src/aerothon_mission/mission_bringup/package.xml": "exec_depend sllidar_ros2",
+    "scripts/check_pi_runtime.sh": "checks sllidar_ros2 is installed"
+  },
+  "pi": {
+    "host": "pi5@192.168.0.102",
+    "external_driver": "/home/pi5/aerothon_ws/src/sllidar_ros2 = Slamtec/sllidar_ros2 34300099fadfc772965962dec837bf436706188f, copied from the laptop (Pi has no internet)",
+    "backup_of_replaced_files": "/home/pi5/.local/state/aerothon/backup-c1-lidar-20261016/",
+    "build": "colcon build --symlink-install --parallel-workers 2 --packages-select sllidar_ros2 mission_bringup -DBUILD_TESTING=OFF in aerothon-runtime:20261014-network; 2 packages finished (unused-parameter warnings from the vendor SDK only)",
+    "build_log": "/home/pi5/.local/state/aerothon/build_c1_lidar.log",
+    "aerothon-gcs.service": "restarted with runtime Stopped so the web host sources the new package"
+  },
+  "evidence": {
+    "spin_script": "/home/pi5/lidar-spin-only/spin_only.py ran: health OK, ~9 Hz, then stopped to free the port",
+    "driver_alone": "isolated container, DDS domain 77: /scan_raw 10.02 Hz, 720 beams, 626 valid, -180..180 deg, 0.18..3.94 m",
+    "launch_selection": "use_sim:=false -> sllidar_ros2; lidar_model:=ld06 -> ldlidar_stl_ros2; use_sim:=true -> none"
+  },
+  "status": "driver deployed; full GCS Connect with SLAM not yet run",
+  "blockers": [
+    "Drone profile has slam=false; the SLAM tab needs 'Enable SLAM mapping' ticked in the profile, then Connect",
+    "Lidar mount yaw/mirror is still 0/false (unmeasured); re-run the GCS lidar calibration for the C1",
+    "Master guide still names the LD06 driver"
+  ]
+}

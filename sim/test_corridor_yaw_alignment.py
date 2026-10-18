@@ -43,7 +43,9 @@ sys.path.insert(0, os.path.join(
 
 PARAMS = {"max_yaw_rate": 0.5, "yaw_align_gain": 1.2,
           "alt_hold_gain": 0.8, "max_vz": 0.6,
-          "rate_hz": 20.0, "scan_topic": "/scan"}
+          "rate_hz": 20.0, "scan_topic": "/scan", "passage_half_width": 0.7,
+          "vel_response_s": 0.6, "braking_accel_mps2": 0.5,
+          "airframe_radius": 0.025}
 
 
 def make_controller():
@@ -58,6 +60,9 @@ def make_controller():
         from avoidance.velocity_controller import VelocityController
         c = VelocityController()
     c._g = lambda n: PARAMS.get(n, 0.0)
+    # Instantaneous fixture; timestamps describe its frozen observation epoch.
+    c._now = lambda: 1.0
+    c._pose_t = c._scan_t = 1.0
     return c
 
 
@@ -107,6 +112,8 @@ class ThePublishedSetpointTurnsTests(unittest.TestCase):
         self.c.state = "CRUISE"
         self.c._left_m = self.c._right_m = 2.0
         self.c._hold_alt = self.c._alt = 3.0
+        import numpy as np
+        self.c._planner.observe(np.linspace(-math.pi,math.pi,361),np.full(361,12.0))
 
     def publish(self, bearing):
         self.c._publish(0.8, 0.0, 3.0, bearing, {})

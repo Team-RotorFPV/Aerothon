@@ -86,12 +86,33 @@ TAKEOFF_TEMPLATE_CENTRE = (-1.0, 0.0)
 TAKEOFF_PAD_SIZE = (5.0, 8.0)
 START_QR_OFFSET = (0.0, 2.0)
 SPAWN_OFFSET = (-1.0, 2.0)
+# An unloaded fixture has no detachable joint holding the payload under the
+# airframe (build_cad_vehicle.add_claw), so leaving the cargo at the spawn
+# drops it onto the pad against a landing skid. Park it on the pad beside the
+# aircraft instead: 1.2 m from the spawn, 1.56 m from the start QR, and well
+# inside the 5 x 8 m pad whichever way the take-off area is turned.
+PARKED_PAYLOAD_OFFSET = (-1.0, 0.8)
 
 # The banner board: 3.7 x 1.15 m on two posts. Its height is the one thing
 # about it a spec moves (mission2.sdf hangs it at 2.805 m); the posts grow to
 # carry it.
 BOARD_BOTTOM_M = 2.805
 BOARD_BOTTOM_RANGE_M = (1.8, 4.5)
+# Where the organisers put a banner. They may hang it from a rod between the
+# corridor walls, lay it flat on the ground in front of the mouth with its
+# colour facing the sky, or -- as the three qualification cases do -- both.
+BANNER_PLACEMENTS = ("suspended", "ground", "both")
+# The shades are given as HEX before the competition. A spec may carry them so
+# a rendered arena and the detectors agree on what was supplied; empty means
+# the simulator's own printed green.
+BANNER_COLOUR_NAMES = ("green", "orange", "red")
+# The board the simulator has always flown: 3.7 x 1.15 m on two posts. The
+# organisers' banner is the corridor's width, of unconfirmed height, hung from
+# "a horizontal rod connecting the two corridor walls" -- `mount: rod`, with
+# its top at the wall top -- and every corridor opening carries one: green
+# where the aircraft must go, orange where it must not (`orange: true`).
+BOARD_SIZE_M = (3.7, 1.15)
+BANNER_MOUNTS = ("posts", "rod")
 
 HOME_FENCE_CLEARANCE_M = 2.0           # readiness: home >= 2 m inside the fence
 BANNER_NEAR_RANGE_M = 9.6              # AlignToBanner: 0.8 x the 12 m lidar range
@@ -121,13 +142,35 @@ def default_spec():
         "pads": {"a": {"x": 21.0, "y": 10.0}, "b": {"x": 47.0, "y": 10.0},
                  "c": {"x": 23.0, "y": 1.0}, "d": {"x": 33.0, "y": -10.0},
                  "e": {"x": 45.0, "y": -6.0}},
-        "decoys": [{"x": 8.0, "y": -14.0, "yaw_deg": 0.0},
-                   {"x": 34.0, "y": 9.0, "yaw_deg": math.degrees(1.2)}],
+        # No decoys. The organisers' arena has no green things in it but the
+        # banners, so an arena with planted ones is not the arena being
+        # flown. `decoys` is still honoured for the world that exists purely
+        # to prove the detector rejects an unframed panel.
+        "decoys": [],
         "start_target": "random",
         "qr": {"start_m": 2.2, "target_m": 3.0},
-        "banner": {"board_bottom_m": BOARD_BOTTOM_M},
+        "banner": {"board_bottom_m": BOARD_BOTTOM_M,
+                   "placement": "suspended", "lettered": False,
+                   "colours": {}, "width_m": BOARD_SIZE_M[0],
+                   "height_m": BOARD_SIZE_M[1], "mount": "posts",
+                   "orange": False},
         "conditions": {"preset": "calm"},
     }
+
+
+def print_colour(value):
+    """A supplied '#RRGGBB' as the (ambient, diffuse) pair SDF materials take.
+
+    Ambient sits at the same fraction of diffuse the simulator's own printed
+    green uses, so a supplied shade renders with the same shading behaviour as
+    the colour it replaces rather than looking lit differently.
+    """
+    text = str(value).strip().lstrip("#")
+    if len(text) != 6:
+        raise ValueError(f"{value!r} is not a #RRGGBB colour")
+    diffuse = tuple(int(text[i:i + 2], 16) / 255.0 for i in (0, 2, 4))
+    ambient = tuple(round(c * 0.774, 4) for c in diffuse)
+    return (ambient, tuple(round(c, 4) for c in diffuse))
 
 
 def load(path):
@@ -158,6 +201,7 @@ def normalise(spec):
     for r in out["red_zones"]:
         r.setdefault("yaw_deg", 0.0)
     out["pads"] = {k: dict(v) for k, v in (out.get("pads") or {}).items()}
+    out["banner"]["colours"] = dict(out["banner"].get("colours") or {})
     out["decoys"] = [dict(d) for d in (out.get("decoys") or [])]
     for d in out["decoys"]:
         d.setdefault("yaw_deg", 0.0)
@@ -372,6 +416,13 @@ def spawn_point(spec):
 def start_qr_point(spec):
     t = spec["takeoff"]
     return _place(START_QR_OFFSET, t["x"], t["y"], math.radians(t["yaw_deg"]))
+
+
+def parked_payload_point(spec=None):
+    """Where an unloaded fixture leaves the cargo. No spec: the template pad."""
+    t = spec["takeoff"] if spec else dict(
+        x=TAKEOFF_TEMPLATE_CENTRE[0], y=TAKEOFF_TEMPLATE_CENTRE[1], yaw_deg=0.0)
+    return _place(PARKED_PAYLOAD_OFFSET, t["x"], t["y"], math.radians(t["yaw_deg"]))
 
 
 def zone_rect(spec):
@@ -649,6 +700,39 @@ def validate(spec):
     if not BOARD_BOTTOM_RANGE_M[0] <= bottom <= BOARD_BOTTOM_RANGE_M[1]:
         errs.append(f"banner board bottom {bottom:g} m is outside "
                     f"{BOARD_BOTTOM_RANGE_M[0]:g}-{BOARD_BOTTOM_RANGE_M[1]:g} m")
+    b = spec["banner"]
+    bw, bh = float(b.get("width_m", BOARD_SIZE_M[0])), float(b.get("height_m", BOARD_SIZE_M[1]))
+    if not (0.5 <= bw <= 6.0 and 0.1 <= bh <= 3.0):
+        errs.append(f"banner {bw:g} x {bh:g} m is outside 0.5-6 x 0.1-3 m")
+    mount = b.get("mount", "posts")
+    if mount not in BANNER_MOUNTS:
+        errs.append(f"banner mount {mount!r} must be one of " + ", ".join(BANNER_MOUNTS))
+    elif mount == "rod":
+        # Hung from a rod between the walls: inside the lane, under its top.
+        for key in ("corridor", "return_corridor"):
+            lane = spec[key]
+            if bottom + bh > float(lane["wall_height"]) + 1e-6:
+                errs.append(f"a rod-hung banner reaches {bottom + bh:.2f} m, above "
+                            f"the {key.replace('_', ' ')}'s {float(lane['wall_height']):g} m walls")
+            if bw > float(lane["width"]) + 1e-6:
+                errs.append(f"a rod-hung banner {bw:g} m wide does not fit the "
+                            f"{key.replace('_', ' ')}'s {float(lane['width']):g} m width")
+    placement = spec["banner"].get("placement", "suspended")
+    if placement not in BANNER_PLACEMENTS:
+        errs.append(f"banner placement {placement!r} must be one of "
+                    + ", ".join(BANNER_PLACEMENTS))
+    supplied = spec["banner"].get("colours") or {}
+    if not isinstance(supplied, dict):
+        errs.append("banner colours must be a mapping of name to #RRGGBB")
+    else:
+        for name, value in supplied.items():
+            if name not in BANNER_COLOUR_NAMES:
+                errs.append(f"unknown banner colour {name!r}")
+                continue
+            try:
+                print_colour(value)
+            except (ValueError, TypeError):
+                errs.append(f"banner colour {name} = {value!r} is not #RRGGBB")
     for key in ("start_m", "target_m"):
         v = float(spec["qr"][key])
         if not 0.2 <= v <= 5.0:

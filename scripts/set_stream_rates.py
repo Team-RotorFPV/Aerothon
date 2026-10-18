@@ -38,16 +38,22 @@ MAV_CMD_SET_MESSAGE_INTERVAL = 511
 
 # message id -> desired Hz. Attitude and local position drive guidance, so they
 # get the highest rate; the rest are sized to goal.md's stated needs.
+# Budget: the measured link is TELEM3 at 115200 baud, about 11.5 kB/s. The
+# previous table asked for ~7.2 kB/s (62%) before Mission Planner's own
+# streams, and gaps in velocity aborted gate braking. This one is ~4.2 kB/s;
+# 25 Hz pose still leaves every freshness window (0.2-0.7 s) many samples.
 DESIRED = {
-    30:  50.0,   # ATTITUDE            - attitude rail + control loop
-    32:  50.0,   # LOCAL_POSITION_NED  - position setpoint loop
-    33:  10.0,   # GLOBAL_POSITION_INT - global position
-    24:   5.0,   # GPS_RAW_INT         - satellite count, HDOP (Q27 interlock)
-    74:  10.0,   # VFR_HUD             - groundspeed, climb rate
+    30:  25.0,   # ATTITUDE            - attitude rail + control loop
+    32:  25.0,   # LOCAL_POSITION_NED  - position setpoint loop
+    33:   5.0,   # GLOBAL_POSITION_INT - global position
+    24:   2.0,   # GPS_RAW_INT         - satellite count, HDOP (Q27 interlock)
+    74:   4.0,   # VFR_HUD             - groundspeed, climb rate
     1:    4.0,   # SYS_STATUS          - battery, sensor health
-    2:    4.0,   # SYSTEM_TIME
-    27:  10.0,   # RAW_IMU
+    2:    2.0,   # SYSTEM_TIME
+    27:   2.0,   # RAW_IMU: magnetometer diagnostics only
+    241:  2.0,   # VIBRATION: operator diagnostics only
     65:   5.0,   # RC_CHANNELS         - RC / failsafe state
+    36: 20.0,    # SERVO_OUTPUT_RAW for delivery load assessment (calibrated at 20)
     193:  2.0,   # EKF_STATUS_REPORT   - EKF health (Q27 interlock)
 }
 

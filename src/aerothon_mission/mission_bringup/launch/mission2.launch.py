@@ -12,7 +12,10 @@ Examples:
        lidar_yaw_deg:=<measured> lidar_mirrored:=<measured>
 """
 import os
-from ament_index_python.packages import get_package_share_directory
+import atexit
+import shutil
+import tempfile
+from ament_index_python.packages import get_package_share_directory, get_package_prefix
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, TimerAction
 from launch.conditions import IfCondition, UnlessCondition
@@ -22,14 +25,30 @@ from launch_ros.actions import Node
 from launch_ros.descriptions import ParameterValue
 
 
+def grid_adapter_path():
+    path = os.path.join(get_package_prefix('aerothon_slam_grid'), 'lib', 'libaerothon_slam_grid.so')
+    if any(c.isspace() for c in path):
+        # ld.so splits LD_PRELOAD on whitespace even inside quoted shell args.
+        directory = tempfile.TemporaryDirectory(prefix='aerothon-slam-grid-')
+        atexit.register(directory.cleanup)
+        target = os.path.join(directory.name, 'libaerothon_slam_grid.so')
+        shutil.copy2(path, target)
+        return target
+    return path
+
+
 def generate_launch_description():
     use_sim = LaunchConfiguration('use_sim')
+    managed = LaunchConfiguration('managed')
+    remote_gateway = LaunchConfiguration('remote_gateway')
     fcu_url = LaunchConfiguration('fcu_url')
     image_topic = LaunchConfiguration('image_topic')
     scan_topic = LaunchConfiguration('scan_topic')
     target = LaunchConfiguration('target')
     launch_rviz = LaunchConfiguration('rviz')
     launch_slam = LaunchConfiguration('slam')
+    slam_odometry = LaunchConfiguration('slam_odometry')
+    lidar_slam = ["'", slam_odometry, "' == 'lidar'"]
     airframe = LaunchConfiguration('airframe')
     camera_hfov = ParameterValue(LaunchConfiguration('camera_hfov'), value_type=float)
     target_marker_m = ParameterValue(LaunchConfiguration('target_marker_m'),
@@ -53,6 +72,11 @@ def generate_launch_description():
         Command(['xacro "', xacro_file, '" airframe:=', airframe]), value_type=str)
 
     args = [
+        DeclareLaunchArgument('managed', default_value='false'),
+        DeclareLaunchArgument('remote_gateway', default_value=''),
+        DeclareLaunchArgument('target_system_id', default_value='1'),
+        DeclareLaunchArgument('target_component_id', default_value='1'),
+        DeclareLaunchArgument('rc_config', default_value='{}'),
         DeclareLaunchArgument('use_sim', default_value='true', description='Use sim time (Gazebo)'),
         DeclareLaunchArgument('fcu_url', default_value='udp://127.0.0.1:14555@127.0.0.1:14556', description='MAVROS FCU URL (via MAVLink router)'),
         DeclareLaunchArgument('image_topic', default_value='/image_raw', description='Camera image topic'),
@@ -86,6 +110,9 @@ def generate_launch_description():
         DeclareLaunchArgument('slam', default_value=sim_or('true', 'false'),
                               description='Launch async slam_toolbox 2D SLAM node '
                                           '(default: use_sim)'),
+        DeclareLaunchArgument('slam_odometry', default_value=sim_or('fcu', 'lidar'),
+                              choices=['fcu', 'lidar'],
+                              description='Mapping pose source; lidar has its own TF tree and requires no GPS'),
         DeclareLaunchArgument('stream_rate_keeper', default_value='true',
                               description='Continuously re-assert MAVLink stream '
                                           'rates (SITL/MAVProxy workaround; see '
@@ -95,20 +122,27 @@ def generate_launch_description():
                               description='winch_ctrl backend: gazebo (the Iris '
                                           'winch joint and a detachable payload), '
                                           'sim (sequence only, nothing moves) or '
-                                          'mavlink (MAV_CMD_DO_WINCH); default '
+                                          'mavlink (MAV_CMD_DO_WINCH) or gpio (Pi BTS7960 + N20 encoder); default '
                                           'gazebo in sim, mavlink on the aircraft'),
         # The flight sensors (use_sim:=false only). Mount yaw and direction
         # are measured with scripts/check_sensors.py.
         DeclareLaunchArgument('lidar_port', default_value='/dev/ttyUSB0'),
+        # The fitted unit is a Slamtec RPLIDAR C1 (460800 baud, spins only
+        # after the driver's start-scan command). ld06 keeps the old driver.
+        DeclareLaunchArgument('lidar_model', default_value='c1',
+                              description='c1 (Slamtec sllidar_ros2) or ld06 '
+                                          '(ldlidar_stl_ros2)'),
         DeclareLaunchArgument('lidar_yaw_deg', default_value='0.0',
-                              description="LD06's 0 deg, CCW from the nose"),
+                              description="the lidar's marked 0 deg, CCW from the nose"),
         DeclareLaunchArgument('lidar_mirrored', default_value='false',
                               description='driver angles run clockwise'),
         DeclareLaunchArgument('camera_device', default_value='/dev/video0'),
         # Manual exposure in 100 us units: 100 = 10 ms. Auto exposure on a
         # C270 runs to 60+ ms in shade, a 20 px smear at sweep speed; the QR
         # reader's envelope assumes 10 ms (sim/test_perception_corruption.py).
-        DeclareLaunchArgument('camera_exposure', default_value='100'),
+        # <= 0 (default): camera auto exposure. > 0: manual, 100 us units;
+        # manual also fixes gain, so tune it at the venue (10 ms indoors is dark).
+        DeclareLaunchArgument('camera_exposure', default_value='0'),
         DeclareLaunchArgument('camera_backend',
                               default_value=sim_or('sim', 'mavlink'),
                               description='camera_ctrl backend: sim (Gazebo joint) '
@@ -124,10 +158,25 @@ def generate_launch_description():
     )
 
     # 2. MAVROS Core Node
+    #
+    # ONLY THE PLUGINS THE STACK USES. With no list MAVROS loads every plugin
+    # (about 50); on the Pi 5 it then sat at 100% CPU with a load average of
+    # 12.5 on 4 cores, and the camera, banner detector and pose freshness fell
+    # behind (15 October, Pi-GCS laptop-sim missions). These 15 serve every
+    # /mavros topic and service referenced in src/ and scripts/:
+    # state/battery/estimator/extended state, cmd/*, param/set, local and
+    # global position, home, imu, geofence fences/push, gimbal_control,
+    # gpsstatus, rc in/out, setpoint position/raw and vibration.
+    mavros_plugins = ['sys_status', 'sys_time', 'command', 'param',
+                      'local_position', 'global_position', 'home_position',
+                      'imu', 'geofence', 'gimbal_control', 'gps_status',
+                      'rc_io', 'setpoint_position', 'setpoint_raw', 'vibration']
     mavros = Node(
         package='mavros', executable='mavros_node', output='screen',
-        parameters=[{'fcu_url': fcu_url, 'gcs_url': '',
-                     'target_system_id': 1, 'target_component_id': 1,
+        parameters=[{'plugin_allowlist': mavros_plugins,
+                     'fcu_url': fcu_url, 'gcs_url': '',
+                     'target_system_id': ParameterValue(LaunchConfiguration('target_system_id'), value_type=int),
+                     'target_component_id': ParameterValue(LaunchConfiguration('target_component_id'), value_type=int),
                      'use_sim_time': use_sim}],
     )
 
@@ -135,7 +184,17 @@ def generate_launch_description():
     qr = Node(
         package='perception_qr', executable='qr_node', output='screen',
         parameters=[{'image_topic': image_topic, 'target': target,
-                     'use_sim_time': use_sim}],
+                     'use_sim_time': use_sim,
+                     # usb_cam on the aircraft publishes /camera_info; the
+                     # sim bridge and laptop gateway use /camera/camera_info.
+                     'camera_info_topic': PythonExpression([
+                         "'/camera_info' if not ('", use_sim,
+                         "'.lower() in ('true', '1')) and not bool('",
+                         remote_gateway, "') else '/camera/camera_info'"]),
+                     # Test switch: fly as if the codes encoded nothing, so
+                     # the pattern alone must identify the pad.
+                     'use_payloads': os.environ.get(
+                         'AEROTHON_QR_IGNORE_PAYLOADS', '0') != '1'}],
     )
 
     banner = Node(
@@ -205,6 +264,9 @@ def generate_launch_description():
     camera = Node(
         package='camera_ctrl', executable='camera_ctrl_node', output='screen',
         parameters=[{'backend': LaunchConfiguration('camera_backend'),
+                     'external_joint_feedback': ParameterValue(PythonExpression(["bool('", remote_gateway, "')"]), value_type=bool),
+                     'joint_name': PythonExpression(["'camera_pitch' if '", remote_gateway, "' else 'webcam_pitch_joint'"]),
+                     'startup_pose': PythonExpression(["'' if '", managed, "'.lower() == 'true' else 'FORWARD'"]),
                      'use_sim_time': use_sim}],
     )
 
@@ -214,39 +276,73 @@ def generate_launch_description():
         package='winch_ctrl', executable='winch_node', output='screen',
         parameters=[params_file,
                     {'backend': LaunchConfiguration('winch_backend'),
+                     'external_joint_feedback': ParameterValue(PythonExpression(["bool('", remote_gateway, "')"]), value_type=bool),
                      'use_sim_time': use_sim}],
     )
 
     # 3d. Flight sensors. In the sim Gazebo publishes both.
-    real = UnlessCondition(use_sim)
-    lidar = Node(
+    real = IfCondition(PythonExpression(["not ('", use_sim, "'.lower() in ('true', '1')) and not bool('", remote_gateway, "')"]))
+    def real_lidar(model):
+        return IfCondition(PythonExpression([
+            "not ('", use_sim, "'.lower() in ('true', '1')) and not bool('",
+            remote_gateway, "') and '", LaunchConfiguration('lidar_model'),
+            "'.lower() == '", model, "'"]))
+    lidar_ld06 = Node(
         package='ldlidar_stl_ros2', executable='ldlidar_stl_ros2_node',
-        name='ld06', output='screen', condition=real,
-        parameters=[{'product_name': 'LDLiDAR_LD06', 'topic_name': 'scan_raw',
+        name='ld06', output='screen', condition=real_lidar('ld06'),
+        # A sensor driver that exits (device absent at Connect, a USB reset
+        # after a brown-out) used to stay dead until the next Connect.
+        respawn=True, respawn_delay=2.0,
+        parameters=[{'product_name': 'LDLiDAR_LD06', 'topic_name': 'scan_driver',
                      'frame_id': 'base_scan',
                      'port_name': LaunchConfiguration('lidar_port'),
                      'port_baudrate': 230400, 'laser_scan_dir': True,
                      'enable_angle_crop_func': False}],
     )
+    lidar_c1 = Node(
+        package='sllidar_ros2', executable='sllidar_node',
+        name='rplidar_c1', output='screen', condition=real_lidar('c1'),
+        respawn=True, respawn_delay=2.0,      # the C1 spins only while this runs
+        remappings=[('scan', 'scan_driver')],
+        parameters=[{'channel_type': 'serial',
+                     'serial_port': LaunchConfiguration('lidar_port'),
+                     'serial_baudrate': 460800, 'frame_id': 'base_scan',
+                     'inverted': False, 'angle_compensate': True,
+                     'scan_mode': 'Standard'}],
+    )
     lidar_mount = Node(
         package='mission_bringup', executable='scan_mount', output='screen',
         condition=real,
-        parameters=[{'lidar_yaw_deg': ParameterValue(
+        # sllidar_ros2 publishes bearing = pi - C1 angle: the C1's marked
+        # front arrives at 180 deg. scan_mount undoes that before the mount.
+        parameters=[{'driver_yaw_deg': ParameterValue(PythonExpression([
+                        "180.0 if '", LaunchConfiguration('lidar_model'),
+                        "'.lower() == 'c1' else 0.0"]), value_type=float),
+                     'lidar_yaw_deg': ParameterValue(
                         LaunchConfiguration('lidar_yaw_deg'), value_type=float),
                      'mirrored': ParameterValue(
                         LaunchConfiguration('lidar_mirrored'), value_type=bool)}],
     )
     webcam = Node(
         package='usb_cam', executable='usb_cam_node_exe', name='c270',
-        output='screen', condition=real,
+        output='screen', condition=real, respawn=True, respawn_delay=2.0,
         parameters=[{'video_device': LaunchConfiguration('camera_device'),
                      'image_width': 1280, 'image_height': 720,
                      'framerate': 30.0, 'pixel_format': 'mjpeg2rgb',
-                     'frame_id': 'camera_link', 'autoexposure': False,
+                     'frame_id': 'camera_optical_frame', 'autoexposure': False,
                      'exposure': ParameterValue(
                         LaunchConfiguration('camera_exposure'), value_type=int),
                      'autofocus': False}],
         remappings=[('image_raw', image_topic)],
+    )
+    # usb_cam's exposure names are rejected by current UVC drivers, so the
+    # camera stayed on auto exposure; this holds the configured value.
+    camera_exposure = Node(
+        package='mission_bringup', executable='camera_exposure', output='screen',
+        condition=real, respawn=True, respawn_delay=2.0,
+        parameters=[{'device': LaunchConfiguration('camera_device'),
+                     'exposure': ParameterValue(
+                        LaunchConfiguration('camera_exposure'), value_type=int)}],
     )
 
     # 4. Reactive Obstacle Avoidance Controller
@@ -258,20 +354,43 @@ def generate_launch_description():
     # 5. Autonomous Behavior Tree Mission Executive
     mission = Node(
         package='mission_bt', executable='mission_tree', output='screen',
+        condition=UnlessCondition(managed),
         parameters=[params_file,
                     {'use_sim_time': use_sim, 'camera_hfov': camera_hfov,
-                     'target_marker_m': target_marker_m}],
+                     'target_marker_m': target_marker_m,
+                     'delivery_load_calibration': os.environ.get('AEROTHON_DELIVERY_CALIBRATION', '')}],
     )
+
+    execution = Node(package='aerothon_runtime', executable='execution_node',
+        output='screen', condition=IfCondition(managed),
+        parameters=[params_file, {'use_sim_time': use_sim, 'camera_hfov': camera_hfov,
+            'target_marker_m': target_marker_m,
+            'remote_gateway': ParameterValue(remote_gateway, value_type=str),
+            'slam_enabled': ParameterValue(launch_slam, value_type=bool),
+            'target_system_id': ParameterValue(LaunchConfiguration('target_system_id'), value_type=int),
+            'rc_config': ParameterValue(LaunchConfiguration('rc_config'), value_type=str),
+            'delivery_load_calibration': os.environ.get('AEROTHON_DELIVERY_CALIBRATION', '')}])
+    remote = Node(package='aerothon_runtime', executable='remote_devices',
+        output='screen', condition=IfCondition(PythonExpression(["bool('", remote_gateway, "')"])),
+        parameters=[{'gateway': remote_gateway, 'use_sim_time': use_sim, 'camera_hfov': camera_hfov,
+            'system_id': ParameterValue(LaunchConfiguration('target_system_id'), value_type=int),
+            'component_id': ParameterValue(LaunchConfiguration('target_component_id'), value_type=int)}])
 
     # 6. GCS Aggregator WebSocket Server (port 8765)
     readiness = Node(
         package='gcs_aggregator', executable='readiness', output='screen',
-        parameters=[{'use_sim_time': use_sim, 'image_topic': image_topic}],
+        parameters=[{'use_sim_time': use_sim, 'image_topic': image_topic,
+                     # Off only where a script hands the mission its arena
+                     # as launch values instead of through the GCS.
+                     'require_arena_dimensions': os.environ.get(
+                         'AEROTHON_REQUIRE_ARENA_DIMENSIONS', '1') != '0'}],
     )
 
     aggregator = Node(
         package='gcs_aggregator', executable='aggregator', output='screen',
-        parameters=[{'use_sim_time': use_sim}],
+        parameters=[{'use_sim_time': use_sim, 'image_topic': image_topic,
+                     'managed': ParameterValue(managed, value_type=bool),
+                     'ws_host': PythonExpression(["'127.0.0.1' if '", managed, "'.lower() == 'true' else '0.0.0.0'"])}],
     )
 
     # 7. Annotated MJPEG Video Stream Server (port 8080)
@@ -280,24 +399,45 @@ def generate_launch_description():
         parameters=[{'port': 8080, 'use_sim_time': use_sim}],
     )
 
+    # Mapping-only scan matching never publishes FCU/flight odometry.
+    mapping_odometry = Node(
+        package='mission_bringup', executable='scan_odometry', output='screen',
+        parameters=[{'use_sim_time': use_sim}],
+        condition=IfCondition(PythonExpression(["'", launch_slam,
+            "'.lower() in ('true', '1') and "] + lidar_slam)),
+    )
+
     # 8. slam_toolbox (Online 2D SLAM Mapping)
     slam_node = Node(
         package='slam_toolbox',
         executable='async_slam_toolbox_node',
         name='slam_toolbox',
+        additional_env={'LD_PRELOAD': grid_adapter_path()},
         output='screen',
         parameters=[{
             'use_sim_time': use_sim,
-            'odom_frame': 'odom',
+            'odom_frame': PythonExpression(["'lidar_odom' if "] + lidar_slam + [" else 'odom'"]),
             'map_frame': 'map',
-            'base_frame': 'base_link',
-            'scan_topic': scan_topic,
+            'base_frame': PythonExpression(["'lidar_mapping_base' if "] + lidar_slam + [" else 'base_link'"]),
+            'scan_topic': PythonExpression(["'/scan_slam' if "] + lidar_slam + [" else '", scan_topic, "'"]),
             'mode': 'mapping',
             'resolution': 0.05,
             'max_laser_range': 12.0,
             'minimum_time_interval': 0.1,
             'transform_timeout': 0.2,
             'tf_buffer_duration': 30.0,
+            'throttle_scans': 1,
+            'scan_queue_size': 3,
+            'map_update_interval': 1.0,
+            'minimum_travel_distance': 0.1,
+            'minimum_travel_heading': 0.1,
+            'use_scan_matching': True,
+            'use_scan_barycenter': True,
+            # The display mapper records a cell once a valid ray traverses it.
+            # Requiring two traversals left stationary C1 maps full of spokes.
+            # This map is not a navigation clearance or flight-readiness input.
+            'min_pass_through': 1,
+            'occupancy_threshold': 0.1,
         }],
         condition=IfCondition(launch_slam),
     )
@@ -337,9 +477,9 @@ def generate_launch_description():
     )
 
     return LaunchDescription(args + [
-        rsp_node, mavros, lidar, lidar_mount, webcam,
+        rsp_node, mavros, lidar_ld06, lidar_c1, lidar_mount, webcam, camera_exposure,
         qr, banner, redzone, payload, overlay, camera, winch, stream_rates,
-        controller, mission, readiness, aggregator, video,
+        controller, mission, execution, remote, readiness, aggregator, video, mapping_odometry,
         # The Gazebo odometry bridge needs a few seconds to establish odom TF.
         # Activating slam_toolbox before that point leaves its initial scan
         # filter without transforms and delays the first map indefinitely.

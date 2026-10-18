@@ -28,7 +28,7 @@ TEMPLATE = ROOT / "src/aerothon_sim/sim_gazebo/worlds/mission2.sdf"
 ASSETS = ROOT / "src/aerothon_sim/sim_gazebo/materials"
 
 
-def build(spec):
+def build(spec, **overrides):
     """Run the real materialiser on a spec; return (world XML root, layout)."""
     with tempfile.TemporaryDirectory() as d:
         sp = Path(d) / "spec.json"
@@ -38,6 +38,7 @@ def build(spec):
         env = dict(os.environ)
         env.pop("AEROTHON_WORLD_SPEC", None)
         env.pop("AEROTHON_RANDOM_ARENA", None)
+        env.update(overrides)
         r = subprocess.run(
             [sys.executable, str(ROOT / "scripts/materialize_world.py"),
              "--source", str(TEMPLATE), "--assets", str(ASSETS),
@@ -448,6 +449,50 @@ class EditorServerTests(unittest.TestCase):
         code, j = self.call("POST", "/api/run/bad_world")
         self.assertEqual(code, 400)
         self.assertIn("errors", j["error"])
+
+
+class UnloadedPayloadFixtureTests(unittest.TestCase):
+    """An unloaded airframe must not leave the cargo touching a landing skid.
+
+    The unloaded fixture is built without the detachable joint that carries
+    the payload, so the cargo left at the spawn drops onto the pad against a
+    skid and records thousands of aircraft contacts before the flight arms.
+    """
+
+    def payload_and_spawn(self, spec, **env):
+        root, _, _ = build(spec, **env)
+        inc = [i for i in root.iter("include")
+               if i.find("name").text == "aerothon_iris"][0]
+        spawn = [float(v) for v in inc.find("pose").text.split()][:2]
+        return model_pose(root, "aerothon_payload"), spawn
+
+    def test_a_loaded_fixture_still_hangs_the_cargo_under_the_airframe(self):
+        for spec in (W.default_spec(), custom_spec()):
+            payload, spawn = self.payload_and_spawn(spec)
+            self.assertAlmostEqual(payload[0], spawn[0], places=3)
+            self.assertAlmostEqual(payload[1], spawn[1], places=3)
+
+    def test_an_unloaded_fixture_parks_the_cargo_clear_on_the_pad(self):
+        for spec in (W.default_spec(), custom_spec()):
+            payload, spawn = self.payload_and_spawn(
+                spec, AEROTHON_PAYLOAD_FIXTURE="unloaded")
+            px, py = W.parked_payload_point(spec)
+            self.assertAlmostEqual(payload[0], px, places=3)
+            self.assertAlmostEqual(payload[1], py, places=3)
+            # Clear of the airframe, and still on the pad it rests on.
+            self.assertGreater(math.dist((px, py), spawn), 1.0)
+            self.assertGreater(math.dist((px, py), W.start_qr_point(spec)), 1.0)
+            t = spec["takeoff"]
+            yaw = math.radians(t["yaw_deg"])
+            u = (px - t["x"]) * math.cos(yaw) + (py - t["y"]) * math.sin(yaw)
+            v = -(px - t["x"]) * math.sin(yaw) + (py - t["y"]) * math.cos(yaw)
+            half_u, half_v = (s / 2 for s in W.TAKEOFF_PAD_SIZE)
+            self.assertLess(abs(u), half_u - .3)
+            self.assertLess(abs(v), half_v - .3)
+
+    def test_the_template_arena_parks_it_without_a_spec(self):
+        px, py = W.parked_payload_point()
+        self.assertGreater(math.dist((px, py), (-2.0, 2.0)), 1.0)
 
 
 if __name__ == "__main__":

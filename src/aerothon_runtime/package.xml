@@ -1,0 +1,13 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>aerothon_runtime</name><version>0.1.0</version>
+  <description>Pi web host, execution supervisor and remote device transport.</description>
+  <maintainer email="sarthakkhubchandanik@gmail.com">Team Rotor FPV</maintainer>
+  <license>MIT</license><buildtool_depend>ament_python</buildtool_depend>
+  <exec_depend>rclpy</exec_depend><exec_depend>python3-aiohttp</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend><exec_depend>rosgraph_msgs</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend><exec_depend>std_msgs</exec_depend>
+  <exec_depend>mission_bt</exec_depend><exec_depend>mavros_msgs</exec_depend>
+  <exec_depend>cv_bridge</exec_depend><exec_depend>tf2_ros</exec_depend>
+  <export><build_type>ament_python</build_type></export>
+</package>

@@ -31,6 +31,12 @@ winch_ctrl:
     stow_rate_mps: 0.45
     max_payout_m: 6.0
     hook: gravity            # gravity | command
+    # backend:=gpio (Pi BTS7960 + N20 encoder) reads travel from the encoder.
+    # MEASURE these on the secured bench; 0 keeps the backend refusing to run.
+    encoder_counts_per_output_rev: 0.0   # quadrature counts per output-shaft turn
+    spool_radius_m: 0.0                  # effective radius over the loaded spool
+    encoder_lower_sign: 1                # -1 if counts fall while lowering
+    drive_duty_pct: 60.0                 # BTS7960 PWM duty for payout and stow
 
 perception_payload:
   ros__parameters:

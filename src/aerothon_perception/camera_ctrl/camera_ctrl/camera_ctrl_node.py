@@ -14,6 +14,7 @@ WHY THIS EXISTS
 NAMED POSES
     FORWARD   0 deg    corridor navigation
     BANNER  -20 deg    banner detection from above corridor altitude
+    GROUND  -35 deg    a banner laid flat in front of the corridor
     NADIR   -90 deg    start-QR scan, lawnmower search, winch drop, landing
     ALIGN   -45 deg    intermediate, target centring during descent
 
@@ -88,6 +89,12 @@ NAMED_POSES_DEG = {
     # altitude, so the rulebook order can be followed rather than worked
     # around by descending first.
     "BANNER": -20.0,
+    # A banner laid flat in front of the corridor (organiser clarification).
+    # The frame spans +-18 deg about this: from gate height (3 m) it covers
+    # 2.3-10 m of ground ahead, from the 5 m return-search height 3.8-16 m,
+    # so the sheet is in frame both squared up and on the return approach.
+    # -30 put it on the bottom edge from 5 m up, 5 m out.
+    "GROUND": -35.0,
 }
 
 
@@ -113,13 +120,16 @@ class CameraCtrl(Node):
         p("publish_rate_hz", 10.0)
         p("command_repeat_s", 0.5)          # re-send until settled
         p("startup_pose", "FORWARD")
+        p("external_joint_feedback", False)
         p("servo_settle_s", 1.0)            # mavlink, no attitude: time to angle
 
         self.backend = self.get_parameter("backend").value
         self.joint_name = self.get_parameter("joint_name").value
+        self.external_joint_feedback = self.get_parameter("external_joint_feedback").value is True
 
         self.requested_name = ""
         self.requested_rad = None
+        self._explicit_request = False
         self.actual_rad = None
         self.last_reading_t = None
         self._in_tolerance_count = 0
@@ -130,7 +140,7 @@ class CameraCtrl(Node):
         self._mount_t = None                # last mount attitude from the FC
 
         self.create_subscription(String, "/camera/set_pose", self._on_set_pose, 10)
-        if self.backend == "sim":
+        if self.backend == "sim" or self.external_joint_feedback:
             self.create_subscription(JointState, "/joint_states",
                                      self._on_joint_states, _sensor_qos())
 
@@ -175,7 +185,11 @@ class CameraCtrl(Node):
         else:
             try:
                 deg = float(target)
-                name = f"{deg:.1f}deg"
+                # The GCS camera buttons send degrees; an angle that is a
+                # named pose must carry that name or the detector gates
+                # (NADIR/ALIGN/FORWARD) never open.
+                name = next((k for k, v in NAMED_POSES_DEG.items()
+                             if abs(v - deg) < 1e-6), f"{deg:.1f}deg")
             except ValueError:
                 self.get_logger().warning(
                     f"unknown camera pose '{target}'; "
@@ -183,6 +197,7 @@ class CameraCtrl(Node):
                 return
 
         new_rad = math.radians(deg)
+        self._explicit_request = True
         if self.requested_rad is not None and \
                 abs(new_rad - self.requested_rad) < 1e-6 and name == self.requested_name:
             return                                  # already commanding this
@@ -196,6 +211,9 @@ class CameraCtrl(Node):
         self._in_tolerance_count = 0
         self._in_tolerance_since = None
         self._last_command_t = None
+        # Timed readback starts only once the FC has accepted THIS target.
+        self._cmd_gen = getattr(self, '_cmd_gen', 0) + 1
+        self._accepted_t = None
         self.get_logger().info(f"camera pose -> {name} ({deg:.1f} deg)")
         self._send()
 
@@ -203,27 +221,51 @@ class CameraCtrl(Node):
         if self.requested_rad is None:
             return
         if self.backend == "mavlink":
-            self._send_mavlink()
+            if not self._send_mavlink():
+                return          # not sent: try again next tick, not in 1 s
         else:
             self.pub_cmd.publish(Float64(data=float(self.requested_rad)))
         self._last_command_t = self._now()
 
     def _send_mavlink(self):
+        """True when a command went out. Its reply is checked: with timed
+        readback, a command lost before MAVROS was ready or rejected by the FC
+        used to be reported settled 1 s later while the camera never moved."""
         if self.cli_cmd is None or not self.cli_cmd.service_is_ready():
-            return
+            return False
         req = CommandLong.Request()
         req.command = MAV_CMD_DO_MOUNT_CONTROL
         req.param1 = float(math.degrees(self.requested_rad))   # pitch, degrees
         req.param2 = 0.0                                       # roll
         req.param3 = 0.0                                       # yaw
         req.param7 = float(MAV_MOUNT_MODE_MAVLINK_TARGETING)
-        self.cli_cmd.call_async(req)
+        gen = getattr(self, '_cmd_gen', 0)
+        future = self.cli_cmd.call_async(req)
+        if future is not None and hasattr(future, 'add_done_callback'):
+            future.add_done_callback(lambda f, gen=gen: self._on_command_reply(f, gen))
+        return True
+
+    def _on_command_reply(self, future, gen):
+        if gen != getattr(self, '_cmd_gen', 0):
+            return              # a reply about a superseded target
+        try:
+            reply = future.result()
+        except Exception as exc:  # noqa: BLE001
+            self.get_logger().warning(f"camera mount command failed: {exc}")
+            return
+        if reply is not None and reply.success and int(reply.result) == 0:
+            if getattr(self, '_accepted_t', None) is None:
+                self._accepted_t = self._now()
+        else:
+            self.get_logger().warning(
+                f"camera mount command not accepted (result "
+                f"{getattr(reply, 'result', None)}); retrying")
 
     # ------------------------------------------------------------------ #
     # read-back
     # ------------------------------------------------------------------ #
     def _on_joint_states(self, msg: JointState):
-        if self.backend != "sim":
+        if self.backend != "sim" and not self.external_joint_feedback:
             return
         try:
             idx = list(msg.name).index(self.joint_name)
@@ -241,7 +283,7 @@ class CameraCtrl(Node):
         self._observe(math.asin(max(-1.0, min(1.0, 2.0 * (q.w * q.y - q.z * q.x)))))
 
     def readback(self):
-        if self.backend == "sim":
+        if self.backend == "sim" or self.external_joint_feedback:
             return "joint"
         fresh = (self._mount_t is not None and self._now() - self._mount_t
                  <= float(self.get_parameter("stale_after_s").value))
@@ -252,15 +294,23 @@ class CameraCtrl(Node):
         there, at the old one until then."""
         if self.requested_rad is None or self._target_t is None:
             return
-        late = self._now() - self._target_t >= float(
+        accepted = getattr(self, '_accepted_t', None)
+        late = accepted is not None and self._now() - accepted >= float(
             self.get_parameter("servo_settle_s").value)
         self._observe(self.requested_rad if late else self._prev_rad)
 
     def _observe(self, rad):
+        if not math.isfinite(rad):
+            return
         self.actual_rad = rad
         self.last_reading_t = self._now()
         if self.requested_rad is None:
-            return
+            # Observe an already-positioned mount without moving it on Connect.
+            named = min(NAMED_POSES_DEG, key=lambda k: abs(math.radians(NAMED_POSES_DEG[k])-rad))
+            if abs(math.radians(NAMED_POSES_DEG[named])-rad) > math.radians(float(self.get_parameter('tolerance_deg').value)):
+                return
+            self.requested_name = named
+            self.requested_rad = math.radians(NAMED_POSES_DEG[named])
         tol = math.radians(float(self.get_parameter("tolerance_deg").value))
         if abs(rad - self.requested_rad) <= tol:
             self._in_tolerance_count += 1
@@ -297,7 +347,7 @@ class CameraCtrl(Node):
             self._observe_timed()
         # Keep re-issuing until the joint is measured in position. The Gazebo
         # position controller and a real servo can both miss a single command.
-        if self.requested_rad is not None and not self.is_settled():
+        if getattr(self, '_explicit_request', True) and self.requested_rad is not None and not self.is_settled():
             repeat = float(self.get_parameter("command_repeat_s").value)
             if self._last_command_t is None or \
                     (self._now() - self._last_command_t) >= repeat:

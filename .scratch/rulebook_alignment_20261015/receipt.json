@@ -1,0 +1,51 @@
+{
+  "problem": "Align Mission 2 algorithms and GCS with the organiser clarifications (QR by appearance, one 5 ft red zone, green/orange side-by-side corridors, 5/10 m length, 8 ft navigation height, obstacles half-width in exit corridor, hex colours) for near-ideal competition conditions; confirm latest code location.",
+  "scope": "Software and simulation. No hardware, no Pi deployment (Pi unreachable).",
+  "status": "completed_software_and_calm_rendered_scope",
+  "folder_check": "AEROTHON_phase2 already archived/removed 2026-10-14; its only extra commit d5ec31a is contained in AEROTHON. pi-web-gcs worktree was an older GCS design, archived.",
+  "changes": [
+    "qr_appearance: module-grid data-module signature, 0.94 bar (measured), coarse fallback 0.93, registered re-read at reference module count",
+    "qr_node: APPEARANCE_ONLY target, per-START reference reset, decoded-contradiction veto, subset-payload veto when patterns comparable, use_payloads test switch, detail fields",
+    "ScanStartQR: proceeds on start-marker pattern after 8 s without decode",
+    "Delivery find stages fall back to DELIVERY_SKIPPED and fly the return; winch failures unchanged",
+    "FastConnectedPlanner: prefers 0.10 m tracking reserve beyond 0.70 m hard limit, falls back to former behaviour",
+    "Readiness: arena_dimensions interlock item; AEROTHON_REQUIRE_ARENA_DIMENSIONS=0 for non-GCS sim scripts",
+    "Arena schema: obstacle.reach_frac (21 fields)",
+    "Connection profiles: explicit vehicle simulation/drone; GCS header shows kind",
+    "Aggregator: MAVROS milligauss x1000 magnetic encoding; QR target/match basis telemetry",
+    "run_tests.sh: AEROTHON_NATIVE_PYTHON for pymavlink",
+    "execution_node: simulated-vehicle FCU freshness in vehicle time; recovery mode repeated while FCU stays GUIDED; laptop-sim link/clock stall allowance 3 s",
+    "LawnmowerSearch: immediate mid-sweep re-plan only for a new obstruction on the active leg (flicker thrash 86 -> 1)",
+    "winch_ctrl: gpio backend (BTS7960 + N20 quadrature encoder via lgpio), measured travel, stall/reversal faults, refuses unmeasured settings; profile winch_backend; container GPIO devices when AEROTHON_WINCH_BACKEND=gpio; python3-lgpio dependency",
+    "GCS: detector readiness value formatted; winch backend selector for real-drone profiles"
+  ],
+  "evidence": {
+    "source_identity": "188aacd06fb893c697efe7a42026d9229d6114c119f9362a47e980686817a4c0",
+    "offline": "logs/offline_s3_final_20261015.log (1971 passed, 18 skipped, 5 deferred strong-gust excluded; native 12 passed; frontend ok)",
+    "rendered_pass": [
+      "logs/s3_final_calm_h115_both_appearance_s20261003 (22/22, corridor 0.748 m, 848.0 s)",
+      "logs/s3_final_calm_h115L5_both_payload_s20261003 (22/22, corridor 0.774 m, 871.0 s)"
+    ],
+    "diagnostic": "logs/s3_calm_h115_both_appearance_s20261003 (21/22, corridor 0.6984 m; earlier source; not acceptance)",
+    "qr_study": "logs/qr_appearance_study_20261014",
+    "bundle": {
+      "path": "logs/pi-runtime-rulebook-20261015d.zip",
+      "files": 256,
+      "sha256": "fa5dfc0fd9381f87339f7436bc3218b1a828e9e41ca4f4d6f3dcb9dd3452cdb5"
+    },
+    "offline_final": "logs/offline_s3_final2_20261015.log (1984 passed, 18 skipped; native 12; frontend ok)",
+    "rendered_final": "logs/s3_final2_calm_h115_both_appearance_s20261003 (22/22, corridor 0.770 m, 873.0 s, 1 mid-sweep re-plan)",
+    "pi_role_gcs": [
+      "logs/pi_role_gcs_mission_20261015/attempt1_notes.json",
+      "logs/pi_role_gcs_mission_20261015_attempt2/attempt2_notes.json",
+      "logs/pi_role_gcs_mission_20261015_attempt3/attempt3_notes.json",
+      "logs/pi_role_gcs_mission_20261015_attempt4 (in progress)"
+    ]
+  },
+  "blockers": [
+    "Pi not reachable from this laptop's networks on 15 October: bundle not deployed to hardware",
+    "Winch GPIO backend unmeasured and bench-unverified",
+    "Laptop-sim mode sweeps slowly on one shared host (red detector ~5 Hz sim)"
+  ],
+  "completion": "2026-10-15"
+}

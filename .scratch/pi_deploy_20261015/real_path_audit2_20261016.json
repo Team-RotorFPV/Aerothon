@@ -1,0 +1,31 @@
+{
+  "problem": "User asked for the whole deployed code base (flight logic, sensors, actuators, GCS, web host) to be probed and tested end to end for bugs like the LD06/C1 driver mismatch.",
+  "scope": "Three read-only audits (GCS/web host, flight logic, sensors/actuators), fixes with regression tests, full offline suite, headless end-to-end campaigns with a pre-change baseline, A/B and bisection. Thresholds unchanged.",
+  "fixes": {
+    "web_host": ["listener survives all exceptions", "refused Start releases reservation", "corrupt profiles.json set aside, profiles re-validated", "runtime.log handle closed and rotated at 50 MB", "Connect validates before writing vehicle_connection.json", "JSON 500s and api() text fallback", "unique tile temp files", "Disconnect enabled after reboot with a selected profile"],
+    "aggregator": ["non-finite telemetry -> null (inf front_m froze the GCS outdoors)", "malformed runtime messages dropped instead of killing the node", "broadcast iterates a copy", "monotonic clock for elapsed and map throttle", "scan angles sent; SLAM tab shows live scan"],
+    "flight": ["SetModeArm 20 s timeout", "non-GUIDED external mode change is an intervention", "Takeoff height above home + 45 s timeout", "fence/zone/route home->EKF-origin frame, FC fence converted back", "operator target override one run only", "takeover only for live runs", "avoidance tasks not gated on camera actuator", "mechanism task: winch status timeout and abort"],
+    "actuators": ["camera timed readback starts only after FC accepted MOUNT_CONTROL", "winch mavlink: fault on unsent/refused DO_WINCH, payout only after acceptance, at fc_rate_max_mps = WNCH_RATE_MAX 0.30", "GPIO encoder decodes lgpio (gpio, level) reports"],
+    "avoidance": ["vertical-motion gap up to 3x stale_scan_s bridged with FCU velocities; previously any gap froze the corridor for the rest of the traversal"],
+    "router": ["profile_router exponential backoff"],
+    "tests": ["tests/conftest.py runs async web-host tests without pytest-asyncio", "tests/test_web_robustness.py", "camera, winch, gpio winch, vertical motion test additions"]
+  },
+  "evidence": {
+    "offline": "logs/reduced_c1_20261016e.log: 2062 passed, 8 skipped; native 9 passed (pymavlink installed in WSL user site); frontend 25 passed + build",
+    "campaign_final": "logs/e2e_final_20261016: calm 23/24 (8 worlds x 3 seeds), field 10/12 (h030 worlds)",
+    "ab": "logs/ab_20261016: 9e4cee6 and pre-gap-fix source identical on h115_both calm s4-6 (s5 froze on both)",
+    "gapfix": "logs/gapfix_20261016: frozen seeds pass with the fix (field s1 corridor STUCK, field clearance)",
+    "baseline": "logs/baseline_head_20261016",
+    "invalid_runs": "logs/e2e_campaign_20261016 (36 runs never started: DDS domain > 232, harness error); logs/e2e_campaign2_20261016 h115_both batch CPU-starved by concurrent test suites"
+  },
+  "status": "fixed and tested locally; NOT yet deployed to the Pi (Pi dropped off 192.168.0.x after reporting throttled=0x50000)",
+  "deploy": "scratchpad deploy_audit_fixes.py + rebuilt GCS dist (index-BkhF0gxM.js) once the Pi is reachable; then restart aerothon-router and reconnect the runtime while disarmed",
+  "open": [
+    "GateAdvance fails closed on velocity freshness/consistency under load; on the aircraft the 115200 TELEM3 link (~60% used by stream_rate_keeper) makes this likelier",
+    "field-wind corridor clearance below 0.70 m in some runs",
+    "camera_actuator gate closed on the aircraft until tilt feedback is qualified",
+    "Pi supply under-voltage; two cold resets and a disappearance",
+    "C1 mount yaw/mirror unmeasured; SLAM needs FCU local position",
+    "security: router learned GCS senders never expire; DNS-rebinding origin check; venue_file free path"
+  ]
+}

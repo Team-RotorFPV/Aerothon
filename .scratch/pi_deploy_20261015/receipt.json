@@ -1,0 +1,166 @@
+{
+  "problem": "Deploy the organiser-clarification runtime bundle (final source 188aacd0...) to the Pi; previously the Pi was unreachable.",
+  "scope": "Software installation and build only. No arming, no mission start, no hardware wiring touched.",
+  "date": "2026-10-15",
+  "destination": {
+    "host": "192.168.0.102",
+    "note": "DHCP moved the Pi from .101 to .102; ed25519 host key AAAAC3NzaC1lZDI1NTE5AAAAIEh/O7bwqcP5... matches the recorded Pi key. Laptop Ethernet is now 192.168.0.100.",
+    "user": "pi5",
+    "arch": "aarch64",
+    "pi_clock_utc_at_install": "2026-10-14T16:36:46Z (Pi clock is behind; no NTP on the isolated network)"
+  },
+  "access": "Loopback-only paramiko broker (broker.py); operator typed the password in the terminal, host key verified before use.",
+  "bundle": {
+    "path": "logs/pi-runtime-rulebook-20261015.zip",
+    "sha256": "66a7e8d4f56c0403e914b2ed6c216ca7b371c1771e2ee66e6f6a2e74768d7267",
+    "files": 255,
+    "remote_copy": "/home/pi5/aerothon-deploy/runtime-rulebook-20261015.zip"
+  },
+  "installation": {
+    "changed_files": 19,
+    "removed_files": [
+      "gcs/assets/Graphs-CARHPKZb.js",
+      "gcs/assets/index-fVwES_DP.js"
+    ],
+    "installed_manifest_sha256": "9d6c7b72f7f52ed12221021e21b19c7e4ad89af39f9cabb6ad395fde9284b2ec",
+    "verified_files": 255,
+    "before_receipt": {
+      "local": "before-rulebook-20261015.json",
+      "remote": "/home/pi5/aerothon-deploy/before-rulebook-20261015.json",
+      "sha256": "7ba1b726717a596a335dc3e1d73beb66b6bf5d6c3b6871ab4d817e10a438dc09"
+    },
+    "rollback_backup": {
+      "local": "before-rulebook-20261015.tar.gz",
+      "remote": "/home/pi5/aerothon-deploy/before-rulebook-20261015.tar.gz",
+      "sha256": "848b17e2242b12e6da7e94eca00056c981f9ae4f53d1b1c086eabbcbc4bc831d",
+      "contents": "previous versions of changed/removed files plus previous runtime_manifest.json"
+    },
+    "interruption": "First pass (install_bundle.py) rewrote every file and stopped with PermissionError on root-owned gcs/assets/index-DWm1Vi1v.css after writing AGENTS.md, MASTER_DOCUMENTATION.md and the new Graphs asset and removing the two obsolete assets. 19 source paths (src/aerothon_runtime/**, that CSS asset, scripts/pi_runtime/stop_runtime.py and profile_router.py) were root-owned from an earlier root-run install; they were chowned to pi5 (list in rulebook-20261015-chowned.txt) and finish_install.py wrote the remaining 16 differing files plus the manifest, then verified all 255 hashes.",
+    "launchers_and_images": "Deployed run_container.sh, run_router.sh, console.launch.py, Dockerfiles, profile_router.py and stop_runtime.py already match the bundle; services and images not reinstalled. /home/pi5/aerothon-deploy/install_services.sh is a stale copy (workspace copy matches the bundle); not run.",
+    "preserved": [
+      "/home/pi5/aerothon-deploy/runtime.env",
+      "/home/pi5/.aerothon/*",
+      "/home/pi5/.local/state/aerothon/*",
+      ".scratch/pi_deploy_20261014/"
+    ]
+  },
+  "build": {
+    "image": "aerothon-runtime:20261014-network sha256:3b17f1eacc92891c3badb318c1a29bd7df6af4b53fb969771ead7bae5c47e51d arm64",
+    "command": "colcon build --symlink-install --parallel-workers 2 --cmake-args -DBUILD_TESTING=OFF (UID 1000, domain 42)",
+    "result": "13 packages finished",
+    "log": "build_and_check.log"
+  },
+  "check_pi_runtime": "PASS all 32 items (12 local + 8 external ROS packages, 9 Python imports, tesseract, geoid, built GCS). Software availability only.",
+  "import_check": "13 changed modules import inside the running container",
+  "service": "aerothon-gcs restarted while runtime idle/disconnected; aerothon-gcs and aerothon-router active; http://192.168.0.102:8899/ serves assets/index-ZFFq5ldS.js",
+  "status": "bundle 20261015d installed on Pi; laptop sim stopped; awaiting bundle e (link-drop fix, 6-point geofence)",
+  "blockers": [],
+  "hardware_qualified": false,
+  "flight_commands_sent": false,
+  "previous_laptop_stack": {
+    "run": "logs/pi_role_gcs_mission_20261015_attempt4",
+    "state_found": "mission Running in LawnmowerSearch about 41 min, sim vehicle armed GUIDED at ~9.8 m",
+    "action": "User approved in chat: stop via laptop GCS /api/commands stop (operator-stop-attempt4-20261015) -> Return and land Completed; MAVROS armed false at 03:55:14 UTC; /api/disconnect; SIGINT to process groups 13037, 12643, 13011, 12624 only",
+    "recorded_as": "operator_interrupted (interruption.json, operator_stop_20261015.log in that run directory)"
+  },
+  "laptop_simulation": {
+    "launcher": ".scratch/pi_deploy_20261015/laptop_sim.sh -> scripts/launch_laptop_sim.sh (mission_stack:=false, ROS domain 43)",
+    "evidence_dir": "logs/pi_deploy_laptop_sim_20261015 (stack.log, git_head.txt, git_status.txt)",
+    "world": "sim/worlds/clarified_h115_both.json, calm, seed 20261003",
+    "gateway": "WSL 172.26.219.3: FCU TCP 5762, sensor HTTP 19090 (Windows reserves 8075-8174)",
+    "relay": "scripts/laptop_gateway_relay.py --bind 192.168.0.100 --target 172.26.219.3 --sensor-port 19090; Pi reached both (relay-check.log)",
+    "pi_profile": {
+      "id": "laptop-sim",
+      "name": "Laptop simulation",
+      "vehicle": "simulation",
+      "transport": "tcp",
+      "host": "192.168.0.100",
+      "port": 5762,
+      "gateway": "http://192.168.0.100:19090",
+      "delivery_calibration": "sitl_delivery_load_20261005.json (first save did not register; set and saved before the d-bundle reconnect)",
+      "slam": false
+    },
+    "connect": "Pi MAVROS: CON: Got HEARTBEAT, connected. FCU: ArduPilot (tcp://192.168.0.100:5762)",
+    "operator_inputs": {
+      "arena_preset": "SAE Aerothon 2026 (clarified) -> APPLY TO AIRCRAFT (sent twice by a repeated click; identical payloads); mission reports APPLIED: QR 1.00 m, corridor 10.0 m at 2.44 m",
+      "banner_colours": {
+        "green": "#07A03D",
+        "orange": "#EB5A0A",
+        "red": "#C4161C",
+        "source": "sim/worlds/clarified_h115_both.json colours"
+      },
+      "delivery_zone": [
+        [
+          -35.36339676,
+          149.1654725
+        ],
+        [
+          -35.36339676,
+          149.16591312
+        ],
+        [
+          -35.36312726,
+          149.16591312
+        ],
+        [
+          -35.36312726,
+          149.1654725
+        ]
+      ],
+      "arena_fence": [
+        [
+          -35.36345066,
+          149.16508145
+        ],
+        [
+          -35.36345066,
+          149.16597921
+        ],
+        [
+          -35.36307336,
+          149.16597921
+        ],
+        [
+          -35.36307336,
+          149.16508145
+        ]
+      ],
+      "polygon_basis": "World-frame layout (delivery_zone_rect 41.311,0,40x30; geofence_poly) on the SITL home origin -35.363262,149.165237; checked against live aircraft GPS -35.363213,149.1651907 = origin + spawn (-4.26 E, +5.44 N). Same values as logs/pi_role_organiser_inputs.txt."
+    },
+    "readiness": "All 15 Ready: FCU link, GPS satellites 18, HDOP 0.8, battery 16.8 V, EKF, lidar 9.7 Hz, MAVLink latency, camera pose, detector health, winch health, RC failsafe, delivery-zone boundary, arena geofence, banner colours, arena dimensions",
+    "screenshot": "pi_gcs_laptop_sim_readiness.jpg",
+    "state_snapshot": "pi_gcs_state_after_readiness.json",
+    "command_ledger": "pi_command_ledger_tail.jsonl (Accepted receipts; acceptance is not proof of physical outcome)",
+    "not_done": "No arm, takeoff or mission start (requires explicit user approval). Aircraft mode STABILIZE, disarmed; GUIDED is required for flight tasks."
+  },
+  "bundle_update_d": {
+    "bundle": "logs/pi-runtime-rulebook-20261015d.zip",
+    "sha256": "fa5dfc0fd9381f87339f7436bc3218b1a828e9e41ca4f4d6f3dcb9dd3452cdb5",
+    "files": 256,
+    "requested_by": "parent session (Aerothon code and rulebook alignment): vehicle-time FCU watchdog, repeated recovery mode, search re-plan flicker fix, 3 s laptop-sim link allowance, GPIO winch backend",
+    "procedure": "GCS /api/disconnect (no execution, disarmed) -> install_bundle_d.py writes only differing files -> 18 changed, removed gcs/assets/Graphs-CcNrAoWp.js and index-ZFFq5ldS.js, 256 hashes verified",
+    "before_receipt": {
+      "file": "before-rulebook-20261015d.json",
+      "sha256": "8d8ba465255542cd984b4ec135eaff6eca2fabdff99ab3da8c397838db37953f"
+    },
+    "rollback_backup": {
+      "file": "before-rulebook-20261015d.tar.gz",
+      "sha256": "42c3713ef18163f2747c36cfa02fe8042a4a05c2375d095d9b17fe4b44703c8a"
+    },
+    "build": "13 packages finished; check_pi_runtime 32 PASS 0 FAIL; 17 changed modules import incl. winch_node, gpio_winch, execution_node, remote_devices (build_and_check_d.log)",
+    "not_changed_on_pi": "Deployed run_container.sh, runtime.env and image kept: the d changes there only add the gpio winch device grant, AEROTHON_WINCH_BACKEND=mavlink default and python3-lgpio; lgpio is imported only when the gpio backend is selected. Install those before selecting the gpio backend.",
+    "service": "aerothon-gcs restarted; serves assets/index-Dyrp14sL.js",
+    "reconnect": "laptop-sim profile; same four operator inputs re-sent via /api/commands (pi-d-set-*-0, all Accepted; reapply_d.jsonl)",
+    "readiness": "All 15 Ready (pi_gcs_readiness_d.txt, pi_gcs_state_d_ready.json)"
+  },
+  "mission": {
+    "status": "not flown",
+    "reason": "Start blocked by session classifier, then by frozen readiness after the device-link drop; sim since stopped. logs/pi_deploy_mission_20261015d_run1 holds idle truth only."
+  },
+  "link_drop": {
+    "found": "Pi /devices/status: /camera stream closed (1000) ~10:47 IST, then after reconnect /sensors stream closed (1006) Cannot write to closing transport; readiness (sim time) froze, readiness sample ~1500 s old, Review start disabled; GUIDED also required",
+    "cause": "gateway.py closes a stream when one send exceeds 0.5 s; LAN path to the Pi shows heavy retransmits",
+    "fix": "Parent session: gateway SEND_TIMEOUT_S 5 s, remote_devices reopens a dropped stream on the same session, 10 s manifest-gap tolerance; to ship in bundle e (not deployed)"
+  },
+  "laptop_sim_end": "Stopped by the parent session at user request at 07:15:51 UTC (disarmed, STABILIZE) for a rendered fence test; see logs/pi_deploy_laptop_sim_20261015/interruption.json. Relay (Windows) and Pi left running; Pi GCS device link down."
+}

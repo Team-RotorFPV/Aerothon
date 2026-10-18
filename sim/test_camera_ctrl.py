@@ -195,6 +195,17 @@ class CameraCtrlTests(unittest.TestCase):
         node._send = lambda: None
         return node
 
+    @staticmethod
+    def reply(success=True, result=0):
+        from types import SimpleNamespace
+        return SimpleNamespace(result=lambda: SimpleNamespace(success=success, result=result))
+
+    def settle_ticks(self, node):
+        need = int(node.get_parameter("settle_samples").value)
+        for _ in range(need + 1):
+            node._tick()
+        return json.loads(self.states[-1].data)
+
     def test_a_servo_without_feedback_settles_once_it_has_had_time(self):
         """The real tilt servo reports nothing; waiting on /joint_states
         would hold the mission at its first camera command for ever."""
@@ -202,6 +213,7 @@ class CameraCtrlTests(unittest.TestCase):
         node = self.mavlink_node(0.2)
         try:
             node.request("NADIR")
+            node._on_command_reply(self.reply(), node._cmd_gen)   # FC accepted
             node._tick()
             self.assertFalse(node.is_settled(), "settled before it could have moved")
             time.sleep(0.25)
@@ -211,6 +223,38 @@ class CameraCtrlTests(unittest.TestCase):
             st = json.loads(self.states[-1].data)
             self.assertTrue(st["settled"], st)
             self.assertEqual(st["readback"], "timed")
+        finally:
+            node.destroy_node()
+
+    def test_a_command_the_fc_never_accepted_never_settles(self):
+        """16 Oct audit: a command lost before MAVROS was ready, or rejected,
+        was reported settled after servo_settle_s with the camera unmoved,
+        opening the QR gate on a horizon view."""
+        import time
+        node = self.mavlink_node(0.0)
+        try:
+            node.request("NADIR")
+            time.sleep(0.05)
+            self.assertFalse(self.settle_ticks(node)["settled"], "no reply yet")
+            node._on_command_reply(self.reply(success=False, result=4), node._cmd_gen)
+            self.assertFalse(self.settle_ticks(node)["settled"], "rejected")
+            stale = node._cmd_gen
+            node.request("FORWARD")
+            node._on_command_reply(self.reply(), stale)       # reply to NADIR
+            self.assertFalse(self.settle_ticks(node)["settled"], "stale reply")
+            node._on_command_reply(self.reply(), node._cmd_gen)
+            time.sleep(0.05)
+            self.assertTrue(self.settle_ticks(node)["settled"])
+        finally:
+            node.destroy_node()
+
+    def test_an_unready_service_is_retried_at_once(self):
+        node = self.mavlink_node(0.2)
+        try:
+            del node._send                       # use the real sender
+            node.cli_cmd = type("Unready", (), {"service_is_ready": lambda self: False})()
+            node.request("NADIR")
+            self.assertIsNone(node._last_command_t, "an unsent command counted as sent")
         finally:
             node.destroy_node()
 

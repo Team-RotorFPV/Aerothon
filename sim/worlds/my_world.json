@@ -127,18 +127,7 @@
       "y": -6
     }
   },
-  "decoys": [
-    {
-      "x": 8,
-      "y": -14,
-      "yaw_deg": 0
-    },
-    {
-      "x": 34,
-      "y": 9,
-      "yaw_deg": 68.75
-    }
-  ],
+  "decoys": [],
   "start_target": "b",
   "qr": {
     "start_m": 2.2,

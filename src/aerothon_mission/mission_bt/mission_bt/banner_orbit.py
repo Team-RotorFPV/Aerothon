@@ -38,6 +38,8 @@ from mission_bt.delivery_zone import point_inside_with_margin
 from mission_bt.scan_geometry import bearing_to_angle
 
 BOARD_H_M = 1.15          # the banner board's height, the height-based fallback
+FLANK_M = 0.9              # nothing this close beside a leg, from the scan plane
+FLANK_HALF_RAD = math.radians(100.0)
 SELF_M = 0.55             # lidar returns nearer than this are the airframe
 
 
@@ -160,11 +162,16 @@ def _region_fix(mav, r, W, H, hfov_rad, board_h_m, lidar_half_rad):
     bearing = r.get("bearing")
     if bearing is None:
         bearing = ((x0 + w / 2.0) - W / 2.0) / (W / 2.0)
-    heading = _wrap(mav.yaw() + bearing_to_angle(float(bearing), hfov_rad))
+    capture_pose = getattr(mav, 'banner_capture_pose', None)
+    observed = capture_pose() if callable(capture_pose) else None
+    if callable(capture_pose) and observed is None:
+        return None
+    observer_yaw = observed['yaw'] if observed else mav.yaw()
+    heading = _wrap(observer_yaw + bearing_to_angle(float(bearing), hfov_rad))
 
     cam = getattr(mav, "camera_state", None) or {}
     pitch = cam.get("actual_rad")
-    alt = mav.alt()
+    alt = observed['xyz'][2] if observed else mav.alt()
     bottom = y0 + h
     cut = bottom >= H - 2
     source = "lidar"
@@ -182,7 +189,7 @@ def _region_fix(mav, r, W, H, hfov_rad, board_h_m, lidar_half_rad):
         # (the grassed zone, on the way back), with no range and no centre.
         return None
 
-    px, py = mav.pos()[:2]
+    px, py = observed['xyz'][:2] if observed else mav.pos()[:2]
     return {"x": px + rng * math.cos(heading), "y": py + rng * math.sin(heading),
             "range": rng, "area": float(r.get("area", 0.0)),
             "heading": heading, "source": source,
@@ -306,9 +313,19 @@ def leg_clear(mav, x, y, look_m=2.0, half_rad=math.radians(25.0), self_m=None):
     px, py = mav.pos()[:2]
     if math.hypot(x - px, y - py) < 0.3:
         return True
-    near = scan_min(mav, math.atan2(y - py, x - px), half_rad,
+    heading = math.atan2(y - py, x - px)
+    near = scan_min(mav, heading, half_rad,
                     SELF_M if self_m is None else self_m)
-    return near is None or near >= look_m
+    if near is not None and near < look_m:
+        return False
+    # AND NOTHING ALONGSIDE. A leg running beside a wall has nothing AHEAD:
+    # rendered r10 flew an orbit leg along the return lane's wall line, a few
+    # tenths from it, and clipped the 3.6 m wall top at 3.0 m. These legs are
+    # position setpoints, outside the velocity controller's keep-out rail, so
+    # the leg itself must refuse a wall closing in from either side.
+    flank = scan_min(mav, heading, FLANK_HALF_RAD,
+                     SELF_M if self_m is None else self_m)
+    return flank is None or flank >= FLANK_M
 
 
 def scan_min(mav, heading, half_rad, self_m=None):

@@ -238,6 +238,7 @@ class SearchMav:
 
     def __init__(self, pos=(14.0, 2.0, 10.0)):
         self._pos = pos
+        self._yaw = 0.0
         self.gotos = []
         self.logs = []
         self.qr_matched = False
@@ -250,7 +251,7 @@ class SearchMav:
         return self._pos
 
     def yaw(self):
-        return 0.0
+        return self._yaw
 
     def alt(self):
         return self._pos[2]
@@ -258,6 +259,7 @@ class SearchMav:
     def goto(self, x, y, z, yaw=0.0):
         self.gotos.append((x, y, z))
         self._pos = (x, y, z)
+        self._yaw = yaw
 
     def reached(self, x, y, z, tol=0.6):
         return math.dist(self._pos, (x, y, z)) < tol

@@ -1,0 +1,62 @@
+# Wiring record only. NOT loaded as ROS parameters. winch_ctrl backend:=gpio
+# (winch_ctrl/gpio_winch.py) uses the same BCM pins as its defaults.
+schema: aerothon-hardware-wiring/1
+flight_controller: CUAV X7+
+camera_tilt:
+  control_owner: camera_ctrl_via_mavros
+  ardupilot_output: 9  # User-confirmed SERVO9; check physical connector.
+  servo_function: 7  # Mount pitch; actual angle/PWM calibration is pending.
+  connection_confirmed_by_user: true
+  hardware_measured: false
+winch:
+  motor: N20 12V 60RPM micro metal gear motor with encoder
+  product_url: https://robu.in/product/n20-12v-60rpm-micro-metal-gear-motor-with-encoder/
+  recommended_connection: Pi through an H-bridge with compatible encoder GPIO
+  current_backend: mavlink  # gpio is selectable once the values below are measured.
+  encoder_backend_implemented: true  # Software only; bench-unverified.
+  user_supplied_wire_functions:
+    red: motor_terminal_1
+    white: motor_terminal_2
+    black: encoder_vcc_3_3_to_5_v
+    blue: encoder_ground
+    yellow: encoder_feedback_1
+    green: encoder_feedback_2
+  motor_driver_model: BTS7960 43A H-bridge  # User-selected; check module labels.
+  motor_rated_voltage_v: 12.0  # User specification, not measured.
+  motor_stall_current_a: 1.0
+  motor_no_load_rpm: 60
+  motor_rated_rpm: 40
+  motor_gear_ratio: 298.0
+  # BCM and physical header numbering. The existing node does NOT use these.
+  motor_driver_gpio_bcm:
+    RPWM: 18
+    LPWM: 19
+    R_EN: 22
+    L_EN: 23
+  motor_driver_header_pins:
+    RPWM: 12
+    LPWM: 35
+    R_EN: 15
+    L_EN: 16
+  encoder_a_gpio_bcm: 17  # Yellow; direction/phase need bench verification.
+  encoder_b_gpio_bcm: 27  # Green.
+  encoder_a_header_pin: 11
+  encoder_b_header_pin: 13
+  encoder_supply_v: 3.3
+  encoder_vcc_header_pin: 1  # Black; user specifies encoder supply 3.3-5 V.
+  common_ground_header_pin: 6  # Blue and driver signal/motor supply reference.
+  driver_logic_supply_v: 5.0  # BTS VCC, separate from 12 V motor B+.
+  driver_logic_vcc_header_pin: 2  # Regulated rail; verify power arrangement.
+  motor_terminal_red: M+
+  motor_terminal_white: M-
+  motor_supply_positive_terminal: B+  # Regulated/current-protected 12 V.
+  motor_supply_negative_terminal: B-
+  current_sense_pins: unconnected  # R_IS/L_IS are not direct Pi digital inputs.
+  direction_verified: false
+  gpio_pwm_implementation_verified: false  # Pi 5 needs a supported GPIO API.
+  encoder_output_logic_v: null  # Pi inputs require 3.3 V-compatible signals.
+  counts_per_output_shaft_revolution: null
+  spool_effective_diameter_m: null
+  stop_or_brake_behavior: pending_backend_and_bench_verification
+  physical_stow_reference: null
+  hardware_measured: false

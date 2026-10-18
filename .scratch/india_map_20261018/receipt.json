@@ -1,0 +1,25 @@
+{
+  "feature": "india_map_20261018",
+  "triage": "ready-for-human",
+  "problem": "GCS offline map was locked to the Canberra simulator tiles (zoom 14-19, fixed bounds and start point), so it showed nothing in India.",
+  "scope": "User first asked for India; mid-task narrowed to VIT Vellore only. GCS map sources, coverage generator, a developer tile downloader, Pi tile cache. No flight code.",
+  "changes": {
+    "regions": "scripts/map_regions.json: VIT Vellore [79.1374, 12.9512, 79.1744, 12.9872], zoom 0-19, start view 12.9692 N 79.1559 E zoom 16",
+    "gcs": "mapSources.ts builds one bounded raster source per region (coarse under detail, bundled simulator tiles kept); App.tsx uses it; offline note lists the regions",
+    "generator": "scripts/export_gcs_contract.py writes satelliteCoverage.json from the bundled tiles plus map_regions.json",
+    "downloader": "scripts/download_map_tiles.py (developer tool, not in the Pi bundle), resumable, JPEG-validated"
+  },
+  "evidence": {
+    "tests": "frontend 34 passed (4 new map source tests), tsc + vite build, sim/test_gcs_merge_contract.py 13 passed",
+    "tiles": "4104 Vellore tiles, 67 MB on the Pi in /home/pi5/.local/state/aerothon/map-tiles, 0 missing against vellore_tiles.txt",
+    "bundle": {"zip": "aerothon-pi-20261018-vellore-map-v8b.zip", "sha256": "1379285503b003e3b1e088df5d7372d6f710756457845306cbfa945163185acc", "deploy": "deploy_pi_v8.sh, 265 files verified, no restart or root needed"},
+    "live": "GCS served by the Pi (no internet) drew VIT Vellore at zoom 5, 10, 13, 19 with all tiles loaded and no imagery-unavailable note, live FCU connected"
+  },
+  "notes": [
+    "India overview download was stopped at the user's request; the India tiles copied to the Pi and laptop were removed. The Pi's own earlier cached tiles at zoom 15-18 were left in place.",
+    "Pi clock is about 13 h behind (no NTP without internet); extracted tile timestamps warned only.",
+    "First v7 install could not rewrite root-owned runtime_manifest.json from the v6 sudo deploy; replaced by rename in the pi5-owned workspace and re-verified."
+  ],
+  "status": "deployed_and_live_verified",
+  "blockers": ["Not committed"]
+}

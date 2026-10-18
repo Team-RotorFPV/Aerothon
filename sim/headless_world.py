@@ -62,6 +62,7 @@ OUTPUTS (in --out)
 """
 
 import argparse
+from collections import deque
 import json
 import math
 import random
@@ -71,6 +72,7 @@ import time
 from pathlib import Path
 
 import numpy as np
+from sensor_cadence import CAMERA_CAPTURE_HZ, LIDAR_SCAN_HZ
 import rclpy
 from builtin_interfaces.msg import Time as TimeMsg
 from geometry_msgs.msg import Pose, PoseStamped, TwistStamped, Vector3
@@ -89,20 +91,30 @@ sys.path.insert(0, str(ROOT / "scripts"))
 sys.path.insert(0, str(ROOT / "sim"))
 for pkg in (("aerothon_sim", "sim_gazebo"), ("aerothon_mission", "mission_bt"),
             ("aerothon_perception", "perception_qr"),
-            ("aerothon_perception", "perception_redzone")):
+            ("aerothon_perception", "perception_redzone"),
+            ("aerothon_perception", "camera_ctrl")):
     sys.path.insert(0, str(ROOT / "src" / pkg[0] / pkg[1]))
 
 import materialize_world as MW                              # noqa: E402
+from perception_banner import banner_shape                  # noqa: E402
 import world_spec as W                                      # noqa: E402
 from mission_bt.geofence import (FENCE_POLYGON_INCLUSION,   # noqa: E402
                                  global_to_local)
 from perception_qr.qr_match import matches                  # noqa: E402
+from camera_ctrl.gate import CameraGate                     # noqa: E402
 from perception_redzone.georef import GroundGrid            # noqa: E402
 from sim_gazebo.corruptions import CAMERA_KEYS, LidarCorruptor  # noqa: E402
 from test_corridor_stress import WindDrift                  # noqa: E402
 
 HOME_LATLON = (12.9692, 79.1559)       # VIT Vellore: any real place will do
 DT = 0.01                              # physics step, s
+# A detection is never delivered in the step it was captured. At zero camera
+# latency ("calm") it was, stamped processed=t, and a receiver whose /clock
+# had not yet reached t refused it as from the future (BannerCaptures:
+# processed <= now) -- every banner capture of every calm flight, so the
+# banner search saw "best 0/0" from all 13 vantage points. Two steps cover
+# the /clock and detection topics arriving out of order.
+MIN_TRANSPORT_S = 2 * DT
 G = 9.81
 
 # The team airframe (airframe.json, build_cad_vehicle.py).
@@ -120,6 +132,7 @@ YAW_RATE_MAX = math.radians(90.0)
 ACCEL_MAX = WPNAV_ACCEL
 GUIDED_VEL_TIMEOUT_S = 3.0
 RTL_ALT = 15.0
+TERMINAL_DRAIN_S = 1.0                # keep normal FCU publications after landing
 # ArduPilot EKF3 GPS handling: innovations past EK3_POS_I_GATE (5 sigma of a
 # ~0.6 m GPS) are rejected and the estimate dead-reckons, drifting; rejected
 # for long enough it resets to the GPS.
@@ -138,6 +151,23 @@ QR_SEV_50, QR_SEV_50_PER_PPM, QR_SEV_SCALE = 17.6, 0.79, 1.5   # _read_factor
 EXPOSURE_S = 0.01               # the flight camera's capped exposure
 BANNER_MIN_BOARD_PX = 20        # lettering legible from this board height
 BANNER_MAX_INCIDENCE = math.radians(65.0)
+# A laid banner's border is read off a foreshortened sheet; past this
+# incidence from straight down the 3-inch ring is under two pixels.
+BANNER_MAX_GROUND_INCIDENCE = math.radians(72.0)
+# banner_node's `max_aspect`. A laid sheet foreshortens into a strip, and the
+# real detector refuses one wider than this however clear its border is.
+BANNER_MAX_ASPECT = 8.0
+# ...and `min_aspect`: seen end-on, along its long axis, a laid sheet is
+# taller than wide and the real detector refuses it.
+BANNER_MIN_ASPECT = 0.8
+# ...raised in the GROUND pose (banner_node GROUND_MIN_ASPECT): a laid sheet
+# seen along its long axis, from beside the corridor, is not identified.
+BANNER_GROUND_MIN_ASPECT = 1.5
+BANNER_GROUND_MAX_ASPECT = 16.0
+# perception_banner.banner_node.CAMERA_POSES: the real detector publishes
+# nothing in any other pose, so neither does this one. Without the gate the
+# headless banner was seen in ALIGN, where the real stack is blind.
+BANNER_CAMERA_POSES = ("FORWARD", "BANNER", "GROUND")
 # Banner identity vs total camera severity (sum over the corruptions, plus
 # print wear): logistic, fitted to the REAL detector on the 3 m sim frame,
 # 30 seeds per point -- severity 17 (the worst preset) 30/30, 26 27/30,
@@ -220,11 +250,28 @@ class Arena:
         lane(spec["corridor"], [])
         lane(spec["return_corridor"], W.obstacle_polygons(spec))
         bottom = float(spec["banner"]["board_bottom_m"])
+        # The banner's own size (the organisers': the corridor's width, of
+        # unconfirmed height); the simulator's 3.7 x 1.15 m board by default.
+        self.board_w = float(spec["banner"].get("width_m", BOARD_W))
+        self.board_h = float(spec["banner"].get("height_m", BOARD_H))
+        self.rod_mount = spec["banner"].get("mount", "posts") == "rod"
         c, r = spec["corridor"], spec["return_corridor"]
         self.banners = [self._gate(loc((c["x"], c["y"])), math.radians(c["yaw_deg"]),
-                                   bottom, "outbound"),
+                                   bottom, "outbound", math.radians(c["yaw_deg"])),
                         self._gate(loc((r["x"], r["y"])),
-                                   math.radians(r["yaw_deg"]) + math.pi, bottom, "return")]
+                                   math.radians(r["yaw_deg"]) + math.pi, bottom, "return",
+                                   math.radians(r["yaw_deg"]))]
+        # ORANGE at every opening the aircraft must not use: the outbound
+        # lane's far end and the return lane's home end. A hung one is a board
+        # across that opening, which the lidar sees and the aircraft must pass
+        # under; the camera's search is for green and never takes it.
+        if spec["banner"].get("orange"):
+            for lane in (c, r):
+                if (spec["banner"].get("placement") or "suspended") in ("suspended", "both"):
+                    yaw = math.radians(lane["yaw_deg"])
+                    ox, oy = place((float(lane["length"]), 0.0), loc((lane["x"], lane["y"])), yaw)
+                    self.boxes.append((ccw(rect(ox, oy, BOARD_T, self.board_w, yaw)),
+                                       bottom, bottom + self.board_h, "board"))
         # Decoys: a banner-shaped tarp and a smaller panel (green_decoy_visuals).
         self.green = []          # (centre xy, facing yaw, width, z0, z1) for the camera
         for d in spec["decoys"]:
@@ -269,15 +316,30 @@ class Arena:
         for poly, ob in zip(obstacles, c.get("obstacles") or []):
             self.boxes.append((ccw([loc(p) for p in poly]), 0.0, float(ob["h"]), "obstacle"))
 
-    def _gate(self, origin, facing, bottom, name):
-        for side in (1, -1):
-            cx, cy = place((0.0, side * POST_Y), origin, facing)
+    def _gate(self, origin, facing, bottom, name, lane_yaw=None):
+        # Suspended, ground-mounted or both (materialize_world): a hung board
+        # is a solid box the lidar sees; a laid one is a flat sheet in front
+        # of the posts that only the camera sees, never a collision.
+        placement = self.spec["banner"].get("placement") or "suspended"
+        hung = placement in ("suspended", "both")
+        bw, bh = self.board_w, self.board_h
+        # Hung from a rod between the corridor walls there are no posts: the
+        # walls carry it. On posts, they stand just outside the board.
+        for side in (() if self.rod_mount else (1, -1)):
+            cx, cy = place((0.0, side * max(POST_Y, bw / 2 + 0.07)), origin, facing)
             self.boxes.append((ccw(rect(cx, cy, POST_SIZE, POST_SIZE, facing)),
-                               0.0, max(POST_H, bottom + BOARD_H), "post"))
-        self.boxes.append((ccw(rect(origin[0], origin[1], BOARD_T, BOARD_W, facing)),
-                           bottom, bottom + BOARD_H, "board"))
+                               0.0, max(POST_H, bottom + bh), "post"))
+        if hung:
+            self.boxes.append((ccw(rect(origin[0], origin[1], BOARD_T, bw, facing)),
+                               bottom, bottom + bh, "board"))
+        # In front of the mouth, clear of the lane floor, as materialize_world
+        # lays it: -x in the LANE's frame for both lanes.
+        lane = facing if lane_yaw is None else lane_yaw
+        lx, ly = place((MW.laid_banner_x0(bh), 0.0), origin, lane)
+        laid = (ccw(rect(lx, ly, bh, bw, lane))
+                if placement in ("ground", "both") else None)
         return {"xy": origin, "facing": facing, "z0": bottom,
-                "z1": bottom + BOARD_H, "name": name}
+                "z1": bottom + bh, "name": name, "hung": hung, "laid": laid}
 
     def _edges(self):
         self.edge_a, self.edge_b, self.edge_z0, self.edge_z1 = [], [], [], []
@@ -447,6 +509,7 @@ class HeadlessWorld(Node):
         self.t = 0.0
         self.p = np.zeros(3)
         self.v = np.zeros(3)
+        self.ground_velocity = np.zeros(3)
         self.a_prev = np.zeros(3)
         self.yaw = self.arena.home_yaw
         self.roll = self.pitch = 0.0
@@ -454,9 +517,11 @@ class HeadlessWorld(Node):
         self.armed = False
         self.mode = "STABILIZE"
         self.sp_pos = None           # (x, y, z, yaw) estimate frame
-        self.sp_vel = None           # (vx, vy, vz body FLU, yaw_rate, t)
+        self.sp_vel = None           # (vx, vy, vz earth ENU, yaw_rate, received t)
+        self.pending_velocity = deque(maxlen=512)
         self.takeoff_alt = None
         self.speed_cap = WPNAV_SPEED
+        self.land_xy = None          # latched estimated position, never venue truth
         self.params = {}
         self.fence_items = []
         self.fence_poly = None
@@ -489,6 +554,8 @@ class HeadlessWorld(Node):
         self.result = None
         self.mission_state = ""
         self.started = False
+        self.done = False
+        self._finish_seen_s = None
         self.lock = threading.Lock()
 
         self._advertise()
@@ -529,6 +596,10 @@ class HeadlessWorld(Node):
         S(String, "/mission/target", lambda m: setattr(self, "target_str", m.data), 10)
         S(String, "/mission/result", self._on_result, latched())
         S(String, "/mission/state", lambda m: setattr(self, "mission_state", m.data), 10)
+        # The operator applies the arena's dimensions at the GCS before START.
+        self.dims_applied = False
+        S(String, "/mission/arena_dimensions/applied", self._on_dims_applied, latched())
+        self.banner_gate = CameraGate(self, BANNER_CAMERA_POSES)
 
     def _serve(self):
         C = self.create_service
@@ -556,6 +627,9 @@ class HeadlessWorld(Node):
                       or (self.mode == "GUIDED" and self.p[2] < 0.2))
             if ok:
                 self.armed = bool(req.value)
+                if not self.armed:
+                    self.pending_velocity.clear()
+                    self.sp_vel = None
                 if self.armed and self.armed_at is None:
                     self.armed_at = self.t
                 self._event(f"{'armed' if self.armed else 'disarmed'} by command")
@@ -564,9 +638,13 @@ class HeadlessWorld(Node):
 
     def _srv_mode(self, req, res):
         with self.lock:
+            if req.custom_mode == 'LAND':
+                self._start_land_position_control()
             self.mode = req.custom_mode
+            self.pending_velocity.clear()
             if self.mode == "GUIDED":
                 self.sp_pos = self.sp_vel = None
+                self.land_xy = None
             self._event(f"mode {self.mode}")
         res.mode_sent = True
         return res
@@ -577,15 +655,27 @@ class HeadlessWorld(Node):
             if ok:
                 self.takeoff_alt = float(req.altitude)
                 self.sp_pos = self.sp_vel = None
+                self.pending_velocity.clear()
         res.success, res.result = ok, 0 if ok else 4
         return res
 
     def _srv_land(self, req, res):
         with self.lock:
+            self._start_land_position_control()
             self.mode = "LAND"
+            self.pending_velocity.clear()
+            self.sp_vel = None
             self._event("mode LAND")
         res.success, res.result = True, 0
         return res
+
+    def _start_land_position_control(self):
+        # ArduPilot GPS LAND keeps its horizontal position controller active
+        # (ModeLand::gps_run / Mode::land_run_horizontal_control). A zero
+        # ground-velocity request without that position loop lets wind carry
+        # this simplified airframe away during the whole descent.
+        if self.mode != 'LAND' or getattr(self, 'land_xy', None) is None:
+            self.land_xy = self.est()[:2].copy()
 
     def _srv_command(self, req, res):
         with self.lock:
@@ -620,14 +710,22 @@ class HeadlessWorld(Node):
                 p = m.pose.position
                 self.sp_pos = (p.x, p.y, p.z, yaw)
                 self.sp_vel = None
+                self.pending_velocity.clear()
                 self.takeoff_alt = None
 
     def _on_sp_raw(self, m):
         with self.lock:
             if self.mode == "GUIDED" and self.armed:
-                self.sp_vel = (m.velocity.x, m.velocity.y, m.velocity.z, m.yaw_rate, self.t)
-                self.sp_pos = None
-                self.takeoff_alt = None
+                # Preserve commands already in transport, including a pulse
+                # followed by zero. This is physical model timing only; it
+                # provides no delivery or obstacle truth to drone software.
+                frame = int(getattr(m, 'coordinate_frame', 9))
+                if frame not in (1,7,8,9):
+                    self.pending_velocity.clear()
+                    self.sp_vel = None
+                    return
+                command = (m.velocity.x, m.velocity.y, m.velocity.z, m.yaw_rate, frame)
+                self.pending_velocity.append((self.t + self.args.vel_command_delay_s, command))
 
     def _on_detach(self, _):
         with self.lock:
@@ -696,7 +794,11 @@ class HeadlessWorld(Node):
         if not self.armed:
             return np.zeros(3), 0.0
         if self.mode == "LAND":
-            return np.array([0.0, 0.0, -LAND_SPEED if est[2] > 1.0 else -0.3]), 0.0
+            if getattr(self, 'land_xy', None) is None:
+                self.land_xy = np.asarray(est[:2]).copy()
+            velocity, _ = self._to_point(est, (*self.land_xy, est[2]), None)
+            velocity[2] = -LAND_SPEED if est[2] > 1.0 else -0.3
+            return velocity, 0.0
         if self.mode == "RTL":
             if est[2] < RTL_ALT - 0.3 and math.hypot(*est[:2]) > 1.0:
                 return np.array([0.0, 0.0, SPEED_UP]), 0.0
@@ -704,14 +806,24 @@ class HeadlessWorld(Node):
                 if math.hypot(*est[:2]) > 1.0 else np.array([0.0, 0.0, -LAND_SPEED]), 0.0
         if self.mode != "GUIDED":
             return np.zeros(3), 0.0
+        while self.pending_velocity and self.pending_velocity[0][0] <= self.t + 1e-9:
+            received, command = self.pending_velocity.popleft()
+            vx,vy,vz,yr,frame = command
+            # ArduPilot fixes the earth-frame velocity when the packet arrives.
+            # Later yaw cannot keep rotating that already received vector.
+            if frame in (8,9):
+                vx,vy=rot(vx,vy,self.yaw)
+            self.sp_vel = (vx,vy,vz,yr,received)
+            # The old controller owns the aircraft until this packet arrives.
+            self.sp_pos = None
+            self.takeoff_alt = None
         if self.takeoff_alt is not None:
             return self._to_point(est, (est[0], est[1], self.takeoff_alt), None)
         if self.sp_vel is not None:
             vx, vy, vz, yr, t0 = self.sp_vel
             if self.t - t0 > GUIDED_VEL_TIMEOUT_S:
                 return np.zeros(3), 0.0
-            wx, wy = rot(vx, vy, self.yaw)
-            return np.array([wx, wy, vz]), yr
+            return np.array([vx, vy, vz]), yr
         if self.sp_pos is not None:
             x, y, z, yaw = self.sp_pos
             return self._to_point(est, (x, y, z), yaw)
@@ -732,6 +844,7 @@ class HeadlessWorld(Node):
         return v, yr
 
     def _step_airframe(self):
+        start_position = self.p.copy()
         est = self.est()
         v_des, yr = self._desired_velocity(est)
         on_ground = self.p[2] <= 0.0 and v_des[2] <= 0.0
@@ -787,6 +900,11 @@ class HeadlessWorld(Node):
         else:
             self.landed_t = None
 
+        # FCU observation at the end of this step measures its completed world
+        # displacement, including wind, ground clamp and contact response.
+        # Publication must not advance the stochastic wind process again.
+        self.ground_velocity = (self.p-start_position)/DT
+
     def _step_payload(self):
         if self.detached:
             if self.payload[2] > 0.04:
@@ -825,14 +943,16 @@ class HeadlessWorld(Node):
         m.pose.orientation.z = cr * cp * sy - sr * sp * cy
         self.pub_pose.publish(m)
         tw = TwistStamped()
-        tw.header.stamp = stamp
-        tw.twist.linear.x, tw.twist.linear.y, tw.twist.linear.z = (float(v) for v in self.v)
+        tw.header.stamp, tw.header.frame_id = stamp, "map"
+        tw.twist.linear.x, tw.twist.linear.y, tw.twist.linear.z = (float(v) for v in self.ground_velocity)
         self.pub_vel.publish(tw)
 
     def _publish_slow(self):
-        self.pub_state.publish(State(connected=True, armed=self.armed,
-                                     guided=self.mode == "GUIDED", mode=self.mode,
-                                     system_status=4 if self.armed else 3))
+        state = State(connected=True, armed=self.armed,
+                      guided=self.mode == "GUIDED", mode=self.mode,
+                      system_status=4 if self.armed else 3)
+        state.header.stamp = self.stamp()
+        self.pub_state.publish(state)
         b = BatteryState()
         flown = max(0.0, self.t - (self.armed_at or self.t))
         b.voltage = float(self.fcu["battery_v"] - 0.15 * flown / 60.0
@@ -862,7 +982,8 @@ class HeadlessWorld(Node):
         r = self.arena.raycast(self.p[0], self.p[1], self.p[2] + LIDAR_ABOVE_BODY_M,
                                self.yaw)
         s = LaserScan()
-        s.header.stamp, s.header.frame_id = self.stamp(), "base_scan"
+        # This object-level fixture raycasts at the aircraft centre.
+        s.header.stamp, s.header.frame_id = self.stamp(), "base_link"
         s.angle_min, s.angle_increment = -math.pi, 2 * math.pi / len(r)
         s.angle_max = s.angle_min + s.angle_increment * (len(r) - 1)
         s.range_min, s.range_max = 0.05, 12.0
@@ -889,6 +1010,11 @@ class HeadlessWorld(Node):
         pitch = -self.cam_joint
         out = {"qr": self._qr(eye, pitch), "banner": self._banner(eye, pitch),
                "red": self._red(eye, pitch), "payload": self._payload_det(eye, pitch)}
+        # Object-level fixture timestamps describe its own simulated capture
+        # and queue latency. They do not qualify rendered detector performance.
+        out['qr']['detail'].update(capture_stamp=self.t,processed_stamp=self.t)
+        out['banner']['detail'].update(capture_stamp=self.t,processed_stamp=self.t)
+        out['red'].update(capture_stamp=self.t,processed_stamp=self.t)
         return out
 
     def _qr(self, eye, pitch):
@@ -984,15 +1110,40 @@ class HeadlessWorld(Node):
         return ([int(x0), int(y0), int(x1 - x0), int(y1 - y0)],
                 ((x0 + x1) / 2, (y0 + y1) / 2))
 
+    def _laid_view(self, poly, eye, pitch):
+        """A ground-mounted banner in the same shape as _board_view, or None.
+
+        Incidence is measured from the sheet's normal, which points at the
+        sky: seen from straight above it is 0, and at a grazing look the
+        border collapses into a line and the ring test has nothing to read.
+        """
+        seen = self._ground_green_view(poly, eye, pitch)
+        if seen is None:
+            return None
+        part = clip_convex(self.camera.ground_view(eye, self.yaw, pitch), poly)
+        # polygon_area is signed and the clip may wind either way.
+        frac_in = abs(W.polygon_area(part)) / max(abs(W.polygon_area(poly)), 1e-6)
+        centre = np.mean(np.asarray(poly), axis=0)
+        dist = float(np.linalg.norm(centre - np.asarray(eye[:2])))
+        inc = math.atan2(dist, max(float(eye[2]), 1e-3))
+        bbox = seen[0]
+        return (bbox, seen[1], inc, float(bbox[3]), frac_in, dist)
+
     def _banner(self, eye, pitch):
         detail = {"identified": False, "reason": "", "candidates": 0,
                   "image_wh": [IMAGE_W, IMAGE_H]}
         out = Vector3()
         views = []
         for b in self.arena.banners:
-            v = self._board_view(b["xy"], b["facing"], BOARD_W, b["z0"], b["z1"], eye, pitch)
-            if v is not None:
-                views.append(("banner", v))
+            if b["hung"]:
+                v = self._board_view(b["xy"], b["facing"], self.arena.board_w, b["z0"], b["z1"],
+                                     eye, pitch)
+                if v is not None:
+                    views.append(("banner", v))
+            if b["laid"] is not None:
+                v = self._laid_view(b["laid"], eye, pitch)
+                if v is not None:
+                    views.append(("laid", v))
         for (xy, yaw, w, z0, z1) in self.arena.green:
             v = self._board_view(xy, yaw, w, z0, z1, eye, pitch)
             if v is not None:
@@ -1010,9 +1161,21 @@ class HeadlessWorld(Node):
         detail["green_area_px"] = big[0][2] * big[0][3]
         detail["green_bearing"] = round((big[1][0] - IMAGE_W / 2) / (IMAGE_W / 2), 3)
         detail["green_regions"] = [[*v[0], v[0][2] * v[0][3]] for _, v in ranked[:4]]
-        ident = [v for kind, v in views if kind == "banner"
-                 and v[3] >= BANNER_MIN_BOARD_PX and v[2] <= BANNER_MAX_INCIDENCE
-                 and v[4] >= 0.7 and v[5] <= 15.0]
+        gate = getattr(self, "banner_gate", None)
+        ground = gate is not None and gate.requested == "GROUND"
+        lo = (max(BANNER_MIN_ASPECT, BANNER_GROUND_MIN_ASPECT) if ground
+              else BANNER_MIN_ASPECT)
+        # Stretched for a banner thinner than the measured board, exactly as
+        # the detector does (perception_banner.banner_shape).
+        hi = banner_shape.max_aspect(self.arena.board_w, self.arena.board_h, ground=ground,
+                                     upright_max=BANNER_MAX_ASPECT,
+                                     ground_max=BANNER_GROUND_MAX_ASPECT)
+        ident = [v for kind, v in views
+                 if (kind == "banner" and v[2] <= BANNER_MAX_INCIDENCE
+                     or kind == "laid" and v[2] <= BANNER_MAX_GROUND_INCIDENCE
+                     and lo * max(v[0][3], 1) <= v[0][2]
+                     <= hi * max(v[0][3], 1))
+                 and v[3] >= BANNER_MIN_BOARD_PX and v[4] >= 0.7 and v[5] <= 15.0]
         sev = sum(abs(s) for s in self.cam_sev.values()) + self.cond["wear"]["banner"]
         p_ident = 1.0 / (1.0 + math.exp((sev - BANNER_SEV_50) / BANNER_SEV_SCALE))
         if ident and self.rng.random() < p_ident:
@@ -1020,13 +1183,13 @@ class HeadlessWorld(Node):
             out.x = (cx - IMAGE_W / 2) / (IMAGE_W / 2)
             out.y = (cy - IMAGE_H / 2) / (IMAGE_H / 2)
             out.z = 1.0
-            detail.update(identified=True, board_px=bbox, bearing=round(out.x, 3),
+            detail.update(identified=True, board_px=bbox, bearing=out.x,
                           board_area_px=bbox[2] * bbox[3],
                           board_aspect=round(bbox[2] / max(1, bbox[3]), 2),
                           text_confirmed=True)
         else:
             out.z = 0.5
-            detail["reason"] = "no lettering legible (edge-on, distant or not the banner)"
+            detail["reason"] = "no border legible (edge-on, distant or not the banner)"
         return {"vec": out, "detail": detail}
 
     def _red(self, eye, pitch):
@@ -1069,8 +1232,11 @@ class HeadlessWorld(Node):
         self.pub_qr.publish(String(data=q["decoded"]))
         self.pub_match.publish(Bool(data=q["matched"]))
         self.pub_qr_detail.publish(String(data=json.dumps(q["detail"])))
-        self.pub_banner.publish(frame["banner"]["vec"])
-        self.pub_banner_detail.publish(String(data=json.dumps(frame["banner"]["detail"])))
+        gate = getattr(self, "banner_gate", None)   # no gate: open, like CameraGate
+        if gate is None or gate.open():
+            self.pub_banner.publish(frame["banner"]["vec"])
+            frame['banner']['detail']['processed_stamp'] = self.t
+            self.pub_banner_detail.publish(String(data=json.dumps(frame["banner"]["detail"])))
         self.pub_red.publish(String(data=json.dumps(frame["red"])))
         pay = dict(frame["payload"], stamp=self.t)
         self.pub_payload.publish(String(data=json.dumps(pay)))
@@ -1078,6 +1244,8 @@ class HeadlessWorld(Node):
     # ---- the loop ---------------------------------------------------------------
     def run(self):
         steps = 0
+        camera_stride = round(1.0 / (CAMERA_CAPTURE_HZ * DT))
+        scan_stride = round(1.0 / (LIDAR_SCAN_HZ * DT))
         t_wall0, t_sim0 = time.monotonic(), 0.0
         while rclpy.ok():
             with self.lock:
@@ -1092,12 +1260,14 @@ class HeadlessWorld(Node):
                 self.pub_clock.publish(Clock(clock=self.stamp()))
                 if steps % 3 == 0:
                     self._publish_fcu(est)
-                if steps % 10 == 0:
+                if steps % scan_stride == 0:
                     self._publish_scan()
-                    if self.rng.random() >= self.frame_drop:
-                        self.pending_frames.append((self.t + self.latency,
-                                                    self._camera_frame()))
                     self._record()
+                if steps % camera_stride == 0:
+                    if self.rng.random() >= self.frame_drop:
+                        self.pending_frames.append((
+                            self.t + max(self.latency, MIN_TRANSPORT_S),
+                            self._camera_frame()))
                 while self.pending_frames and self.pending_frames[0][0] <= self.t:
                     self._deliver(self.pending_frames.pop(0)[1])
                 if steps % 20 == 0:
@@ -1119,9 +1289,27 @@ class HeadlessWorld(Node):
 
     done = False
 
+    def _flush_terminal_observations(self):
+        self._publish_fcu(self.est())
+        self._publish_slow()
+        if not self.track or self.track[-1][0] != round(self.t, 2):
+            self._record()
+
+    def _on_dims_applied(self, msg):
+        try:
+            ok = bool(json.loads(msg.data).get("applied"))
+        except (ValueError, AttributeError):
+            ok = False
+        if ok and not self.dims_applied:
+            self._event("arena dimensions applied from the GCS")
+        self.dims_applied = getattr(self, "dims_applied", False) or ok
+
     def _start_and_stop(self):
-        # Once a second until the tree takes it: every START resets it.
-        if not self.started and self.t >= self.args.start_after_s:
+        # Once a second until the tree takes it: every START resets it. With
+        # the operator's path, START waits for the dimensions, as on the day.
+        ready = (getattr(self, "dims_applied", False)
+                 or not getattr(self.args, "start_after_dimensions", False))
+        if not self.started and ready and self.t >= self.args.start_after_s:
             if self.mission_state not in ("", "WAITING", "PREFLIGHT"):
                 self.started = True
                 self._event(f"mission started ({self.mission_state})")
@@ -1129,9 +1317,18 @@ class HeadlessWorld(Node):
                 self.pub_start.publish(Bool(data=True))
         finished = self.result is not None and not self.armed
         if finished and self.p[2] <= 0.05:
-            self.done = True
+            if self._finish_seen_s is None:
+                self._finish_seen_s = self.t
+                self._flush_terminal_observations()
+            if self.t-self._finish_seen_s >= TERMINAL_DRAIN_S:
+                self._flush_terminal_observations()
+                self.done = True
+        else:
+            self._finish_seen_s = None
         if self.t >= self.args.max_sim_s:
             self._event("sim time limit reached")
+            # A time cut records the real state, including a still-armed cut.
+            self._flush_terminal_observations()
             self.done = True
 
     def write(self, out):
@@ -1173,10 +1370,16 @@ def main():
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--hfov", type=float, default=0.851919)
     ap.add_argument("--vel-response-s", type=float, default=0.6)
+    ap.add_argument("--vel-command-delay-s", type=float, default=0.4)
     ap.add_argument("--rtf", type=float, default=2.0)
     ap.add_argument("--start-after-s", type=float, default=8.0)
+    ap.add_argument("--start-after-dimensions", action="store_true",
+                    help="hold START until mission_bt reports the GCS's arena "
+                         "dimensions applied")
     ap.add_argument("--max-sim-s", type=float, default=1200.0)
     args, _ = ap.parse_known_args()
+    if not math.isfinite(args.vel_command_delay_s) or args.vel_command_delay_s < 0:
+        ap.error('--vel-command-delay-s must be finite and non-negative')
     rclpy.init()
     node = HeadlessWorld(args)
     spin = threading.Thread(target=rclpy.spin, args=(node,), daemon=True)

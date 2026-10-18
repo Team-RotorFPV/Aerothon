@@ -110,7 +110,7 @@ class ShippedLaneStressTests(slalom.SlalomTraverseTests):
 
     def _through(self, **kw):
         _, closest, _ = self.fly(13.8, -4.0, math.pi, goal_x=4.5, max_t=150, **kw)
-        self.assertGreaterEqual(closest, slalom.AIRFRAME_R)
+        self.assertGreaterEqual(closest, 0.70,str(self.closest_detail))
 
     def test_gusty_crosswind(self):
         for seed in each_seed(self):
@@ -145,7 +145,7 @@ class SplitLaneStressTests(slalom.CustomSlalomTests):
         self.lane(*SPLIT)
         _, closest, _ = self.fly(self.L - 0.7, 0.0, math.pi, goal_x=0.3,
                                  max_t=150, **kw)
-        self.assertGreaterEqual(closest, slalom.AIRFRAME_R)
+        self.assertGreaterEqual(closest, 0.70,str(self.closest_detail))
 
     def test_gusty_crosswind(self):
         for seed in each_seed(self):

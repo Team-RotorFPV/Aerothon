@@ -1,52 +1,21 @@
 #!/usr/bin/env python3
-"""Winch state machine with feedback and gated payload release.
+"""Winch command adapter with estimated travel and release-request interlocks.
 
-WHY THIS EXISTS
-    /winch/cmd had two publishers (the behaviour tree and the GCS) and ZERO
-    subscribers. Payload delivery — the thing Mission 2 actually scores — was
-    a string published into the void, and WinchDrop "succeeded" after a fixed
-    20-tick delay whether or not anything had moved.
+The drone commands lower, stop and stow. Travel is integrated from commanded
+motor rate; no encoder or contact/attachment sensor is present. The Gazebo
+backend sends commanded payout only. Simulator contact release is a separate
+component, and this node has no simulator-truth subscription.
 
-WHAT IS AND IS NOT MODELLED
-    This node is the real controller: the command interface, the state machine,
-    the payout integration, the ground-contact trigger and the release
-    interlocks are all genuine, and the same node runs against hardware with
-    `backend:=mavlink` driving MAV_CMD_DO_WINCH.
+Hardware uses MAV_CMD_DO_WINCH, or with backend:=gpio the Pi drives the
+BTS7960 directly and MEASURES travel from the N20 quadrature encoder
+(gpio_winch.py); payout is then measured line movement, not an estimate.
+Repeated motion intents are idempotent; stop sends rate-control zero, not
+another full-length movement.
 
-    backend:=sim      payout integrated from the commanded rate, nothing moves.
-                      Proves the SEQUENCE and the INTERLOCKS only.
-    backend:=gazebo   the same integration, plus the payout is sent to the
-                      Iris's winch joint (/winch/gz/payout, bridged) so a real
-                      100 g payload goes down on the hook, and a release sends
-                      /winch/gz/detach so it physically leaves it. Whether it
-                      actually did is for the CAMERA to say (WinchDrop's
-                      confirmation), not for this node's own flag.
-    backend:=mavlink  MAV_CMD_DO_WINCH on the aircraft.
-
-    Ground contact is still inferred from the aircraft's altitude in every
-    backend; the line is a rigid vertical rod in Gazebo, with no swing.
-
-INTERFACE
-    sub  /winch/cmd      std_msgs/String   "lower" | "release" | "stow" | "stop"
-    pub  /winch/status   std_msgs/String   JSON, 5 Hz
-
-    status fields:
-        state        IDLE | LOWERING | AT_GROUND | RELEASED | STOWING | FAULT
-        payout_m     metres of line paid out
-        at_limit     payout has reached max_payout_m
-        ground       ground contact inferred
-        released     payload has left the hook
-        fault        reason string, empty when healthy
-        release_ok   whether a release command would currently be accepted
-        blockers     list of unmet release preconditions
-
-RELEASE INTERLOCKS (all must hold)
-    * payload is at the ground, or payout is at the commanded limit
-    * aircraft altitude within [min_release_alt, max_release_alt]
-    * hover stable: horizontal speed below a threshold for N samples
-    * no fault
-    Releasing a 100 g payload from the wrong height or while drifting is how
-    you miss the delivery zone, so this refuses rather than guesses.
+/winch/status reports payout_estimate_m and payout_basis. Legacy payout_m
+is the same estimate. ground, released and hook_open are unknown. The
+release_requested field records command acceptance, never physical release.
+Delivery confirmation belongs to the onboard camera/load observer.
 """
 
 import json
@@ -55,8 +24,8 @@ import math
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
-from geometry_msgs.msg import Pose, PoseStamped, TwistStamped
-from std_msgs.msg import Empty, Float64, String
+from geometry_msgs.msg import PoseStamped, TwistStamped
+from std_msgs.msg import Float64, String
 
 try:
     from mavros_msgs.srv import CommandLong
@@ -65,7 +34,7 @@ except ImportError:
     _HAVE_MAVROS = False
 
 MAV_CMD_DO_WINCH = 42600
-WINCH_RELAXED, WINCH_RELATIVE_LENGTH_CONTROL = 0, 1
+WINCH_RELAXED, WINCH_RELATIVE_LENGTH_CONTROL, WINCH_RATE_CONTROL = 0, 1, 2
 
 VALID_COMMANDS = ("lower", "release", "stow", "stop")
 
@@ -74,7 +43,7 @@ class WinchNode(Node):
     def __init__(self, **kwargs):
         super().__init__("winch_ctrl", **kwargs)
         p = self.declare_parameter
-        p("backend", "sim")                  # sim | gazebo | mavlink
+        p("backend", "sim")                  # sim | gazebo | mavlink | gpio
         p("payout_rate_mps", 0.30)           # line speed
         p("max_payout_m", 6.0)               # spool capacity
         p("ground_clearance_m", 0.25)        # payload considered down within this
@@ -84,6 +53,10 @@ class WinchNode(Node):
         p("hover_stable_samples", 5)
         p("publish_rate_hz", 5.0)
         p("stow_rate_mps", 0.45)
+        # backend:=mavlink -- the FC's WNCH_RATE_MAX, at which ArduPilot's
+        # relative-length control actually reels (it ignores the requested
+        # rate). Must equal the parameter loaded on the FC.
+        p("fc_rate_max_mps", 0.30)
         # HOW THE PAYLOAD LEAVES THE HOOK.
         #   gravity  the team's mechanism: a motor lowers a gravity-assisted
         #            hook that lets go by itself once the payload rests on the
@@ -91,18 +64,33 @@ class WinchNode(Node):
         #            nothing is sent to open anything.
         #   command  an actuated release: "release" opens the hook.
         p("hook", "gravity")
-        # Gazebo backend, gravity hook: the payload counts as resting when its
-        # centre is within this of its resting height (half its 0.08 m).
-        p("payload_rest_z_m", 0.06)
-        # A gravity hook needs SLACK to let go: the payload on the ground and
-        # the line still paying out. "Down" is therefore line out to the
-        # altitude PLUS this -- not minus ground_clearance_m, which stopped the
-        # payload 0.19 m up, hanging, and flew it home (first flight on the
-        # team airframe). The payload touches ~0.16 m before the hook reaches
-        # the ground, so this leaves about a quarter metre of slack.
+        p("external_joint_feedback", False)
+        # Legacy release-request travel interlock, never touchdown evidence.
         p("gravity_slack_m", 0.10)
+        # backend:=gpio -- BCM pins from hardware_wiring.yaml; the encoder
+        # resolution, spool radius and lowering direction are MEASURED values
+        # (0 = not measured, and the backend then refuses to start).
+        p("gpio_chip", 0)
+        p("gpio_rpwm", 18)
+        p("gpio_lpwm", 19)
+        p("gpio_r_en", 22)
+        p("gpio_l_en", 23)
+        p("gpio_encoder_a", 17)
+        p("gpio_encoder_b", 27)
+        p("pwm_hz", 1000.0)
+        p("drive_duty_pct", 60.0)
+        p("encoder_counts_per_output_rev", 0.0)
+        p("spool_radius_m", 0.0)
+        p("encoder_lower_sign", 1)
+        p("stall_timeout_s", 0.6)
+        p("stow_window_m", 0.15)
 
         self.backend = self.get_parameter("backend").value
+        self.measured_payout = None
+        self._measurement_t = None
+        if self.get_parameter("external_joint_feedback").value is True:
+            from sensor_msgs.msg import JointState
+            self.create_subscription(JointState, '/joint_states', self._on_measured_payout, qos_profile_sensor_data)
 
         self.state = "IDLE"
         self.payout = 0.0
@@ -124,61 +112,46 @@ class WinchNode(Node):
         self.cli_cmd = None
         if self.backend == "mavlink" and _HAVE_MAVROS:
             self.cli_cmd = self.create_client(CommandLong, "/mavros/cmd/command")
-        self.pub_gz_payout = self.pub_gz_detach = None
-        self._detach_sends = 0
-        self._payload_z = None
-        self._slack_hist = []        # (payout, payload z) per tick while lowering
-        self.hook_open = False       # the payload has physically left the hook
+        self.pub_gz_payout = None
+        self.hook_open = False       # no physical release sensor fitted
         if self.backend == "gazebo":
             self._enable_gazebo()
+        self.gpio = None
+        if self.backend == "gpio":
+            self._enable_gpio()
 
         self.create_timer(1.0 / float(self.get_parameter("publish_rate_hz").value),
                           self._tick)
         self.get_logger().info(f"winch_ctrl up; backend={self.backend}")
 
     def _enable_gazebo(self):
-        """The Iris winch joint's payout and the payload's detach (bridged)."""
+        """Publish commanded travel to the simulated winch joint."""
         self.backend = "gazebo"
         self.pub_gz_payout = self.create_publisher(Float64, "/winch/gz/payout", 10)
-        self.pub_gz_detach = self.create_publisher(Empty, "/winch/gz/detach", 10)
-        # The simulator's stand-in for the hook's own mechanics: it can only
-        # know the payload is resting from where the payload is.
-        self.create_subscription(Pose, "/sim/payload_pose", self._on_payload_pose,
-                                 qos_profile_sensor_data)
 
-    def _on_payload_pose(self, m):
-        self._payload_z = float(m.position.z)
+    def _enable_gpio(self, driver=None, clock=None):
+        """Start the measured GPIO winch, or fault closed with the reason."""
+        from winch_ctrl.gpio_winch import EncoderWinch, LgpioDriver
+        g = lambda name: self.get_parameter(name).value
+        try:
+            if driver is None:
+                driver = LgpioDriver(g("gpio_chip"), g("gpio_rpwm"), g("gpio_lpwm"),
+                                     g("gpio_r_en"), g("gpio_l_en"),
+                                     g("gpio_encoder_a"), g("gpio_encoder_b"),
+                                     g("pwm_hz"))
+            self.gpio = EncoderWinch(
+                driver, g("encoder_counts_per_output_rev"), g("spool_radius_m"),
+                lower_sign=g("encoder_lower_sign"), drive_duty_pct=g("drive_duty_pct"),
+                stall_timeout_s=g("stall_timeout_s"), stow_window_m=g("stow_window_m"),
+                **({"clock": clock} if clock else {}))
+        except (ImportError, OSError, RuntimeError, ValueError) as error:
+            self.gpio = None
+            self._set_fault(f"gpio winch unavailable: {error}")
 
-    def _gravity_hook(self):
-        """Gazebo only: let the payload go once the line goes slack.
-
-        SLACK, not "on the ground": the first fix tested the payload's height
-        against the bare ground, and the payload landed on the target pad,
-        8 cm up, where that never fired. What a gravity-assisted hook
-        responds to is the line paying out while the payload no longer
-        follows it: whatever it rests on, pad or grass. The height test stays
-        as a second way to see it.
-
-        And it matters in Gazebo more than in the air: the simulated line is
-        a rigid joint, so a hook still latched to a resting payload is driven
-        down against it and shoves the aircraft UP -- 1.3 m, watched.
-        """
-        if self.hook_open or self._payload_z is None or self.payout < 0.3:
-            self._slack_hist = []
-            return
-        self._slack_hist = (self._slack_hist + [(self.payout, self._payload_z)])[-4:]
-        (p0, z0), (p1, z1) = self._slack_hist[0], self._slack_hist[-1]
-        slack = (len(self._slack_hist) >= 3 and p1 - p0 >= 0.10
-                 and z0 - z1 < 0.25 * (p1 - p0))
-        resting = self._payload_z <= float(self.get_parameter("payload_rest_z_m").value)
-        if not (slack or resting):
-            return
-        self.hook_open = True
-        self._detach_sends = 5
-        self.get_logger().info(
-            f"gravity hook: {'line slack' if slack else 'payload on the ground'} "
-            f"(payload z {self._payload_z:.2f} m, {self.payout:.2f} m of line "
-            f"out) -- the hook lets go")
+    def destroy_node(self):
+        if getattr(self, "gpio", None) is not None:
+            self.gpio.close()
+        super().destroy_node()
 
     # ------------------------------------------------------------------ #
     def _now(self):
@@ -186,6 +159,14 @@ class WinchNode(Node):
 
     def _on_pose(self, m):
         self._alt = m.pose.position.z
+
+    def _on_measured_payout(self, msg):
+        if 'winch_payout' not in msg.name:
+            return
+        index = list(msg.name).index('winch_payout')
+        if index < len(msg.position) and math.isfinite(msg.position[index]) and msg.position[index] >= 0:
+            self.measured_payout = float(msg.position[index])
+            self._measurement_t = self._now()
 
     def _on_vel(self, m):
         v = m.twist.linear
@@ -205,10 +186,15 @@ class WinchNode(Node):
             return
 
         if cmd == "stop":
+            if self.state == "IDLE" or self.state == "RELEASED":
+                return
+            self._send_backend("stop")
             self.state = "IDLE" if not self.released else "RELEASED"
             return
 
         if cmd == "lower":
+            if self.state in ("LOWERING", "AT_LIMIT"):
+                return
             if self.released:
                 self._set_fault("cannot lower: payload already released")
                 return
@@ -237,6 +223,8 @@ class WinchNode(Node):
                 f"payout={self.payout:.2f} m")
 
         elif cmd == "stow":
+            if self.state == "STOWING":
+                return
             self.state = "STOWING"
             self._send_backend("stow")
 
@@ -246,35 +234,70 @@ class WinchNode(Node):
         self.get_logger().error(f"winch fault: {reason}")
 
     def _send_backend(self, action):
+        if self.backend == "gpio":
+            if self.gpio is None:
+                if action != "stop":
+                    self._set_fault(self.fault or "gpio winch unavailable")
+                return
+            if action in ("lower", "stow", "stop"):
+                if not self.gpio.command(action):
+                    self._set_fault(self.gpio.fault)
+            # A gravity hook has no release actuator; "release" is bookkeeping.
+            return
         if self.backend == "gazebo":
-            if action == "release" and self.get_parameter("hook").value == "command":
-                # A bridged Empty can be lost on a busy host; re-send for a
-                # few ticks (detaching an already-detached joint is a no-op).
-                self._detach_sends = 5
             return
         if self.backend != "mavlink" or self.cli_cmd is None:
             return
         if not self.cli_cmd.service_is_ready():
+            # The node used to enter LOWERING anyway and grow a payout
+            # estimate while nothing moved.
+            if action in ("lower", "stow"):
+                self._set_fault(f"winch {action} not sent: MAVROS command service unavailable")
             return
+        self._mav_gen = getattr(self, "_mav_gen", 0) + 1
+        self._mav_accepted = False
+        gen = self._mav_gen
         req = CommandLong.Request()
         req.command = MAV_CMD_DO_WINCH
         req.param1 = 1.0                                   # instance
         if action == "lower":
             req.param2 = float(WINCH_RELATIVE_LENGTH_CONTROL)
-            req.param3 = float(self.get_parameter("max_payout_m").value)
+            req.param3 = max(0.0, float(self.get_parameter("max_payout_m").value) - self.payout)
             req.param4 = float(self.get_parameter("payout_rate_mps").value)
         elif action == "stow":
             req.param2 = float(WINCH_RELATIVE_LENGTH_CONTROL)
-            req.param3 = -float(self.get_parameter("max_payout_m").value)
+            req.param3 = -float(self.payout)
             req.param4 = float(self.get_parameter("stow_rate_mps").value)
+        elif action == "stop":
+            req.param2 = float(WINCH_RATE_CONTROL)
+            req.param4 = 0.0
         else:
             req.param2 = float(WINCH_RELAXED)
-        self.cli_cmd.call_async(req)
+        future = self.cli_cmd.call_async(req)
+        if future is not None and hasattr(future, "add_done_callback"):
+            future.add_done_callback(
+                lambda f, action=action, gen=gen: self._on_mav_reply(f, action, gen))
+
+    def _on_mav_reply(self, future, action, gen):
+        if gen != getattr(self, "_mav_gen", 0):
+            return              # superseded by a later command
+        try:
+            reply = future.result()
+        except Exception as exc:  # noqa: BLE001
+            reply, why = None, str(exc)
+        else:
+            why = f"result {getattr(reply, 'result', None)}"
+        if reply is not None and reply.success and int(reply.result) == 0:
+            self._mav_accepted = True
+            return
+        if action in ("lower", "stow"):
+            self._set_fault(f"flight controller refused DO_WINCH {action} ({why})")
+        else:
+            self.get_logger().warning(f"DO_WINCH {action} not accepted ({why})")
 
     # ------------------------------------------------------------------ #
     def at_ground(self):
-        """Payload is down: line paid out to within a clearance of the alt,
-        or -- for a gravity hook -- past it, far enough for slack."""
+        """Legacy travel estimate for command interlocks, NOT contact evidence."""
         if self._alt is None:
             return False
         if self.get_parameter("hook").value == "gravity":
@@ -341,12 +364,7 @@ class WinchNode(Node):
         self._last_tick = now
         self.integrate(dt)
         if self.pub_gz_payout is not None:
-            if self.get_parameter("hook").value == "gravity":
-                self._gravity_hook()
             self.pub_gz_payout.publish(Float64(data=float(self.payout)))
-            if self._detach_sends > 0:
-                self.pub_gz_detach.publish(Empty())
-                self._detach_sends -= 1
         self.publish_status()
 
     def integrate(self, dt):
@@ -365,19 +383,49 @@ class WinchNode(Node):
                 if self.state == "FAULT":
                     self.state = "AT_GROUND" if self.at_ground() else "IDLE"
 
+        if self.backend == "gpio":
+            self._integrate_measured()
+            return
+        lower_rate = float(self.get_parameter("payout_rate_mps").value)
+        stow_rate = float(self.get_parameter("stow_rate_mps").value)
+        if self.backend == "mavlink":
+            # ArduPilot's length control ignores DO_WINCH's rate and reels at
+            # WNCH_RATE_MAX, both ways; and nothing moves before the FC accepts.
+            if not getattr(self, "_mav_accepted", False):
+                return
+            lower_rate = stow_rate = float(self.get_parameter("fc_rate_max_mps").value)
         if self.state == "LOWERING":
             self.payout = min(
                 float(self.get_parameter("max_payout_m").value),
-                self.payout + float(self.get_parameter("payout_rate_mps").value) * dt)
-            if self.at_ground() or self.at_limit():
-                self.state = "AT_GROUND"
+                self.payout + lower_rate * dt)
+            if self.at_limit():
+                self.state = "AT_LIMIT"
         elif self.state == "STOWING":
             self.payout = max(
                 0.0,
-                self.payout - float(self.get_parameter("stow_rate_mps").value) * dt)
+                self.payout - stow_rate * dt)
             if self.payout <= 1e-3:
                 self.payout = 0.0
                 self.state = "RELEASED" if self.released else "IDLE"
+
+    def _integrate_measured(self):
+        """Measured encoder travel drives the same state machine."""
+        if self.gpio is None:
+            return
+        event = self.gpio.update()
+        self.payout = max(0.0, self.gpio.payout_m())
+        self.measured_payout = self.payout
+        self._measurement_t = self._now()
+        if event == "fault":
+            self._set_fault(self.gpio.fault)
+            return
+        if self.state == "LOWERING" and self.at_limit():
+            self.gpio.stop()
+            self.state = "AT_LIMIT"
+        elif self.state == "STOWING" and (event == "stowed" or self.payout <= 1e-3):
+            self.gpio.stop()
+            self.payout = 0.0
+            self.state = "RELEASED" if self.released else "IDLE"
 
     def publish_status(self):
         ok, blockers = self.release_ok()
@@ -385,10 +433,16 @@ class WinchNode(Node):
             "state": self.state,
             "payout_m": round(self.payout, 3),
             "at_limit": self.at_limit(),
-            "ground": self.at_ground(),
-            "released": self.released,
+            "ground": None,  # no contact sensor; travel cannot establish touchdown
+            "payout_estimate_m": round(self.payout, 3),
+            "measured_payout_m": self.measured_payout,
+            "measurement_age_s": None if self._measurement_t is None else max(0.0, self._now()-self._measurement_t),
+            "payout_basis": ("measured N20 encoder travel" if self.gpio is not None
+                             else "integrated commanded motor rate; no encoder"),
+            "released": None,
+            "release_requested": self.released,
             "hook": self.get_parameter("hook").value,
-            "hook_open": self.hook_open,
+            "hook_open": None,
             "fault": self.fault,
             "release_ok": ok,
             "blockers": blockers,

@@ -167,7 +167,7 @@ class ReturnGateSearchTests(unittest.TestCase):
         self.assertTrue(legs)
         self.assertTrue(all(z == leaf.transit_alt for z in legs), legs)
         i = mav.camera_poses.index("NADIR")
-        self.assertEqual(mav.camera_poses[i + 1], "BANNER",
+        self.assertEqual(mav.camera_poses[i + 1], leaf.look_pose,
                          "the camera did not come back up once lowered")
 
     def test_a_board_the_look_tilt_misses_is_found_level(self):

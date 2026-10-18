@@ -1,0 +1,34 @@
+{
+ "problem": "Pi runs bundle 20261015d; bundle e predates the arena-reading search changes (the judges' six points enclose the whole arena)",
+ "scope": "bundle f from the tested final tree: arena_lane_overlap 0.20, near-end sweep start, search_deadline_extension_s 300 (user's choice, flight may exceed 900 s), ensure_failed_recovery, device-link reopen fix, six-point geofence role detection",
+ "status": "installed on the Pi (wired 192.168.0.103): 256 files verified, 12 changed, 13 packages built, check_pi_runtime 32/32 PASS, GCS serves index-BeyGBmkV.js; two simulated Pi-GCS missions flown, both Failed safely and disarmed",
+ "bundle": "logs/pi-runtime-rulebook-20261015f.zip",
+ "sha256": "56d62a903015021bab1af4003998afa4e063b61a9a44d46f2eaa348ef9bb9385",
+ "files": 256,
+ "markdown_documents": [
+  "AGENTS.md",
+  "MASTER_DOCUMENTATION.md"
+ ],
+ "supersedes": "logs/pi-runtime-rulebook-20261015e.zip (02f13df0..., never installed)",
+ "evidence": {
+  "offline": "logs/offline_arena_final_20261015.log: 2021 passed, 18 skipped; native 12 passed; syntax, shell, XML/YAML, frontend ok; ALL IN-SCOPE OFFLINE CHECKS PASSED",
+  "rendered_arena_final": "logs/s3_arena6_nearstart_calm_h115_both_appearance_s20261003: COMPLETED 22/22, flight 490.0 s, payload 0.21 m, corridor 0.76 m, red 3.38 m, landed 0.12 m",
+  "rendered_arena_far_target_case": "logs/s3_arena6_ext300_calm_h115_both_appearance_s20261003: COMPLETED 21/22, delivered 0.14 m, flight 914.1 s (only the 900 s check failed; before the near-end start)",
+  "rendered_delivery_zone": "logs/s3_zone6_calm_h115_both_appearance_s20261003: COMPLETED 22/22 (bundle-e tree; zone reading unchanged since except the recovery retry and deadline extension)"
+ },
+ "blockers": [
+  "Pi compute headroom: MAVROS CPU and thermal throttling must be reduced before a Pi-in-the-loop mission can pass",
+  "hardware: winch encoder counts/spool radius, loaded/unloaded hover calibration, camera tilt travel"
+ ],
+ "completion": "installed on the Pi with check_pi_runtime passing and one full simulated mission flown through the Pi GCS",
+ "pi_install": {
+  "before_receipt": "/home/pi5/aerothon-deploy/before-rulebook-20261015f.json",
+  "rollback_backup_sha256": "a8c91dccbc6c00dd8501e8ff55a18d1deb57acae9ba4073773d4da3214d371bd",
+  "build_log": ".scratch/pi_deploy_20261015/build_and_check_f.log"
+ },
+ "pi_missions": {
+  "attempt1": "logs/pi_f_mission_20261015 (GateAdvance stale capture times; Pi on phone-hotspot Wi-Fi, RTT spikes to 885 ms)",
+  "attempt2": "logs/pi_f_mission2_20261015 (AlignToBanner found no banner; Pi load average 12.5 on 4 cores, MAVROS 100% CPU, 77 C with soft-temperature throttle flag, camera 6.9 Hz vs 10 required, banner detector 1.8 Hz)"
+ },
+ "pi_link_changes": "Wi-Fi power save turned off (until reboot); temporary iptables DNAT 192.168.0.100->192.168.0.104 added and removed; laptop-sim profile host/gateway now 192.168.0.104; relay stopped"
+}

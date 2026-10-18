@@ -178,8 +178,12 @@ def main():
                     f"FCU home ({home_lat}, {home_lon}) is not a usable "
                     "position yet; still waiting")
                 return
-            self.pub.publish(String(data=boundary_payload(
-                self.cx, self.cy, self.width, self.height, home_lat, home_lon)))
+            # AEROTHON_FENCE_ONLY=1: the judges give only the geofence, and
+            # the mission searches the fenced field beyond the corridor.
+            fence_only = os.environ.get("AEROTHON_FENCE_ONLY", "0") == "1"
+            if not fence_only:
+                self.pub.publish(String(data=boundary_payload(
+                    self.cx, self.cy, self.width, self.height, home_lat, home_lon)))
             self.pub_fence.publish(String(data=geofence_payload(
                 self.fence, home_lat, home_lon)))
             verts = fence_vertices(self.fence)
@@ -189,6 +193,9 @@ def main():
                     len(verts), min(v[0] for v in verts), max(v[0] for v in verts),
                     min(v[1] for v in verts), max(v[1] for v in verts)))
             self.sent = True
+            if fence_only:
+                self.get_logger().info("fence only: no delivery-zone boundary published")
+                return
             half_w, half_h = self.width / 2.0, self.height / 2.0
             self.get_logger().info(
                 f"published delivery-zone boundary about home {home_lat:.7f} "

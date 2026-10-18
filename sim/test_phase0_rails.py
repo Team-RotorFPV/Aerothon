@@ -429,9 +429,11 @@ class TestBannerClipped(RailTestCase):
     def detail(self, box):
         import json
         from std_msgs.msg import String
+        captured = self.node.get_clock().now().nanoseconds * 1e-9
         self.mav._on_banner_detail(String(data=json.dumps(
             {"identified": True, "board_px": box, "board_area_px": 1,
-             "image_wh": [1280, 720]})))
+             "image_wh": [1280, 720], "capture_stamp": captured,
+             "processed_stamp": captured})))
         return self.mav.banner_clipped
 
     def test_a_board_inside_the_frame_is_whole(self):

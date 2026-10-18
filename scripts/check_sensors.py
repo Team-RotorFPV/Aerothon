@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Measure the flight sensors on the aircraft before the first flight.
 
-    python3 scripts/check_sensors.py lidar     # LD06 mount yaw and direction
+    python3 scripts/check_sensors.py lidar     # lidar mount yaw and direction
     python3 scripts/check_sensors.py camera    # C270 rate, exposure, sharpness
 
 Run with the bring-up up (use_sim:=false). Nothing in the sim can find these:
@@ -9,7 +9,7 @@ Gazebo mounts the lidar exactly on the nose and scans the way the stack
 expects, and a real one is wherever the bracket put it.
 
 lidar: asks for a box held 1 m ahead of the nose, then 1 m to port, reads
-where each shows up in the driver's raw scan (/scan_raw) and prints the
+where each shows up in the lidar-frame scan (/scan_raw) and prints the
 lidar_yaw_deg / lidar_mirrored launch arguments that put them at 0 and +90.
 camera: reports frame rate, resolution, brightness and clipping, and the
 Laplacian sharpness of a still frame, so a smeared or dark stream is caught
@@ -28,27 +28,9 @@ from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Image, LaserScan
 
-SELF_M = 0.3          # nearer than this is the airframe or the bracket
-
-
-def nearest_bearing(scan):
-    """Raw-frame bearing (deg) and range of the nearest return."""
-    r = np.asarray(scan.ranges, dtype=float)
-    r[~np.isfinite(r) | (r < max(SELF_M, scan.range_min))] = np.inf
-    i = int(np.argmin(r))
-    if not np.isfinite(r[i]):
-        return None
-    a = scan.angle_min + i * scan.angle_increment
-    return math.degrees(math.atan2(math.sin(a), math.cos(a))), float(r[i])
-
-
-def solve_mount(front_deg, port_deg):
-    """(lidar_yaw_deg, mirrored) that put `front` on the nose and `port` at
-    +90: body = raw + yaw, or -raw + yaw when the driver runs clockwise."""
-    turn = (port_deg - front_deg + 180.0) % 360.0 - 180.0
-    mirrored = turn < 0.0
-    yaw = front_deg if mirrored else -front_deg
-    return (yaw + 180.0) % 360.0 - 180.0, mirrored, abs(abs(turn) - 90.0)
+# The mount arithmetic is shared with the GCS's calibration mode.
+from gcs_aggregator.lidar_calibration import (  # noqa: E402,F401
+    SELF_M, nearest_bearing, solve_mount)
 
 
 class Probe(Node):
@@ -74,10 +56,10 @@ class Probe(Node):
 def check_lidar(probe):
     scans, hz = probe.collect(3.0)
     if not scans:
-        sys.exit("FAIL: nothing on /scan_raw -- is the LD06 driver running?")
+        sys.exit("FAIL: nothing on /scan_raw -- is the lidar driver running?")
     s = scans[-1]
     valid = np.isfinite(np.asarray(s.ranges, dtype=float)).mean()
-    print(f"/scan_raw {hz:.1f} Hz (LD06: ~10), {len(s.ranges)} beams, "
+    print(f"/scan_raw {hz:.1f} Hz (C1 or LD06: ~10), {len(s.ranges)} beams, "
           f"angle_min {math.degrees(s.angle_min):.0f} deg, increment "
           f"{math.degrees(s.angle_increment):+.2f} deg, {valid:.0%} returns")
     seen = []

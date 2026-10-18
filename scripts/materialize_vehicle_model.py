@@ -372,11 +372,15 @@ def main() -> None:
             if parent is not None and parent.text == "base_link":
                 parent.text = base_link_ref
         model.append(element)
+    from vehicle_contact_sensors import attach_vehicle_contact_sensors
+    contact_channels=attach_vehicle_contact_sensors(model)
     ET.indent(tree, space="  ")
 
     model_dir = args.output_root / "aerothon_iris_c1_webcam"
     model_dir.mkdir(parents=True, exist_ok=True)
     tree.write(model_dir / "model.sdf", encoding="utf-8", xml_declaration=True)
+    import json
+    (model_dir/'vehicle_contact_sensors.json').write_text(json.dumps(contact_channels,indent=2))
     (model_dir / "model.config").write_text(
         """<?xml version="1.0"?>
 <model><name>AeroTHON Iris C1 Webcam</name><version>1.0</version>

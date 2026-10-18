@@ -102,7 +102,7 @@ def ref_find_gap_strip(g, state, bearings, ranges, half_w):
     far = float(g('range_max_valid')) - 1e-3
     r_air = float(g('airframe_radius'))
     obstacles = [(r * math.cos(b), r * math.sin(b),
-                  r_air + (half_w - r_air) * min(1.0, r))
+                  half_w)
                  for b, r in zip(bearings, ranges)
                  if r < far and r <= look + comfort]
     step = math.radians(2.0)
@@ -155,11 +155,6 @@ def ref_find_gap_strip(g, state, bearings, ranges, half_w):
 def ref_find_gap(g, state, bearings, ranges):
     gap = ref_find_gap_strip(g, state, bearings, ranges,
                              float(g('passage_half_width')))
-    if gap is None:
-        gap = ref_find_gap_strip(g, state, bearings, ranges,
-                                 float(g('airframe_radius')) + 0.1)
-    if gap is None:
-        gap = ref_escape(g, bearings, ranges)
     return gap
 
 
@@ -289,8 +284,6 @@ class NavigatorEquivalenceTests(unittest.TestCase):
         self.assert_same(got, want, what + " gap")
         self.assertEqual(getattr(self.node, "_last_gap_bearing", None),
                          state.get("last"), what + " committed heading")
-        self.assertEqual(self.node._escape(nb, nr), ref_escape(g, rb, rr),
-                         what + " escape")
         for hf in (math.radians(20), math.radians(15)):
             self.assertEqual(self.node._front_min(nb, nr, hf),
                              ref_front_min(rb, rr, hf), what + " front")

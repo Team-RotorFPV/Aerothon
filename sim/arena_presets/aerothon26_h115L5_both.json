@@ -1,0 +1,39 @@
+{
+  "name": "Aerothon 2026 sim, banner 1.15 m, both, 5 m corridors",
+  "dimensions": {
+    "corridor": {
+      "length_m": 5.0,
+      "width_m": 3.5,
+      "wall_height_m": 3.048,
+      "nav_height_m": 2.4384,
+      "spacing_m": 4.0,
+      "return_side": "right"
+    },
+    "hall": {
+      "length_m": 80.0,
+      "width_m": 45.0,
+      "ceiling_m": 30.0
+    },
+    "banner": {
+      "width_m": 3.5,
+      "height_m": 1.15,
+      "border_m": 0.07619999999999999,
+      "suspended_bottom_m": 1.898,
+      "placement": "both"
+    },
+    "qr": {
+      "target_m": 1.0,
+      "start_m": 1.0,
+      "border_m": 0.07619999999999999
+    },
+    "red_zone": {
+      "side_m": 1.524,
+      "border_m": 0.1524
+    },
+    "payload": {
+      "length_m": 0.1,
+      "width_m": 0.055,
+      "mass_kg": 0.1
+    }
+  }
+}

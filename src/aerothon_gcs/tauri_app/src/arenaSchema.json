@@ -1,0 +1,321 @@
+{
+  "fields": [
+    {
+      "group": "corridor",
+      "key": "length_m",
+      "label": "Corridor length",
+      "default": 10.0,
+      "min": 2.0,
+      "max": 30.0,
+      "used_by": "clear distance needed to cross the gate"
+    },
+    {
+      "group": "corridor",
+      "key": "width_m",
+      "label": "Corridor width",
+      "default": 3.5,
+      "min": 1.0,
+      "max": 10.0,
+      "used_by": null
+    },
+    {
+      "group": "corridor",
+      "key": "wall_height_m",
+      "label": "Corridor wall height",
+      "default": 3.6,
+      "min": 1.0,
+      "max": 8.0,
+      "used_by": "upper bound on the navigation height"
+    },
+    {
+      "group": "corridor",
+      "key": "nav_height_m",
+      "label": "Navigation height",
+      "default": 3.0,
+      "min": 0.8,
+      "max": 7.0,
+      "used_by": "corridor flying altitude"
+    },
+    {
+      "group": "corridor",
+      "key": "spacing_m",
+      "label": "Corridor spacing, centre to centre",
+      "default": 4.0,
+      "min": 1.0,
+      "max": 30.0,
+      "used_by": "where the return lane is found"
+    },
+    {
+      "group": "hall",
+      "key": "length_m",
+      "label": "Hall length",
+      "default": 80.0,
+      "min": 10.0,
+      "max": 500.0,
+      "used_by": null
+    },
+    {
+      "group": "hall",
+      "key": "width_m",
+      "label": "Hall width",
+      "default": 45.0,
+      "min": 10.0,
+      "max": 500.0,
+      "used_by": null
+    },
+    {
+      "group": "hall",
+      "key": "ceiling_m",
+      "label": "Hall ceiling / max altitude",
+      "default": 30.0,
+      "min": 3.0,
+      "max": 120.0,
+      "used_by": "caps take-off, search and drop altitudes"
+    },
+    {
+      "group": "banner",
+      "key": "width_m",
+      "label": "Banner width",
+      "default": 3.7,
+      "min": 0.3,
+      "max": 10.0,
+      "used_by": "range to the banner"
+    },
+    {
+      "group": "banner",
+      "key": "height_m",
+      "label": "Banner height",
+      "default": 1.15,
+      "min": 0.2,
+      "max": 5.0,
+      "used_by": "range to the banner"
+    },
+    {
+      "group": "banner",
+      "key": "border_m",
+      "label": "Banner border",
+      "default": 0.07619999999999999,
+      "min": 0.0,
+      "max": 0.5,
+      "used_by": null
+    },
+    {
+      "group": "banner",
+      "key": "suspended_bottom_m",
+      "label": "Hung banner lower edge",
+      "default": 2.805,
+      "min": 0.5,
+      "max": 8.0,
+      "used_by": "the height the square-up scans the hung banner at"
+    },
+    {
+      "group": "qr",
+      "key": "target_m",
+      "label": "Target QR side",
+      "default": 2.2,
+      "min": 0.2,
+      "max": 5.0,
+      "used_by": "search altitude and landing"
+    },
+    {
+      "group": "qr",
+      "key": "start_m",
+      "label": "Start QR side",
+      "default": 2.2,
+      "min": 0.2,
+      "max": 5.0,
+      "used_by": "precision landing on the start QR"
+    },
+    {
+      "group": "qr",
+      "key": "border_m",
+      "label": "QR white border",
+      "default": 0.07619999999999999,
+      "min": 0.0,
+      "max": 0.5,
+      "used_by": null
+    },
+    {
+      "group": "red_zone",
+      "key": "side_m",
+      "label": "Red zone side",
+      "default": 1.524,
+      "min": 0.3,
+      "max": 20.0,
+      "used_by": null
+    },
+    {
+      "group": "red_zone",
+      "key": "border_m",
+      "label": "Red zone border",
+      "default": 0.1524,
+      "min": 0.0,
+      "max": 2.0,
+      "used_by": null
+    },
+    {
+      "group": "payload",
+      "key": "length_m",
+      "label": "Payload length",
+      "default": 0.1,
+      "min": 0.02,
+      "max": 0.5,
+      "used_by": "drop confirmation blob size"
+    },
+    {
+      "group": "payload",
+      "key": "width_m",
+      "label": "Payload width",
+      "default": 0.055,
+      "min": 0.02,
+      "max": 0.5,
+      "used_by": "drop confirmation blob size"
+    },
+    {
+      "group": "payload",
+      "key": "mass_kg",
+      "label": "Payload mass (kg)",
+      "default": 0.1,
+      "min": 0.01,
+      "max": 2.0,
+      "used_by": null
+    },
+    {
+      "group": "obstacle",
+      "key": "reach_frac",
+      "label": "Obstacle reach, fraction of corridor width",
+      "default": 0.5,
+      "min": 0.1,
+      "max": 0.9,
+      "used_by": null
+    }
+  ],
+  "defaults": {
+    "corridor": {
+      "length_m": 10.0,
+      "width_m": 3.5,
+      "wall_height_m": 3.6,
+      "nav_height_m": 3.0,
+      "spacing_m": 4.0,
+      "return_side": "right"
+    },
+    "hall": {
+      "length_m": 80.0,
+      "width_m": 45.0,
+      "ceiling_m": 30.0
+    },
+    "banner": {
+      "width_m": 3.7,
+      "height_m": 1.15,
+      "border_m": 0.07619999999999999,
+      "suspended_bottom_m": 2.805,
+      "placement": "suspended"
+    },
+    "qr": {
+      "target_m": 2.2,
+      "start_m": 2.2,
+      "border_m": 0.07619999999999999
+    },
+    "red_zone": {
+      "side_m": 1.524,
+      "border_m": 0.1524
+    },
+    "payload": {
+      "length_m": 0.1,
+      "width_m": 0.055,
+      "mass_kg": 0.1
+    },
+    "obstacle": {
+      "reach_frac": 0.5
+    }
+  },
+  "presets": {
+    "Simulator arena": {
+      "corridor": {
+        "length_m": 10.0,
+        "width_m": 3.5,
+        "wall_height_m": 3.6,
+        "nav_height_m": 3.0,
+        "spacing_m": 4.0,
+        "return_side": "right"
+      },
+      "hall": {
+        "length_m": 80.0,
+        "width_m": 45.0,
+        "ceiling_m": 30.0
+      },
+      "banner": {
+        "width_m": 3.7,
+        "height_m": 1.15,
+        "border_m": 0.07619999999999999,
+        "suspended_bottom_m": 2.805,
+        "placement": "suspended"
+      },
+      "qr": {
+        "target_m": 2.2,
+        "start_m": 2.2,
+        "border_m": 0.07619999999999999
+      },
+      "red_zone": {
+        "side_m": 1.524,
+        "border_m": 0.1524
+      },
+      "payload": {
+        "length_m": 0.1,
+        "width_m": 0.055,
+        "mass_kg": 0.1
+      },
+      "obstacle": {
+        "reach_frac": 0.5
+      }
+    },
+    "SAE Aerothon 2026 (clarified)": {
+      "corridor": {
+        "length_m": 10.0,
+        "width_m": 3.5,
+        "wall_height_m": 3.048,
+        "nav_height_m": 2.4384,
+        "spacing_m": 4.0,
+        "return_side": "right"
+      },
+      "hall": {
+        "length_m": 80.0,
+        "width_m": 45.0,
+        "ceiling_m": 30.0
+      },
+      "banner": {
+        "width_m": 3.5,
+        "height_m": 1.15,
+        "border_m": 0.07619999999999999,
+        "suspended_bottom_m": 1.8980000000000001,
+        "placement": "suspended"
+      },
+      "qr": {
+        "target_m": 1.0,
+        "start_m": 1.0,
+        "border_m": 0.07619999999999999
+      },
+      "red_zone": {
+        "side_m": 1.524,
+        "border_m": 0.1524
+      },
+      "payload": {
+        "length_m": 0.1,
+        "width_m": 0.055,
+        "mass_kg": 0.1
+      },
+      "obstacle": {
+        "reach_frac": 0.5
+      }
+    }
+  },
+  "placements": [
+    "suspended",
+    "ground",
+    "both"
+  ],
+  "return_sides": [
+    "right",
+    "left"
+  ]
+}

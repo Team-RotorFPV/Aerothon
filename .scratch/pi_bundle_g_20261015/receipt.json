@@ -1,0 +1,18 @@
+{
+ "problem": "Pi CPU overload in Pi-GCS laptop-sim missions (load 12.5 on 4 cores, MAVROS 100% CPU, 77 C throttle flag)",
+ "scope": "bundle f plus a MAVROS plugin allowlist (15 plugins serving every /mavros topic and service in src/ and scripts/) in mission2.launch.py; no flight decision changed",
+ "status": "installed on the Pi (192.168.0.103 wired): 256 files verified, 1 changed, 13 packages built, check_pi_runtime 32 PASS 0 FAIL; installed launch carries plugin_allowlist; runtime disconnected",
+ "bundle": "logs/pi-runtime-rulebook-20261015g.zip",
+ "sha256": "de60f4bd2a115014194453ea4c2b4cab1b7da3bdd07dda705eb699edcbe34802",
+ "rollback_backup_sha256": "6220273ce5f4473a77c025c9bb3535019fff7d9c54ce43eac4b1fbe12645b24c",
+ "evidence": {
+  "allowlist_rendered_partial": "logs/s3_arena6_mavros15_calm_h115_both_appearance_s20261003: exactly 15 plugins loaded, fence upload, arm and takeoff passed; laptop MAVROS about 36% CPU against about 160% before; full grade pending at install time",
+  "previous": ".scratch/pi_bundle_f_20261015/receipt.json"
+ },
+ "blockers": [
+  "Pi cooling: 77 C with soft-temperature throttle flag",
+  "real drone delivery calibration (loaded/unloaded hover) absent on the Pi: AEROTHON_DELIVERY_CALIBRATION empty, so a real drop fails closed",
+  "winch encoder counts/spool radius, camera tilt travel",
+  "full offline suite not rerun after the allowlist (launch-only change)"
+ ]
+}
